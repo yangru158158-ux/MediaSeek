@@ -1,0 +1,43 @@
+name: Build Unsigned IPA
+# 免费侧载路线:产出未签名 IPA,下载后用 Sideloadly 在 Windows 上签名安装(7 天有效期)
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  ipa:
+    runs-on: macos-15
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 XcodeGen
+        run: brew install xcodegen
+
+      - name: 生成 Xcode 工程
+        run: xcodegen generate
+
+      - name: 编译未签名 .app 并打包 IPA
+        run: |
+          xcodebuild -project MediaSeek.xcodeproj \
+            -scheme MediaSeek \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            -derivedDataPath build/dd build
+          APP=$(find build/dd/Build/Products -maxdepth 3 -name "*.app" | head -1)
+          echo "APP=$APP"
+          rm -rf Payload MediaSeek-unsigned.ipa
+          mkdir Payload
+          cp -R "$APP" Payload/
+          zip -qry MediaSeek-unsigned.ipa Payload
+          ls -lh MediaSeek-unsigned.ipa
+
+      - name: 上传 IPA 供下载
+        uses: actions/upload-artifact@v4
+        with:
+          name: MediaSeek-unsigned-ipa
+          path: MediaSeek-unsigned.ipa
+          retention-days: 90
