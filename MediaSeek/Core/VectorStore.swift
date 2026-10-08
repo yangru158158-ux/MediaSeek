@@ -117,14 +117,15 @@ final class VectorStore {
         """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
-        var v = vector
-        let blobSize = v.count * MemoryLayout<Float>.size
-        try v.withUnsafeMutableBytes { raw in
+        let v = vector
+        let dim = v.count
+        let blobSize = dim * MemoryLayout<Float>.size
+        try v.withUnsafeBytes { raw in
             sqlite3_bind_text(stmt, 1, kind.rawValue, -1, Self.transient)
             sqlite3_bind_text(stmt, 2, refKey, -1, Self.transient)
             sqlite3_bind_int(stmt, 3, Int32(frameIndex))
             sqlite3_bind_text(stmt, 4, space, -1, Self.transient)
-            sqlite3_bind_int(stmt, 5, Int32(v.count))
+            sqlite3_bind_int(stmt, 5, Int32(dim))
             _ = raw.baseAddress.map { sqlite3_bind_blob(stmt, 6, $0, Int32(blobSize), Self.transient) }
             if let title { sqlite3_bind_text(stmt, 7, title, -1, Self.transient) }
             else { sqlite3_bind_null(stmt, 7) }
