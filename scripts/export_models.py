@@ -46,18 +46,10 @@ def save_meta(out_dir: str, meta: dict):
         json.dump(meta, f, ensure_ascii=False, indent=2)
 
 
-def copy_tokenizer(tok, out_dir: str):
-    fast = getattr(tok, "vocab_file", None)
-    path = os.path.join(tok.name_or_path, "tokenizer.json") if hasattr(tok, "name_or_path") else None
-    if path and os.path.exists(path):
-        shutil.copy(path, os.path.join(out_dir, "tokenizer.json"))
-        return
-    # 从缓存目录兜底查找
-    cached = os.path.join(os.path.expanduser("~"), ".cache", "huggingface")
-    raise RuntimeError(
-        "找不到 tokenizer.json(需要 fast tokenizer)。请确认模型仓库包含 tokenizer.json。"
-        if not fast else "tokenizer.json 缺失,请检查模型文件。"
-    )
+def copy_tokenizer(model_id: str, out_dir: str):
+    from huggingface_hub import hf_hub_download
+    src = hf_hub_download(model_id, "tokenizer.json")
+    shutil.copy(src, os.path.join(out_dir, "tokenizer.json"))
 
 
 def export_gemma(out_root: str, model_id: str, fp16: bool):
@@ -108,7 +100,7 @@ def export_gemma(out_root: str, model_id: str, fp16: bool):
     out_dir = os.path.join(out_root, "TextEmbedder")
     os.makedirs(out_dir, exist_ok=True)
     mlmodel.save(os.path.join(out_dir, "GemmaText.mlpackage"))
-    copy_tokenizer(tok, out_dir)
+    copy_tokenizer(model_id, out_dir)
     save_meta(out_dir, {"type": "gemma", "space": "gemma", "dim": int(hidden)})
     print(f"  -> {out_dir}")
 
@@ -167,7 +159,7 @@ def export_siglip(out_root: str, model_id: str, fp16: bool):
     os.makedirs(out_dir, exist_ok=True)
     img_ml.save(os.path.join(out_dir, "SiglipImage.mlpackage"))
     txt_ml.save(os.path.join(out_dir, "SiglipText.mlpackage"))
-    copy_tokenizer(tok, out_dir)
+    copy_tokenizer(model_id, out_dir)
     save_meta(out_dir, {
         "type": "clip", "space": "clip", "dim": dim,
         "image_size": size, "image_mean": float(mean), "image_std": float(std),
