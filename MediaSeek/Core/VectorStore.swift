@@ -230,15 +230,12 @@ final class VectorStore {
             let date = ts > 0 ? Date(timeIntervalSince1970: ts) : nil
             let dim = Int(sqlite3_column_int(stmt, 5))
             guard dim == q.count, let blob = sqlite3_column_blob(stmt, 6) else { continue }
-            let n = dim * MemoryLayout<Float>.size
             let v = blob.assumingMemoryBound(to: Float.self)
-            var score: Float = 0
-            vDSP.dot(Array(UnsafeBufferPointer(start: v, count: dim)), q, &score)
+            let score = vDSP.dot(Array(UnsafeBufferPointer(start: v, count: dim)), q)
             if score >= minScore {
                 hits.append(SearchHit(kind: kind, refKey: refKey, frameIndex: frameIndex,
                                       space: space, title: title, date: date, score: score))
             }
-            _ = n
         }
         return Array(hits.sorted { $0.score > $1.score }.prefix(limit))
     }

@@ -83,7 +83,7 @@ final class ModelManager: ObservableObject {
                     for file in try FileManager.default.contentsOfDirectory(atPath: bundled.path) {
                         let src = bundled.appendingPathComponent(file)
                         if src.pathExtension == "mlpackage" {
-                            let compiled = try MLModel.compileModel(at: src)
+                            let compiled = try await MLModel.compileModel(at: src)
                             let name = (file as NSString).deletingPathExtension
                             let dest = dir.appendingPathComponent("\(name).mlmodelc")
                             try? FileManager.default.removeItem(at: dest)
@@ -114,12 +114,12 @@ final class ModelManager: ObservableObject {
                 switch meta.type {
                 case "gemma":
                     let modelURL = dir.appendingPathComponent("GemmaText.mlmodelc")
-                    gemma = try GemmaTextEmbedder(modelURL: modelURL, tokenizerFolder: tokURL.deletingLastPathComponent())
+                    gemma = try await GemmaTextEmbedder(modelURL: modelURL, tokenizerFolder: tokURL.deletingLastPathComponent())
                     setState(.ready, for: slot)
                 case "clip":
                     let imgURL = dir.appendingPathComponent("SiglipImage.mlmodelc")
                     let txtURL = dir.appendingPathComponent("SiglipText.mlmodelc")
-                    siglip = try SigLIPEmbedder(
+                    siglip = try await SigLIPEmbedder(
                         textModelURL: txtURL, imageModelURL: imgURL,
                         tokenizerFolder: tokURL.deletingLastPathComponent(),
                         imageSize: meta.image_size ?? 256,
@@ -159,7 +159,7 @@ final class ModelManager: ObservableObject {
             for file in try FileManager.default.contentsOfDirectory(atPath: src.path) {
                 let f = src.appendingPathComponent(file)
                 if f.pathExtension == "mlpackage" {
-                    let compiled = try MLModel.compileModel(at: f)
+                    let compiled = try await MLModel.compileModel(at: f)
                     let destName = (file as NSString).deletingPathExtension
                     try FileManager.default.moveItem(at: compiled, to: dest.appendingPathComponent("\(destName).mlmodelc"))
                 } else {

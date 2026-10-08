@@ -57,9 +57,10 @@ final class PhotoLibraryService: ObservableObject {
         options.isNetworkAccessAllowed = true
         return await withCheckedContinuation { cont in
             PHImageManager.default().requestPlayerItem(
-                forVideo: asset, targetSize: .zero, options: options) { item, _ in
-                cont.resume(returning: item)
-            }
+                forVideo: asset, targetSize: .zero, contentMode: .aspectFit,
+                options: options, resultHandler: { item, _ in
+                    cont.resume(returning: item)
+                })
         }
     }
 

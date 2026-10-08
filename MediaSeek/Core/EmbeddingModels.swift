@@ -36,9 +36,8 @@ extension MLModel {
 
 enum VectorMath {
     static func normalized(_ v: [Float]) -> [Float] {
-        var norm: Float = 0
-        vDSP.dot(v, v, &norm)
-        let n = max(sqrt(norm), 1e-8)
+        let squared = vDSP.dot(v, v)
+        let n = max(sqrt(squared), 1e-8)
         return v.map { $0 / n }
     }
 }
@@ -51,8 +50,8 @@ final class HFTokenizer {
     static let maxSequenceGemma = 512
     static let maxSequenceSiglip = 64
 
-    init(folder: URL) throws {
-        self.tokenizer = try AutoTokenizer.from(modelFolder: folder)
+    init(folder: URL) async throws {
+        self.tokenizer = try await AutoTokenizer.from(modelFolder: folder)
     }
 
     /// 编码并截断。保留末位 token(通常是 EOS/SOS 语义锚点)
@@ -74,11 +73,11 @@ final class GemmaTextEmbedder {
     private let model: MLModel
     private let tokenizer: HFTokenizer
 
-    init(modelURL: URL, tokenizerFolder: URL) throws {
+    init(modelURL: URL, tokenizerFolder: URL) async throws {
         let config = MLModelConfiguration()
         config.computeUnits = .cpuAndNeuralEngine
         self.model = try MLModel(contentsOf: modelURL, configuration: config)
-        self.tokenizer = try HFTokenizer(folder: tokenizerFolder)
+        self.tokenizer = try await HFTokenizer(folder: tokenizerFolder)
     }
 
     static func queryPrompt(_ text: String) -> String { "task: search result | query: \(text)" }
@@ -113,12 +112,12 @@ final class SigLIPEmbedder {
     private let std: Float
 
     init(textModelURL: URL, imageModelURL: URL, tokenizerFolder: URL,
-         imageSize: Int = 256, mean: Float = 0.5, std: Float = 0.5) throws {
+         imageSize: Int = 256, mean: Float = 0.5, std: Float = 0.5) async throws {
         let config = MLModelConfiguration()
         config.computeUnits = .cpuAndNeuralEngine
         self.textModel = try MLModel(contentsOf: textModelURL, configuration: config)
         self.imageModel = try MLModel(contentsOf: imageModelURL, configuration: config)
-        self.tokenizer = try HFTokenizer(folder: tokenizerFolder)
+        self.tokenizer = try await HFTokenizer(folder: tokenizerFolder)
         self.imageSize = imageSize
         self.mean = mean
         self.std = std

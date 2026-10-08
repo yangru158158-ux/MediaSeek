@@ -140,7 +140,7 @@ struct SearchView: View {
             var ms = 0
             do {
                 let start = Date()
-                hits = try app.search.search(q, scope: scope)
+                hits = try await app.search.search(q, scope: scope)
                 ms = Int(Date().timeIntervalSince(start) * 1000)
             } catch {
                 await app.fail(error)

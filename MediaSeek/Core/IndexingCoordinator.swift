@@ -280,13 +280,13 @@ enum FrameSampler {
         let gen = AVAssetImageGenerator(asset: asset)
         gen.appliesPreferredTrackTransform = true
         gen.maximumSize = CGSize(width: 320, height: 320)
-        gen.requestedTimeToleranceBefore = .seconds(1)
-        gen.requestedTimeToleranceAfter = .seconds(1)
+        gen.requestedTimeToleranceBefore = CMTime(seconds: 1, preferredTimescale: 600)
+        gen.requestedTimeToleranceAfter = CMTime(seconds: 1, preferredTimescale: 600)
 
         let step = duration.seconds / Double(max(count, 1))
-        let times = (0..<count).map { i -> NSValue in
+        let times: [CMTime] = (0..<count).map { i in
             let sec = min(Double(i) * step + step / 2, max(duration.seconds - 0.1, 0))
-            return NSValue(time: CMTime(seconds: sec, preferredTimescale: 600))
+            return CMTime(seconds: sec, preferredTimescale: 600)
         }
 
         var frames: [CGImage] = []

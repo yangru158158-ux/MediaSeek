@@ -38,7 +38,7 @@ final class SearchEngine {
         self.imports = imports
     }
 
-    func search(_ rawQuery: String, scope: SearchScope, topK: Int = 120) throws -> [DisplayHit] {
+    func search(_ rawQuery: String, scope: SearchScope, topK: Int = 120) async throws -> [DisplayHit] {
         let query = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return [] }
 
@@ -54,12 +54,14 @@ final class SearchEngine {
         }()
 
         var hits: [SearchHit] = []
-        if !imageKinds.isEmpty, let siglip = models.siglip {
+        let siglip = await MainActor.run { models.siglip }
+        let gemma = await MainActor.run { models.gemma }
+        if !imageKinds.isEmpty, let siglip {
             let q = try siglip.embedQuery(query)
             hits += try store.search(space: siglip.space, kinds: imageKinds, query: q,
                                      limit: topK, minScore: 0.12)
         }
-        if !gemmaKinds.isEmpty, let gemma = models.gemma {
+        if !gemmaKinds.isEmpty, let gemma {
             let q = try gemma.embedQuery(query)
             hits += try store.search(space: gemma.space, kinds: gemmaKinds, query: q,
                                      limit: topK, minScore: 0.12)
