@@ -32,10 +32,10 @@ import zipfile
 import numpy as np
 import torch
 import coremltools as ct
-from transformers import AutoModel, AutoTokenizer, SiglipModel
+from transformers import AutoModel, AutoTokenizer
 
-GEMMA_DEFAULT = os.environ.get("EMBEDDINGGEMMA_MODEL", "google/embeddinggemma")
-SIGLIP_DEFAULT = os.environ.get("SIGLIP_MODEL", "google/siglip2-base-b16-256")
+GEMMA_DEFAULT = os.environ.get("EMBEDDINGGEMMA_MODEL", "google/embeddinggemma-2")
+SIGLIP_DEFAULT = os.environ.get("SIGLIP_MODEL", "google/siglip2-base-patch16-256")
 
 GEMMA_MAX_SEQ = 512   # EmbeddingGemma 上下文内截断
 SIGLIP_MAX_SEQ = 64   # SigLIP 文本塔训练序列长度
@@ -63,8 +63,21 @@ def copy_tokenizer(tok, out_dir: str):
 def export_gemma(out_root: str, model_id: str, fp16: bool):
     print(f"== 导出文本模型 {model_id} ==")
     tok = AutoTokenizer.from_pretrained(model_id)
-    model = AutoModel.from_pretrained(model_id, torch_dtype=torch.float32).eval()
-    pad_id = model.config.pad_token_id if model.config.pad_token_id is not None else 0
+    model = AutoModel.from_pretrained(model_id, dtype=torch.float32).eval()
+    # v2 配置结构有变,pad_token_id / hidden_size 逐级回退
+    cfg = model.config
+    pad_id = getattr(cfg, "pad_token_id", None)
+    if pad_id is None:
+        tc = getattr(cfg, "text_config", None)
+        pad_id = getattr(tc, "pad_token_id", None) if tc is not None else None
+    if pad_id is None:
+        pad_id = tok.convert_tokens_to_ids("<pad>")
+    if pad_id is None or pad_id < 0:
+        pad_id = 0
+    hidden = getattr(cfg, "hidden_size", None)
+    if hidden is None:
+        tc = getattr(cfg, "text_config", None)
+        hidden = getattr(tc, "hidden_size", 768) if tc is not None else 768
 
     class GemmaEmbedding(torch.nn.Module):
         def __init__(self):
@@ -96,14 +109,14 @@ def export_gemma(out_root: str, model_id: str, fp16: bool):
     os.makedirs(out_dir, exist_ok=True)
     mlmodel.save(os.path.join(out_dir, "GemmaText.mlpackage"))
     copy_tokenizer(tok, out_dir)
-    save_meta(out_dir, {"type": "gemma", "space": "gemma", "dim": int(model.config.hidden_size)})
+    save_meta(out_dir, {"type": "gemma", "space": "gemma", "dim": int(hidden)})
     print(f"  -> {out_dir}")
 
 
 def export_siglip(out_root: str, model_id: str, fp16: bool):
     print(f"== 导出图文模型 {model_id} ==")
     tok = AutoTokenizer.from_pretrained(model_id)
-    model = SiglipModel.from_pretrained(model_id, torch_dtype=torch.float32).eval()
+    model = AutoModel.from_pretrained(model_id, dtype=torch.float32).eval()
     cfg = model.config.vision_config
     size = int(getattr(cfg, "image_size", 256))
     mean = getattr(cfg, "image_mean", None) or 0.5
