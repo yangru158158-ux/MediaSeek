@@ -92,13 +92,13 @@ def export_gemma(out_root: str, model_id: str, fp16: bool):
             return torch.nn.functional.normalize(emb, dim=-1)
 
     wrapped = GemmaEmbedding().eval()
-    ex = torch.ones((1, 8), dtype=torch.int32)
+    ex = torch.ones((1, 16), dtype=torch.int32)
     with torch.no_grad():
         traced = torch.jit.trace(wrapped, ex)
 
     mlmodel = ct.convert(
         traced,
-        inputs=[ct.TensorType(name="input_ids", shape=(1, ct.Range(1, GEMMA_MAX_SEQ + 1)), dtype=np.int32)],
+        inputs=[ct.TensorType(name="input_ids", shape=(1, ct.RangeDim(1, GEMMA_MAX_SEQ)), dtype=np.int32)],
         outputs=[ct.TensorType(name="embedding")],
         compute_precision=ct.precision.FLOAT16 if fp16 else ct.precision.FLOAT32,
         minimum_deployment_target=ct.target.iOS17,
@@ -144,7 +144,7 @@ def export_siglip(out_root: str, model_id: str, fp16: bool):
     img_ex = torch.zeros((1, 3, size, size), dtype=torch.float32)
     with torch.no_grad():
         traced_img = torch.jit.trace(SiglipImage().eval(), img_ex)
-        traced_txt = torch.jit.trace(SiglipText().eval(), torch.ones((1, 8), dtype=torch.int32))
+        traced_txt = torch.jit.trace(SiglipText().eval(), torch.ones((1, 16), dtype=torch.int32))
 
     common = dict(
         outputs=[ct.TensorType(name="embedding")],
@@ -159,7 +159,7 @@ def export_siglip(out_root: str, model_id: str, fp16: bool):
     )
     txt_ml = ct.convert(
         traced_txt,
-        inputs=[ct.TensorType(name="input_ids", shape=(1, ct.Range(1, SIGLIP_MAX_SEQ + 1)), dtype=np.int32)],
+        inputs=[ct.TensorType(name="input_ids", shape=(1, ct.RangeDim(1, SIGLIP_MAX_SEQ)), dtype=np.int32)],
         **common,
     )
 

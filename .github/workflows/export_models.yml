@@ -1,0 +1,46 @@
+name: Export Models
+# 在 GitHub 免费提供的 macOS 机器上运行模型转换
+# (coremltools 完整运行库仅 macOS 可用;Windows 上转换会缺库)
+# 产出:models.zip 工件(含 TextEmbedder + ImageEmbedder),下载后导入 App 即可
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "scripts/export_models.py"
+      - "scripts/patch_transformers_for_coreml.py"
+      - ".github/workflows/export_models.yml"
+
+jobs:
+  export:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装依赖(官方测试组合)
+        run: |
+          pip install --upgrade pip
+          pip install torch==2.7.0 "transformers>=5.0" "coremltools==9.0" sentencepiece
+
+      - name: 打 coremltools 兼容补丁
+        run: python scripts/patch_transformers_for_coreml.py
+
+      - name: 导出模型
+        run: |
+          python scripts/export_models.py \
+            --outdir MediaSeek/Resources/Models \
+            --zip models.zip
+
+      - name: 上传模型包
+        uses: actions/upload-artifact@v4
+        with:
+          name: models-zip
+          path: models.zip
+          retention-days: 90
