@@ -45,6 +45,21 @@ patch(
     "embedding_gemma2 多模态掩码",
 )
 
+# 3) coremltools _cast 对单元素数组的 NumPy2 兼容(int(数组) 已被禁止)
+import coremltools
+
+ct_ops = Path(coremltools.__file__).parent / "converters" / "mil" / "frontend" / "torch" / "ops.py"
+patch(
+    ct_ops,
+    """        if not isinstance(x.val, dtype):
+            res = mb.const(val=dtype(x.val), name=node.name)""",
+    """        if not isinstance(x.val, dtype):
+            import numpy as _np
+            _xval = _np.asarray(x.val).reshape(())  # patched: NumPy2 下 int(单元素数组) 需先降为 0 维
+            res = mb.const(val=dtype(_xval), name=node.name)""",
+    "coremltools _cast NumPy2 兼容",
+)
+
 print("已打补丁:", ok or "无")
 print("跳过:", skip or "无")
 if len(ok) + len([s for s in skip if "已打过" in s]) < 2:
