@@ -1,5 +1,6 @@
 import SwiftUI
 import Photos
+import Combine
 
 @main
 struct MediaSeekApp: App {
@@ -24,6 +25,7 @@ final class AppModel: ObservableObject {
     let search: SearchEngine
 
     @Published var errorMessage: String?
+    private var bag = Set<AnyCancellable>()
 
     init() {
         let s = VectorStore()
@@ -33,6 +35,13 @@ final class AppModel: ObservableObject {
         models = m
         indexing = IndexingCoordinator(store: s, models: m, photo: photoLib, imports: imports)
         search = SearchEngine(store: s, models: m, photo: photoLib, imports: imports)
+
+        // 子服务都是 ObservableObject,但视图只观察 AppModel;
+        // 把它们的状态变化统一转发,否则授权/模型/索引进度界面不会刷新
+        photoLib.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &bag)
+        models.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &bag)
+        indexing.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &bag)
+        imports.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &bag)
     }
 
     func fail(_ error: Error) {
