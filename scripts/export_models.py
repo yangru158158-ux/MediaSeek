@@ -115,13 +115,23 @@ def export_siglip(out_root: str, model_id: str, fp16: bool):
     std = getattr(cfg, "image_std", None) or 0.5
     dim = int(model.config.text_config.hidden_size)
 
+    def _features_to_tensor(x):
+        # transformers5 的 get_*_features 可能返回 ModelOutput 对象而非张量
+        if torch.is_tensor(x):
+            return x
+        for attr in ("pooler_output", "image_features", "text_features", "last_hidden_state"):
+            v = getattr(x, attr, None)
+            if v is not None:
+                return v
+        return x[0]
+
     class SiglipImage(torch.nn.Module):
         def __init__(self):
             super().__init__()
             self.m = model
 
         def forward(self, pixel_values):
-            f = self.m.get_image_features(pixel_values=pixel_values)
+            f = _features_to_tensor(self.m.get_image_features(pixel_values=pixel_values))
             return torch.nn.functional.normalize(f, dim=-1)
 
     class SiglipText(torch.nn.Module):
@@ -130,7 +140,7 @@ def export_siglip(out_root: str, model_id: str, fp16: bool):
             self.m = model
 
         def forward(self, input_ids):
-            f = self.m.get_text_features(input_ids=input_ids)
+            f = _features_to_tensor(self.m.get_text_features(input_ids=input_ids))
             return torch.nn.functional.normalize(f, dim=-1)
 
     img_ex = torch.zeros((1, 3, size, size), dtype=torch.float32)
