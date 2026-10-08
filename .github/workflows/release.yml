@@ -1,0 +1,94 @@
+name: Release to TestFlight
+# 手动触发的发布流水线:归档 → 签名 → 上传 TestFlight
+# 运行前需要在仓库 Settings → Secrets and variables → Actions 里配置 4 个 secret:
+#   ASC_KEY_ID         App Store Connect API 密钥 ID(10 位)
+#   ASC_ISSUER_ID      API 密钥的 Issuer ID(UUID)
+#   ASC_API_KEY_P8     .p8 私钥文件内容的 base64(见 docs/TestFlightGuide.md)
+#   DEVELOPMENT_TEAM_ID 开发者团队的 10 位 Team ID
+on:
+  workflow_dispatch:
+
+jobs:
+  upload:
+    runs-on: macos-15
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 XcodeGen
+        run: brew install xcodegen
+
+      - name: 写入 App Store Connect API 密钥
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+        run: |
+          mkdir -p $HOME/.appstoreconnect/private_keys
+          echo "$ASC_API_KEY_P8" | base64 --decode > "$HOME/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8"
+
+      - name: 生成 Xcode 工程
+        run: xcodegen generate
+
+      - name: 归档(自动管理证书与描述文件)
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          TEAM_ID: ${{ secrets.DEVELOPMENT_TEAM_ID }}
+        run: |
+          KEY_PATH="$HOME/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8"
+          xcodebuild archive \
+            -project MediaSeek.xcodeproj \
+            -scheme MediaSeek \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/MediaSeek.xcarchive \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$KEY_PATH" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
+            DEVELOPMENT_TEAM="$TEAM_ID" \
+            CODE_SIGN_STYLE=Automatic
+
+      - name: 导出 IPA
+        env:
+          TEAM_ID: ${{ secrets.DEVELOPMENT_TEAM_ID }}
+        run: |
+          cat > build/ExportOptions.plist <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>app-store-connect</string>
+            <key>signingStyle</key>
+            <string>automatic</string>
+            <key>uploadSymbols</key>
+            <true/>
+            <key>manageAppVersionAndBuildNumber</key>
+            <true/>
+          </dict>
+          </plist>
+          PLIST
+          xcodebuild -exportArchive \
+            -archivePath build/MediaSeek.xcarchive \
+            -exportOptionsPlist build/ExportOptions.plist \
+            -exportPath build/ipa \
+            -allowProvisioningUpdates
+
+      - name: 上传 TestFlight
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+        run: |
+          xcrun altool --upload-app \
+            -f build/ipa/*.ipa \
+            -t ios \
+            --apiKey "$ASC_KEY_ID" \
+            --apiIssuer "$ASC_ISSUER_ID"
+
+      - name: 完成
+        run: |
+          echo "🎉 已上传!等 5-15 分钟处理完成后:"
+          echo "   App Store Connect → TestFlight → 添加自己为内部测试员"
+          echo "   然后在 iPhone 上用 TestFlight App 安装"

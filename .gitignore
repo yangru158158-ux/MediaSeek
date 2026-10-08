@@ -1,0 +1,13 @@
+# XcodeGen 生成物,CI 会重新生成
+*.xcodeproj
+xcuserdata/
+DerivedData/
+build/
+
+# 模型体积大,不进 git;CI 编译不需要真模型(Resources/Models 是可选目录)
+MediaSeek/Resources/Models/*
+!MediaSeek/Resources/Models/.gitkeep
+
+.DS_Store
+*.ipa
+*.xcarchive

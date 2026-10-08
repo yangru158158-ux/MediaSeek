@@ -1,0 +1,34 @@
+name: Build Check
+# 零成本编译验证:每次推送自动在 GitHub 的 macOS 机器上编译整个 App
+# (公开仓库免费;私有仓库 macOS 分钟按 10 倍计费,注意)
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 XcodeGen
+        run: brew install xcodegen
+
+      - name: 生成 Xcode 工程
+        run: xcodegen generate
+
+      - name: 编译验证(免签名)
+        run: |
+          xcodebuild -project MediaSeek.xcodeproj \
+            -scheme MediaSeek \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
+
+      - name: 结果
+        run: echo "✅ 编译通过,可以进入 TestFlight 发布流程"
