@@ -79,6 +79,8 @@ struct FileThumbView: View {
 /// 搜索结果格
 struct HitCell: View {
     let hit: DisplayHit
+    var selectionMode: Bool = false
+    var isSelected: Bool = false
     @EnvironmentObject var app: AppModel
 
     var body: some View {
@@ -88,6 +90,19 @@ struct HitCell: View {
                 .frame(maxWidth: .infinity)
                 .clipShape(RoundedRectangle(cornerRadius: 10))
                 .overlay(alignment: .topLeading) { badge }
+                .overlay(alignment: .topTrailing) {
+                    if selectionMode {
+                        Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                            .font(.title3)
+                            .foregroundStyle(isSelected ? Color.blue : .white)
+                            .shadow(radius: 2)
+                            .padding(4)
+                    }
+                }
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(isSelected ? Color.blue : .clear, lineWidth: 2)
+                )
             Text(hit.title)
                 .font(.caption2)
                 .lineLimit(1)

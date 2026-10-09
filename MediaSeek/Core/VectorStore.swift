@@ -288,6 +288,28 @@ final class VectorStore {
         sqlite3_step(stmt)
     }
 
+    /// 移除某照片/视频/文件的**全部**索引行(各类型)
+    func removeEverythingForRef(_ refKey: String) throws {
+        let stmt = try prepare("DELETE FROM items WHERE ref_key = ?")
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, refKey, -1, Self.transient)
+        sqlite3_step(stmt)
+    }
+
+    /// 重命名导入文件记录,并同步其可搜索的文件名
+    func renameFile(id: String, newName: String) throws {
+        let stmt = try prepare("UPDATE files SET name = ? WHERE id = ?")
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, newName, -1, Self.transient)
+        sqlite3_bind_text(stmt, 2, id, -1, Self.transient)
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw MSError("重命名记录失败") }
+        let stmt2 = try prepare("UPDATE items SET title = ? WHERE kind = 'file' AND ref_key = ?")
+        defer { sqlite3_finalize(stmt2) }
+        sqlite3_bind_text(stmt2, 1, newName, -1, Self.transient)
+        sqlite3_bind_text(stmt2, 2, id, -1, Self.transient)
+        sqlite3_step(stmt2)
+    }
+
     func addFile(_ f: ImportedFile) throws {        let stmt = try prepare("""
         INSERT OR REPLACE INTO files(id, folder_id, rel_path, bookmark, name, size, added_at, indexed)
         VALUES(?,?,?,?,?,?,?,?)

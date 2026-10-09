@@ -71,6 +71,27 @@ final class ImportLibrary: ObservableObject {
         try store.deleteFile(id: record.id)
     }
 
+    /// 重命名导入文件(保留原扩展名),并同步索引记录
+    func rename(_ record: ImportedFile, to newNameRaw: String) throws {
+        let newName = newNameRaw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !newName.isEmpty else { throw MSError("名称不能为空") }
+        guard !newName.contains("/") && !newName.contains("\\") else { throw MSError("名称不能包含 / 或 \\") }
+
+        let url = try resolveURL(record)
+        defer { url.stopAccessingSecurityScopedResource() }
+        let ext = url.pathExtension
+        let fileName = ext.isEmpty ? newName : "\(newName).\(ext)"
+        let dest = url.deletingLastPathComponent().appendingPathComponent(fileName)
+
+        if dest.standardizedFileURL.path != url.standardizedFileURL.path {
+            if FileManager.default.fileExists(atPath: dest.path) {
+                throw MSError("同名文件已存在:\(fileName)")
+            }
+            try FileManager.default.moveItem(at: url, to: dest)
+        }
+        try store.renameFile(id: record.id, newName: fileName)
+    }
+
     // MARK: - 访问已导入文件
 
     /// 解析出可读 URL(内部处理安全域访问;调用方用完应 stopAccessing)

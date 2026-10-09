@@ -12,6 +12,13 @@ struct SearchView: View {
     @State private var elapsedMs = 0
     @State private var selectedHit: DisplayHit?
     @State private var exporting = false
+    @State private var selectionMode = false
+    @State private var selected = Set<String>()
+    @State private var batchTagText = ""
+    @State private var showTagAlert = false
+    @State private var showDeleteDialog = false
+    @State private var showRenameAlert = false
+    @State private var renameText = ""
 
     private let exampleQueries = ["一只猫", "海边的日落", "有人的合影", "会议纪要", "发票 PDF"]
 
@@ -31,6 +38,25 @@ struct SearchView: View {
             .navigationTitle("智搜")
             .sheet(item: $selectedHit) { hit in
                 DetailSheet(hit: hit)
+            }
+            .alert("批量标注", isPresented: $showTagAlert) {
+                TextField("标签内容(如:程小姐)", text: $batchTagText)
+                Button("添加") { batchTag() }
+                Button("取消", role: .cancel) { batchTagText = "" }
+            } message: {
+                Text("将为选中的 \(selected.count) 个项目添加标签")
+            }
+            .confirmationDialog("删除 \(selected.count) 个选中项", isPresented: $showDeleteDialog, titleVisibility: .visible) {
+                Button("从系统相册删除(移入最近删除)", role: .destructive) { deleteFromPhotos() }
+                Button("仅从索引移除(下次同步会回来)", role: .destructive) { removeFromIndexOnly() }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("删除会同时移除其索引与标签")
+            }
+            .alert("重命名导入文件", isPresented: $showRenameAlert) {
+                TextField("新名称(不含扩展名)", text: $renameText)
+                Button("改名") { doRename() }
+                Button("取消", role: .cancel) {}
             }
         }
     }
@@ -86,29 +112,21 @@ struct SearchView: View {
             ProgressView("正在检索…").padding(.vertical, 6)
         } else if searchedOnce {
             HStack(spacing: 10) {
-                Text("找到 \(results.count) 个结果 · \(elapsedMs) ms")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                if selectionMode {
+                    Text("已选 \(selected.count) 项")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("找到 \(results.count) 个结果 · \(elapsedMs) ms")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
                 if !results.isEmpty {
                     Spacer()
-                    Menu {
-                        Button {
-                            exportToAlbum()
-                        } label: {
-                            Label("存入系统相册(新建专辑)", systemImage: "photo.stack")
-                        }
-                        Button {
-                            exportToFiles()
-                        } label: {
-                            Label("导出到「文件」App", systemImage: "folder")
-                        }
-                    } label: {
-                        if exporting {
-                            ProgressView()
-                        } else {
-                            Label("导出", systemImage: "square.and.arrow.up")
-                                .font(.footnote)
-                        }
+                    if exporting {
+                        ProgressView()
+                    } else {
+                        actionsMenu
                     }
                 }
             }
@@ -147,8 +165,16 @@ struct SearchView: View {
             } else {
                 LazyVGrid(columns: columns, spacing: 12) {
                     ForEach(results) { hit in
-                        Button { selectedHit = hit } label: { HitCell(hit: hit) }
-                            .buttonStyle(.plain)
+                        Button {
+                            if selectionMode {
+                                if selected.contains(hit.id) { selected.remove(hit.id) } else { selected.insert(hit.id) }
+                            } else {
+                                selectedHit = hit
+                            }
+                        } label: {
+                            HitCell(hit: hit, selectionMode: selectionMode, isSelected: selected.contains(hit.id))
+                        }
+                        .buttonStyle(.plain)
                     }
                 }
                 .padding(.horizontal)
@@ -181,6 +207,153 @@ struct SearchView: View {
                     folderName: q, hits: results,
                     photo: app.photoLib, imports: app.imports)
                 await MainActor.run { app.notify("已导出 \(n) 个文件\n位置:「文件」App → 智搜 → 导出 → \(url.lastPathComponent)") }
+            } catch {
+                await MainActor.run { app.fail(error) }
+            }
+            exporting = false
+        }
+    }
+
+    private var selectedHits: [DisplayHit] { results.filter { selected.contains($0.id) } }
+
+    private var renameTarget: (hitId: String, record: ImportedFile)? {
+        guard selectionMode else { return nil }
+        let fileHits = selectedHits.compactMap { hit -> (String, ImportedFile)? in
+            if case .file(let f) = hit.target { return (hit.id, f) }
+            return nil
+        }
+        guard fileHits.count == 1, let only = fileHits.first else { return nil }
+        return (only.0, only.1)
+    }
+
+    private var actionsMenu: some View {
+        Menu {
+            if selectionMode {
+                Button { toggleSelectAll() } label: {
+                    Label(selected.count == results.count ? "取消全选" : "全选", systemImage: "checkmarks")
+                }
+                Button { showTagAlert = true } label: { Label("批量标注…", systemImage: "tag") }
+                Button { exportToAlbum(selectedOnly: true) } label: { Label("选中项存入相册", systemImage: "photo.stack") }
+                Button { exportToFiles(selectedOnly: true) } label: { Label("选中项导出到文件", systemImage: "folder") }
+                Button(role: .destructive) { showDeleteDialog = true } label: { Label("删除…", systemImage: "trash") }
+                if renameTarget != nil {
+                    Button { showRenameAlert = true; renameText = "" } label: { Label("改名(导入文件)", systemImage: "pencil") }
+                }
+                Divider()
+                Button { selectionMode = false; selected.removeAll() } label: { Label("完成", systemImage: "checkmark") }
+            } else {
+                Button { selectionMode = true; selected.removeAll() } label: { Label("选择", systemImage: "checkmark.circle") }
+                Button { exportToAlbum(selectedOnly: false) } label: { Label("结果存入相册", systemImage: "photo.stack") }
+                Button { exportToFiles(selectedOnly: false) } label: { Label("结果导出到文件", systemImage: "folder") }
+            }
+        } label: {
+            Label("操作", systemImage: "ellipsis.circle")
+                .font(.footnote)
+        }
+    }
+
+    private func toggleSelectAll() {
+        if selected.count == results.count { selected.removeAll() } else { selected = Set(results.map(\.id)) }
+    }
+
+    private func exportToAlbum(selectedOnly: Bool) {
+        let hits = selectedOnly ? selectedHits : results
+        guard !exporting, !hits.isEmpty else { return }
+        exporting = true
+        let q = query.trimmingCharacters(in: .whitespaces)
+        Task {
+            do {
+                let n = try await SearchExporter.saveToAlbum(title: q, hits: hits)
+                await MainActor.run { app.notify("已把 \(n) 个项目存入相册「搜索·\(q)」") }
+            } catch {
+                await MainActor.run { app.fail(error) }
+            }
+            exporting = false
+        }
+    }
+
+    private func exportToFiles(selectedOnly: Bool) {
+        let hits = selectedOnly ? selectedHits : results
+        guard !exporting, !hits.isEmpty else { return }
+        exporting = true
+        let q = query.trimmingCharacters(in: .whitespaces)
+        Task {
+            do {
+                let (n, url) = try await SearchExporter.exportToFiles(
+                    folderName: q, hits: hits,
+                    photo: app.photoLib, imports: app.imports)
+                await MainActor.run { app.notify("已导出 \(n) 个文件\n位置:「文件」App → 智搜 → 导出 → \(url.lastPathComponent)") }
+            } catch {
+                await MainActor.run { app.fail(error) }
+            }
+            exporting = false
+        }
+    }
+
+    private func batchTag() {
+        let tag = batchTagText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let refs = selectedHits.map { $0.refKey }
+        guard !tag.isEmpty, !refs.isEmpty else { return }
+        showTagAlert = false
+        exporting = true
+        Task {
+            var ok = 0
+            for ref in refs {
+                do { try await app.addUserTag(refKey: ref, tag: tag); ok += 1 } catch { await MainActor.run { app.fail(error) } }
+            }
+            await MainActor.run { app.notify("已为 \(ok) 个项目添加标签「\(tag)」"); exporting = false }
+        }
+    }
+
+    private func deleteFromPhotos() {
+        let hits = selectedHits
+        let ids = SearchExporter.assetLocalIDs(from: hits)
+        guard !ids.isEmpty else { removeFromIndexOnly(); return }
+        exporting = true
+        Task {
+            do {
+                let fetch = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil)
+                try await PHPhotoLibrary.shared().performChanges {
+                    PHAssetChangeRequest.deleteAssets(fetch as NSFastEnumeration)
+                }
+                for hit in hits { try? app.store.removeEverythingForRef(hit.refKey) }
+                await MainActor.run {
+                    results.removeAll { selected.contains($0.id) }
+                    selected.removeAll()
+                    selectionMode = false
+                    app.notify("已删除 \(ids.count) 个项目,可在「最近删除」保留 30 天")
+                }
+            } catch {
+                await MainActor.run { app.fail(error) }
+            }
+            exporting = false
+        }
+    }
+
+    private func removeFromIndexOnly() {
+        for hit in selectedHits { try? app.store.removeEverythingForRef(hit.refKey) }
+        results.removeAll { selected.contains($0.id) }
+        selected.removeAll()
+        selectionMode = false
+        app.notify("已从索引移除(下次同步会重新索引)")
+    }
+
+    private func doRename() {
+        guard let target = renameTarget else { return }
+        let newName = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !newName.isEmpty else { return }
+        let record = target.record
+        let hitId = target.hitId
+        exporting = true
+        Task {
+            do {
+                try app.imports.rename(record, to: newName)
+                await MainActor.run {
+                    if let idx = results.firstIndex(where: { $0.id == hitId }) {
+                        results[idx].title = newName
+                    }
+                    app.notify("已重命名")
+                }
             } catch {
                 await MainActor.run { app.fail(error) }
             }
