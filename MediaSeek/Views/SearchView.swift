@@ -110,6 +110,43 @@ struct SearchView: View {
     private var statusLine: some View {
         if searching {
             ProgressView("正在检索…").padding(.vertical, 6)
+        } else if query.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                if !app.recentSearches.isEmpty {
+                    HStack {
+                        Text("最近搜索")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("清空") { app.clearSearchHistory() }
+                            .font(.caption)
+                    }
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(app.recentSearches, id: \.self) { q in
+                                Button {
+                                    query = q
+                                    runSearch()
+                                } label: {
+                                    Text(q)
+                                        .font(.footnote)
+                                        .padding(.horizontal, 12)
+                                        .padding(.vertical, 6)
+                                        .background(Color(.systemGray5), in: Capsule())
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                }
+                HStack {
+                    Text("示例")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 6)
         } else if searchedOnce {
             HStack(spacing: 10) {
                 if selectionMode {
@@ -367,6 +404,7 @@ struct SearchView: View {
     private func runSearch() {
         let q = query.trimmingCharacters(in: .whitespaces)
         guard !q.isEmpty else { return }
+        app.addSearchHistory(q)
         searching = true
         searchedOnce = true
         Task.detached(priority: .userInitiated) { [scope] in

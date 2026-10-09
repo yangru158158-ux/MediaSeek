@@ -26,6 +26,7 @@ final class AppModel: ObservableObject {
 
     @Published var errorMessage: String?
     @Published var successMessage: String?
+    @Published var recentSearches: [String] = UserDefaults.standard.stringArray(forKey: "recentSearches") ?? []
     private var bag = Set<AnyCancellable>()
 
     init() {
@@ -51,6 +52,26 @@ final class AppModel: ObservableObject {
 
     func notify(_ message: String) {
         successMessage = message
+    }
+
+    /// 记录一次搜索(最新在前,去重,最多保留 20 条)
+    func addSearchHistory(_ query: String) {
+        let t = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { return }
+        var list = recentSearches.filter { $0 != t }
+        list.insert(t, at: 0)
+        recentSearches = Array(list.prefix(20))
+        UserDefaults.standard.set(recentSearches, forKey: "recentSearches")
+    }
+
+    func removeSearchHistory(_ query: String) {
+        recentSearches.removeAll { $0 == query }
+        UserDefaults.standard.set(recentSearches, forKey: "recentSearches")
+    }
+
+    func clearSearchHistory() {
+        recentSearches.removeAll()
+        UserDefaults.standard.removeObject(forKey: "recentSearches")
     }
 
     /// 给照片/视频添加人名或主题标签(生成 Gemma 语义向量)
