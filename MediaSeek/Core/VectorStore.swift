@@ -295,6 +295,44 @@ final class VectorStore {
         return out
     }
 
+    /// 全部照片标签行(检索端做 token 级精确匹配用)
+    func allPhotoLabels() throws -> [(refKey: String, title: String)] {
+        guard let db else { return [] }
+        let stmt = try prepare("SELECT ref_key, title FROM items WHERE kind = 'photoLabel' AND title IS NOT NULL")
+        defer { sqlite3_finalize(stmt) }
+        var out: [(String, String)] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            out.append((String(cString: sqlite3_column_text(stmt, 0)),
+                        String(cString: sqlite3_column_text(stmt, 1))))
+        }
+        return out.map { (refKey: $0.0, title: $0.1) }
+    }
+
+    /// 用户标签子串精确匹配(中文)
+    func searchUserTags(query: String) throws -> [String] {
+        guard let db, !query.isEmpty else { return [] }
+        let escaped = query
+            .replacingOccurrences(of: "%", with: "\\%")
+            .replacingOccurrences(of: "_", with: "\\_")
+        let stmt = try prepare("SELECT ref_key FROM items WHERE kind = 'userTag' AND title LIKE ? ESCAPE '\\' LIMIT 80")
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, "%\(escaped)%", -1, Self.transient)
+        var out: [String] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            out.append(String(cString: sqlite3_column_text(stmt, 0)))
+        }
+        return out
+    }
+
+    /// 某索引对象已记录的主色调(任取一行)
+    func colorForRef(_ refKey: String) -> String? {
+        guard let db, let stmt = try? prepare("SELECT color FROM items WHERE ref_key = ? AND color IS NOT NULL LIMIT 1") else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, refKey, -1, Self.transient)
+        guard sqlite3_step(stmt) == SQLITE_ROW, sqlite3_column_text(stmt, 0) != nil else { return nil }
+        return String(cString: sqlite3_column_text(stmt, 0))
+    }
+
     /// 移除某照片/视频/文件的**全部**索引行(各类型)
     func removeEverythingForRef(_ refKey: String) throws {
         let stmt = try prepare("DELETE FROM items WHERE ref_key = ?")

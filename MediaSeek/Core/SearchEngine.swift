@@ -48,35 +48,59 @@ final class SearchEngine {
 
         let imageKinds: [ItemKind] = scope == .all || scope == .photo
             ? [.photo] : (scope == .video ? [.videoFrame] : [])
-        let gemmaKinds: [ItemKind] = {
-            switch scope {
-            case .all: return [.photoLabel, .userTag, .file, .fileChunk]
-            case .photo: return [.photoLabel, .userTag]
-            case .file: return [.file, .fileChunk]
-            case .video: return [.userTag]
-            }
-        }()
+        // Gemma 语义只负责文件名/文件内容——照片标签的余弦虚高且区分度低
+        // (「猫」vs「people, adult」和 vs「cat」差不了几分),会顶掉真命中
+        let fileKinds: [ItemKind] = scope == .all || scope == .file ? [.file, .fileChunk] : []
 
-        // 各通道独立检索再按排名融合(RRF)——Gemma 余弦天然偏高(标签全 0.6+),
-        // 按原始分数直接合并会压过视觉通道的真命中
-        var channels: [[SearchHit]] = []
+        var channels: [(weight: Double, hits: [SearchHit])] = []
         let siglip = await MainActor.run { models.siglip }
         let gemma = await MainActor.run { models.gemma }
+
+        // 视觉通道:SigLIP2 以英文图文对训练,中文查询先过内置词典
         if !imageKinds.isEmpty, let siglip {
-            // SigLIP2 以英文图文对训练,中文查询先过内置词典
             let q = try siglip.embedQuery(QueryUnderstanding.english(for: query) ?? query)
-            channels.append(Self.dedupByRef(try store.search(
-                space: siglip.space, kinds: imageKinds, query: q, limit: topK, minScore: 0.10)))
+            channels.append((1.0, Self.dedupByRef(try store.search(
+                space: siglip.space, kinds: imageKinds, query: q, limit: topK, minScore: 0.20))))
         }
-        if !gemmaKinds.isEmpty, let gemma {
+
+        // 标签精确通道:查询词(含词典英译)与 Vision 英文标签做 token 级比对,零幻觉
+        if !imageKinds.isEmpty {
+            let tokens = Self.queryTokens(query: query)
+            if !tokens.isEmpty, let rows = try? store.allPhotoLabels() {
+                var scored: [(refKey: String, matches: Int)] = []
+                for row in rows {
+                    let labelTokens = Set(row.title.lowercased()
+                        .components(separatedBy: CharacterSet(charactersIn: ", ")))
+                    let m = tokens.intersection(labelTokens).count
+                    if m > 0 { scored.append((row.refKey, m)) }
+                }
+                let hits = scored.sorted { $0.matches > $1.matches }.prefix(topK).map {
+                    SearchHit(kind: .photo, refKey: $0.refKey, frameIndex: 0,
+                              space: "label", title: nil, date: nil,
+                              score: Float($0.matches), color: nil)
+                }
+                if !hits.isEmpty { channels.append((1.6, Array(hits))) }
+            }
+        }
+
+        // 用户标签通道:中文子串精确匹配
+        if scope != .file, let tagRefs = try? store.searchUserTags(query: query), !tagRefs.isEmpty {
+            channels.append((1.6, tagRefs.map {
+                SearchHit(kind: .photo, refKey: $0, frameIndex: 0,
+                          space: "userTag", title: nil, date: nil, score: 1.0, color: nil)
+            }))
+        }
+
+        // 文件语义通道:Gemma 文本嵌入查文件名/内容
+        if !fileKinds.isEmpty, let gemma {
             let q = try gemma.embedQuery(query)
-            channels.append(Self.dedupByRef(try store.search(
-                space: gemma.space, kinds: gemmaKinds, query: q, limit: topK, minScore: 0.12)))
+            channels.append((1.0, Self.dedupByRef(try store.search(
+                space: gemma.space, kinds: fileKinds, query: q, limit: topK, minScore: 0.12))))
         }
 
         // OCR 文字精确通道:编号/年份/证件文字的子串匹配,权重最高、精确命中置顶
         var ocrRefs: [(refKey: String, text: String)] = []
-        if scope != .file, query.count >= 2 {
+        if scope == .all || scope == .photo, query.count >= 2 {
             ocrRefs = (try? store.searchOCR(query: query)) ?? []
         }
 
@@ -96,7 +120,7 @@ final class SearchEngine {
             }
         }
         for ch in channels {
-            for (rank, hit) in ch.enumerated() { add(hit, weight: 1.0, rank: rank) }
+            for (rank, hit) in ch.hits.enumerated() { add(hit, weight: ch.weight, rank: rank) }
         }
         for (i, ref) in ocrRefs.enumerated() {
             add(SearchHit(kind: .photo, refKey: ref.refKey, frameIndex: 0,
@@ -106,7 +130,7 @@ final class SearchEngine {
         }
         guard !fused.isEmpty else { return [] }
 
-        // 显示分 = 相对融合分(第一名 100%),替代原先满屏 66% 的原始量纲
+        // 显示分 = 相对融合分(第一名 100%)
         let maxScore = fused.values.map { $0.score }.max() ?? 1.0
         let merged: [SearchHit] = fused.values.sorted { $0.score > $1.score }.map {
             SearchHit(kind: $0.hit.kind, refKey: $0.hit.refKey, frameIndex: $0.hit.frameIndex,
@@ -114,6 +138,17 @@ final class SearchEngine {
                       score: Float($0.score / maxScore), color: $0.hit.color)
         }
         return resolve(merged)
+    }
+
+    /// 查询词集合:清洗后的原文分词 + 词典英译分词(供标签 token 比对)
+    private static func queryTokens(query: String) -> Set<String> {
+        var tokens = Set(query.lowercased()
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty })
+        if let en = QueryUnderstanding.english(for: query) {
+            for t in en.lowercased().split(separator: " ") { tokens.insert(String(t)) }
+        }
+        return tokens
     }
 
     /// 通道内按 refKey 去重(视频多帧/文件多块),供 RRF 按名次计分
@@ -153,7 +188,7 @@ final class SearchEngine {
                                       title: hit.title ?? name,
                                       score: hit.score,
                                       date: asset.creationDate,
-                                      color: hit.color))
+                                      color: hit.color ?? store.colorForRef(hit.refKey)))
             case .file, .fileChunk:
                 guard let file = try? store.file(id: hit.refKey) else { continue }
                 out.append(DisplayHit(id: "\(hit.kind.rawValue)-\(hit.refKey)",
