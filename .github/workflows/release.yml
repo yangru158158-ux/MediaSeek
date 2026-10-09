@@ -106,6 +106,9 @@ jobs:
             -archivePath build/MediaSeek.xcarchive \
             -exportOptionsPlist build/ExportOptions.plist \
             -exportPath build/ipa
+          echo "=== 打包自检:实际 Info.plist ==="
+          unzip -o -q build/ipa/*.ipa -d build/ipa_x
+          plutil -p "build/ipa_x/Payload/MediaSeek.app/Info.plist" | grep -E "Orientation|Icon|Encryption|BundleIdentifier" || true
 
       - name: 上传 TestFlight
         env:
