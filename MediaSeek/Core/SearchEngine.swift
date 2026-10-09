@@ -68,28 +68,8 @@ final class SearchEngine {
         let siglip = await MainActor.run { models.siglip }
         let gemma = await MainActor.run { models.gemma }
 
-        // 标签语义路由(通用中文入口):任意查询 → Gemma 多语言相似度 →
-        // 库内实际存在的英文标签(封闭集合,惰性建向量表)→ 再按 token 精确捞照片。
-        // 只用语义"选标签",照片匹配仍然精确,零幻觉;词典只是它的兜底。
-        var routedEnglish: String?
-        if !imageKinds.isEmpty, let gemma {
-            if let routed = Self.routeLabels(query: concept, gemma: gemma, store: store) {
-                routedEnglish = routed.enQuery
-                if !routed.hits.isEmpty { channels.append((1.5, routed.hits)) }
-            }
-        }
-
-        // 视觉通道:SigLIP2 以英文图文对训练;词典 → 路由结果 → 原文,三级取英文
-        if !imageKinds.isEmpty, let siglip {
-            let q = try siglip.embedQuery(QueryUnderstanding.english(for: concept) ?? routedEnglish ?? concept)
-            let hits = Self.dedupByRef(try store.search(
-                space: siglip.space, kinds: imageKinds, query: q, limit: topK, minScore: 0.12))
-            // 相对尾部截断:远弱于头部的长尾(如「人」里混入的屏幕翻拍照)直接砍掉
-            let best = hits.first?.score ?? 0
-            channels.append((1.0, best > 0 ? hits.filter { $0.score >= best * 0.72 } : hits))
-        }
-
-        // 标签精确通道:查询词(含词典英译)与 Vision 英文标签做 token 级比对,零幻觉
+        // 标签精确通道(优先):词典英译+同义词与 Vision 英文标签 token 级比对,零幻觉
+        var labelHits: [SearchHit] = []
         if !imageKinds.isEmpty {
             let tokens = Self.queryTokens(query: concept)
             if !tokens.isEmpty, let rows = try? store.allPhotoLabels() {
@@ -100,13 +80,33 @@ final class SearchEngine {
                     let m = tokens.intersection(labelTokens).count
                     if m > 0 { scored.append((row.refKey, m, row.title)) }
                 }
-                let hits = scored.sorted { $0.matches > $1.matches }.prefix(topK).map {
+                labelHits = Array(scored.sorted { $0.matches > $1.matches }.prefix(topK).map {
                     SearchHit(kind: .photo, refKey: $0.refKey, frameIndex: 0,
                               space: "label", title: $0.title, date: nil,
                               score: Float($0.matches), color: nil)
-                }
-                if !hits.isEmpty { channels.append((1.6, Array(hits))) }
+                })
             }
+        }
+        if !labelHits.isEmpty { channels.append((1.6, labelHits)) }
+
+        // 标签语义路由:只在精确通道零命中时兜底——短词/抽象词的嵌入发散,
+        // 路由会把 structure/document 这类标签也误判为接近,造成「人」混进店面照
+        var routedEnglish: String?
+        if !imageKinds.isEmpty, labelHits.isEmpty, let gemma {
+            if let routed = Self.routeLabels(query: concept, gemma: gemma, store: store) {
+                routedEnglish = routed.enQuery
+                if !routed.hits.isEmpty { channels.append((1.5, routed.hits)) }
+            }
+        }
+
+        // 视觉通道:SigLIP2 以英文图文对训练;词典 → 路由结果 → 原文,三级取英文
+        if !imageKinds.isEmpty, let siglip {
+            let q = try siglip.embedQuery(QueryUnderstanding.english(for: concept) ?? routedEnglish ?? concept)
+            let hits = Self.dedupByRef(try store.search(
+                space: siglip.space, kinds: imageKinds, query: q, limit: topK, minScore: 0.18))
+            // 相对尾部截断:远弱于头部的长尾(如「人」里混入的屏幕翻拍照)直接砍掉
+            let best = hits.first?.score ?? 0
+            channels.append((1.0, best > 0 ? hits.filter { $0.score >= best * 0.85 } : hits))
         }
 
         // 用户标签通道:中文子串精确匹配
