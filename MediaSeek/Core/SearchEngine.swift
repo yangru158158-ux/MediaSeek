@@ -41,7 +41,9 @@ final class SearchEngine {
     }
 
     func search(_ rawQuery: String, scope: SearchScope, topK: Int = 120) async throws -> [DisplayHit] {
-        let query = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        let raw = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !raw.isEmpty else { return [] }
+        let query = QueryUnderstanding.core(raw)
         guard !query.isEmpty else { return [] }
 
         let imageKinds: [ItemKind] = scope == .all || scope == .photo
@@ -55,21 +57,67 @@ final class SearchEngine {
             }
         }()
 
-        var hits: [SearchHit] = []
+        // 各通道独立检索再按排名融合(RRF)——Gemma 余弦天然偏高(标签全 0.6+),
+        // 按原始分数直接合并会压过视觉通道的真命中
+        var channels: [[SearchHit]] = []
         let siglip = await MainActor.run { models.siglip }
         let gemma = await MainActor.run { models.gemma }
         if !imageKinds.isEmpty, let siglip {
-            let q = try siglip.embedQuery(query)
-            hits += try store.search(space: siglip.space, kinds: imageKinds, query: q,
-                                     limit: topK, minScore: 0.12)
+            // SigLIP2 以英文图文对训练,中文查询先过内置词典
+            let q = try siglip.embedQuery(QueryUnderstanding.english(for: query) ?? query)
+            channels.append(Self.dedupByRef(try store.search(
+                space: siglip.space, kinds: imageKinds, query: q, limit: topK, minScore: 0.10)))
         }
         if !gemmaKinds.isEmpty, let gemma {
             let q = try gemma.embedQuery(query)
-            hits += try store.search(space: gemma.space, kinds: gemmaKinds, query: q,
-                                     limit: topK, minScore: 0.12)
+            channels.append(Self.dedupByRef(try store.search(
+                space: gemma.space, kinds: gemmaKinds, query: q, limit: topK, minScore: 0.12)))
         }
 
-        // 同一 refKey 保留最高分(视频多帧、照片双空间、文件多块都会命中多次)
+        // OCR 文字精确通道:编号/年份/证件文字的子串匹配,权重最高、精确命中置顶
+        var ocrRefs: [(refKey: String, text: String)] = []
+        if scope != .file, query.count >= 2 {
+            ocrRefs = (try? store.searchOCR(query: query)) ?? []
+        }
+
+        // Reciprocal Rank Fusion:贡献 = 权重/(60+名次);OCR 通道权重 8,必压语义通道
+        let K = 60.0
+        var fused: [String: (hit: SearchHit, score: Double)] = [:]
+        func add(_ hit: SearchHit, weight: Double, rank: Int) {
+            let s = weight / (K + Double(rank + 1))
+            if let cur = fused[hit.refKey] {
+                // 标题优先取语义通道命中(「含…文字」标记只留给纯 OCR 命中)
+                let winner: SearchHit
+                if cur.hit.space == "ocr", hit.space != "ocr" { winner = hit }
+                else { winner = hit.score > cur.hit.score ? hit : cur.hit }
+                fused[hit.refKey] = (winner, cur.score + s)
+            } else {
+                fused[hit.refKey] = (hit, s)
+            }
+        }
+        for ch in channels {
+            for (rank, hit) in ch.enumerated() { add(hit, weight: 1.0, rank: rank) }
+        }
+        for (i, ref) in ocrRefs.enumerated() {
+            add(SearchHit(kind: .photo, refKey: ref.refKey, frameIndex: 0,
+                          space: "ocr", title: "含「\(query)」文字",
+                          date: nil, score: 1.0, color: nil),
+                weight: 8.0, rank: i)
+        }
+        guard !fused.isEmpty else { return [] }
+
+        // 显示分 = 相对融合分(第一名 100%),替代原先满屏 66% 的原始量纲
+        let maxScore = fused.values.map { $0.score }.max() ?? 1.0
+        let merged: [SearchHit] = fused.values.sorted { $0.score > $1.score }.map {
+            SearchHit(kind: $0.hit.kind, refKey: $0.hit.refKey, frameIndex: $0.hit.frameIndex,
+                      space: $0.hit.space, title: $0.hit.title, date: $0.hit.date,
+                      score: Float($0.score / maxScore), color: $0.hit.color)
+        }
+        return resolve(merged)
+    }
+
+    /// 通道内按 refKey 去重(视频多帧/文件多块),供 RRF 按名次计分
+    private static func dedupByRef(_ hits: [SearchHit]) -> [SearchHit] {
         var best: [String: SearchHit] = [:]
         for hit in hits {
             if let cur = best[hit.refKey] {
@@ -78,21 +126,7 @@ final class SearchEngine {
                 best[hit.refKey] = hit
             }
         }
-
-        // OCR 文字精确层:编号/年份/证件文字的子串匹配(与语义通道互补,精确命中置顶)
-        if scope != .file, query.count >= 2,
-           let ocrRefs = try? store.searchOCR(query: query) {
-            for (refKey, _) in ocrRefs where best[refKey] == nil {
-                best[refKey] = SearchHit(kind: .photo, refKey: refKey, frameIndex: 0,
-                                         space: "ocr", title: "含「\(query)」文字",
-                                         date: nil, score: 1.0, color: nil)
-            }
-        }
-
-        guard !best.isEmpty else { return [] }
-        let merged = best.values.sorted { $0.score > $1.score }
-
-        return resolve(merged)
+        return best.values.sorted { $0.score > $1.score }
     }
 
     private func resolve(_ hits: [SearchHit]) -> [DisplayHit] {
