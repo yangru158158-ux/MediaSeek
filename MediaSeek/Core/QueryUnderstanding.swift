@@ -54,6 +54,36 @@ enum QueryUnderstanding {
         return matches.sorted { $0.pos < $1.pos }.map(\.en).joined(separator: " ")
     }
 
+    /// 英文同义扩展:标签是 woman、查询是 girl 时精确匹配会漏,必须互相打通
+    static let synonyms: [String: [String]] = [
+        "person": ["people", "human", "adult", "man", "woman"],
+        "people": ["person", "adult", "crowd"],
+        "man": ["male", "person", "people"], "men": ["man", "people"],
+        "woman": ["girl", "female", "person", "people"], "women": ["woman", "people"],
+        "girl": ["woman", "female", "person", "people"], "lady": ["woman", "female"],
+        "female": ["woman", "girl", "person", "people"],
+        "boy": ["man", "male", "person", "people"], "male": ["man", "boy", "person"],
+        "baby": ["infant"], "child": ["kid", "baby"], "kid": ["child"],
+        "cat": ["kitten"], "kitten": ["cat"],
+        "dog": ["puppy"], "puppy": ["dog"],
+        "car": ["vehicle", "automobile"],
+        "screen": ["monitor", "display"], "monitor": ["screen", "display"],
+        "food": ["meal", "dish"], "flower": ["blossom"],
+        "sea": ["ocean"], "ocean": ["sea"], "beach": ["sea", "shore"],
+        "document": ["paperwork", "text"], "text": ["document"],
+        "portrait": ["face", "person"], "face": ["portrait"],
+        "beautiful": ["pretty", "attractive"],
+    ]
+
+    /// 词集做一跳同义扩展
+    static func expandedTokens(_ tokens: Set<String>) -> Set<String> {
+        var out = tokens
+        for t in tokens {
+            if let syn = synonyms[t] { out.formUnion(syn) }
+        }
+        return out
+    }
+
     /// 常用拍摄主体/场景中→英(SigLIP2 通道);命中方式=子串,长词更优先靠排序位置自然处理
     static let dictionary: [(String, String)] = [
         // 动物

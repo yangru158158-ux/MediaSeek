@@ -60,7 +60,7 @@ final class SearchEngine {
         if !imageKinds.isEmpty, let siglip {
             let q = try siglip.embedQuery(QueryUnderstanding.english(for: query) ?? query)
             channels.append((1.0, Self.dedupByRef(try store.search(
-                space: siglip.space, kinds: imageKinds, query: q, limit: topK, minScore: 0.15))))
+                space: siglip.space, kinds: imageKinds, query: q, limit: topK, minScore: 0.12))))
         }
 
         // 标签精确通道:查询词(含词典英译)与 Vision 英文标签做 token 级比对,零幻觉
@@ -140,7 +140,7 @@ final class SearchEngine {
         return resolve(merged)
     }
 
-    /// 查询词集合:清洗后的原文分词 + 词典英译分词(供标签 token 比对)
+    /// 查询词集合:清洗后的原文分词 + 词典英译分词,再做一跳同义扩展(供标签 token 比对)
     private static func queryTokens(query: String) -> Set<String> {
         var tokens = Set(query.lowercased()
             .components(separatedBy: .whitespacesAndNewlines)
@@ -148,7 +148,7 @@ final class SearchEngine {
         if let en = QueryUnderstanding.english(for: query) {
             for t in en.lowercased().split(separator: " ") { tokens.insert(String(t)) }
         }
-        return tokens
+        return QueryUnderstanding.expandedTokens(tokens)
     }
 
     /// 通道内按 refKey 去重(视频多帧/文件多块),供 RRF 按名次计分
