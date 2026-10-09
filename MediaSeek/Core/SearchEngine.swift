@@ -141,15 +141,21 @@ final class SearchEngine {
         }
 
         // OCR 文字精确通道:「或」语义——每个词独立命中"含该文字"的照片,
-        // 与视觉通道取并集;单字也生效(搜「人」= 有人物形象或有"人"字)
+        // 与视觉通道取并集;标题附命中片段,方便核对为什么命中(小字/页脚也会算)
         if scope == .all || scope == .photo {
+            func snippet(_ text: String, _ term: String) -> String {
+                guard let r = text.range(of: term) else { return String(text.prefix(30)) }
+                let s = text.index(r.lowerBound, offsetBy: -12, limitedBy: text.startIndex) ?? text.startIndex
+                let e = text.index(r.upperBound, offsetBy: 12, limitedBy: text.endIndex) ?? text.endIndex
+                return String(text[s..<e]).replacingOccurrences(of: "\n", with: " ")
+            }
             var seen = Set<String>()
             var rank = 0
             for t in (textTerms.isEmpty ? [query] : textTerms) where !t.isEmpty {
                 for ref in (try? store.searchOCR(query: t)) ?? [] where !seen.contains(ref.refKey) {
                     seen.insert(ref.refKey)
                     add(SearchHit(kind: .photo, refKey: ref.refKey, frameIndex: 0,
-                                  space: "ocr", title: "含「\(t)」文字",
+                                  space: "ocr", title: "含「\(t)」:\(snippet(ref.text, t))",
                                   date: nil, score: 1.0, color: nil),
                         weight: 8.0, rank: rank)
                     rank += 1
