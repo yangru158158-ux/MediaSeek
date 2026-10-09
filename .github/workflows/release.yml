@@ -64,8 +64,9 @@ jobs:
       - name: 归档(手动签名)
         env:
           TEAM_ID: ${{ secrets.DEVELOPMENT_TEAM_ID }}
+          BUILD_NUM: ${{ github.run_number }}
         run: |
-          xcodebuild archive \
+          xcodebuild archive             CURRENT_PROJECT_VERSION="$BUILD_NUM" \
             -project MediaSeek.xcodeproj \
             -scheme MediaSeek \
             -configuration Release \
