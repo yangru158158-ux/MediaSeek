@@ -60,7 +60,7 @@ final class SearchEngine {
         if !imageKinds.isEmpty, let siglip {
             let q = try siglip.embedQuery(QueryUnderstanding.english(for: query) ?? query)
             channels.append((1.0, Self.dedupByRef(try store.search(
-                space: siglip.space, kinds: imageKinds, query: q, limit: topK, minScore: 0.20))))
+                space: siglip.space, kinds: imageKinds, query: q, limit: topK, minScore: 0.15))))
         }
 
         // 标签精确通道:查询词(含词典英译)与 Vision 英文标签做 token 级比对,零幻觉

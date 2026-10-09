@@ -1,7 +1,8 @@
 import CoreGraphics
 
-/// 照片主色调分析:8×8 下采样平均色 → HSV → 中文色名。
+/// 照片主色调分析:8×8 下采样 → 逐像素分档 → 票数最多的色档。
 /// 纯数学计算,无模型参与,结果确定性 100%。
+/// 不用整图平均:白底截图上的蓝色链接/头像会把平均值带偏成「蓝」。
 enum PhotoColor {
     static let buckets = ["红", "橙", "黄", "绿", "青", "蓝", "紫", "粉", "黑", "灰", "白"]
 
@@ -14,12 +15,21 @@ enum PhotoColor {
                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
         ctx.interpolationQuality = .low
         ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
-        var r = 0.0, g = 0.0, b = 0.0
+        var votes = [String: Int]()
         for i in stride(from: 0, to: pix.count, by: 4) {
-            r += Double(pix[i]); g += Double(pix[i + 1]); b += Double(pix[i + 2])
+            let name = classify(r: Double(pix[i]) / 255,
+                                g: Double(pix[i + 1]) / 255,
+                                b: Double(pix[i + 2]) / 255)
+            votes[name, default: 0] += 1
         }
-        let n = Double(w * h)
-        return classify(r: r / n / 255, g: g / n / 255, b: b / n / 255)
+        // 固定顺序取票数最高档,平票取靠前者,保证确定性
+        var bestName: String?
+        var bestCount = -1
+        for name in buckets {
+            let c = votes[name] ?? 0
+            if c > bestCount { bestCount = c; bestName = name }
+        }
+        return bestName
     }
 
     static func classify(r: Double, g: Double, b: Double) -> String {

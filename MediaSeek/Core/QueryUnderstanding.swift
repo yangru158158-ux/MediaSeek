@@ -88,13 +88,16 @@ enum QueryUnderstanding {
         ("蔬菜", "vegetables"), ("沙拉", "salad"), ("寿司", "sushi"), ("披萨", "pizza"),
         ("冰淇淋", "ice cream"), ("烧烤", "barbecue"),
         // 人物/事件
-        ("人物", "person"), ("人们", "people"), ("男人", "man"), ("女人", "woman"),
-        ("男孩", "boy"), ("女孩", "girl"), ("孩子", "child"), ("婴儿", "baby"),
+        ("人", "person"), ("人们", "people"), ("人物", "person"), ("人像", "portrait person"),
+        ("女生", "girl"), ("男生", "boy"), ("女孩", "girl"), ("男孩", "boy"),
+        ("男人", "man"), ("女人", "woman"),
+        ("孩子", "child"), ("婴儿", "baby"),
         ("老人", "elderly person"), ("自拍", "selfie"), ("合影", "group photo"),
         ("婚礼", "wedding"), ("生日", "birthday"), ("派对", "party"), ("毕业", "graduation"),
         ("舞蹈", "dancing"), ("唱歌", "singing"), ("运动", "sports"), ("跑步", "running"),
         ("游泳", "swimming"), ("足球", "soccer"), ("篮球", "basketball"),
         ("羽毛球", "badminton"), ("网球", "tennis"), ("爬山", "hiking"), ("瑜伽", "yoga"),
+        ("动物", "animal"), ("风景", "landscape scenery"), ("植物", "plant"),
         // 物品/电子
         ("手机", "smartphone"), ("电脑", "computer"), ("笔记本", "laptop"),
         ("屏幕", "screen"), ("显示器", "monitor"), ("电视", "television"),
