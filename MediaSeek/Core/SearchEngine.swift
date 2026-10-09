@@ -89,19 +89,11 @@ final class SearchEngine {
         }
         if !labelHits.isEmpty { channels.append((1.6, labelHits)) }
 
-        // 标签语义路由:只在精确通道零命中时兜底——短词/抽象词的嵌入发散,
-        // 路由会把 structure/document 这类标签也误判为接近,造成「人」混进店面照
-        var routedEnglish: String?
-        if !imageKinds.isEmpty, labelHits.isEmpty, let gemma {
-            if let routed = Self.routeLabels(query: concept, gemma: gemma, store: store) {
-                routedEnglish = routed.enQuery
-                if !routed.hits.isEmpty { channels.append((1.5, routed.hits)) }
-            }
-        }
-
-        // 视觉通道:SigLIP2 以英文图文对训练;词典 → 路由结果 → 原文,三级取英文
+        // 视觉通道:SigLIP2 原生多语言(分词实验已证),中文原文直接查;
+        // 不再用语义路由——泛化标签(document/screenshot)会被几乎任何词
+        // 以 ≥0.60 命中,造成整库截图照灌进结果(「医学出生证明」事故)
         if !imageKinds.isEmpty, let siglip {
-            let q = try siglip.embedQuery(QueryUnderstanding.english(for: concept) ?? routedEnglish ?? concept)
+            let q = try siglip.embedQuery(QueryUnderstanding.english(for: concept) ?? concept)
             let hits = Self.dedupByRef(try store.search(
                 space: siglip.space, kinds: imageKinds, query: q, limit: topK, minScore: 0.18))
             // 相对尾部截断:远弱于头部的长尾(如「人」里混入的屏幕翻拍照)直接砍掉
@@ -160,6 +152,33 @@ final class SearchEngine {
                         weight: 8.0, rank: rank)
                     rank += 1
                 }
+
+                // 长中文词整句 LIKE 会因语序漏匹配(搜「医学出生证明」,证书上印的
+                // 是「出生医学证明」)→ 二字滑窗片段 OR,≥2 个片段命中才算,按数排序
+                if textTerms.isEmpty, query.count >= 4 {
+                    var grams: [String] = []
+                    var seenGram = Set<String>()
+                    let chars = Array(query)
+                    for i in 0..<(chars.count - 1) {
+                        let g = String(chars[i...i + 1])
+                        if seenGram.insert(g).inserted { grams.append(g) }
+                    }
+                    var counts: [String: Int] = [:]
+                    for g in grams {
+                        for ref in (try? store.searchOCR(query: g)) ?? [] {
+                            counts[ref.refKey, default: 0] += 1
+                        }
+                    }
+                    let multi = counts.filter { $0.value >= 2 }
+                        .sorted { $0.value > $1.value }
+                        .prefix(topK)
+                    for (i, e) in multi.enumerated() {
+                        add(SearchHit(kind: .photo, refKey: e.key, frameIndex: 0,
+                                      space: "ocr", title: "含「\(query)」相关文字(命中\(e.value)处)",
+                                      date: nil, score: 1.0, color: nil),
+                            weight: 5.0, rank: rank + i)
+                    }
+                }
             }
         }
 
@@ -189,54 +208,6 @@ final class SearchEngine {
         return QueryUnderstanding.expandedTokens(tokens)
     }
 
-    /// 语义路由:取语义最近的至多 3 个库内标签(余弦 ≥ 0.60),按 token 精确捞照片;
-    /// 顺带返回标签英文串给视觉通道当查询。词向量表惰性补齐,每次最多嵌 200 条。
-    private static func routeLabels(query: String, gemma: GemmaTextEmbedder, store: VectorStore)
-        -> (enQuery: String, hits: [SearchHit])? {
-        guard let labels = try? store.allDistinctLabels(), !labels.isEmpty else { return nil }
-        var vocab = (try? store.labelVocab()) ?? []
-        let known = Set(vocab.map { $0.label })
-        let missing = labels.filter { !known.contains($0) }.prefix(200)
-        for label in missing {
-            guard let v = try? gemma.embedDocument(label) else { continue }
-            try? store.saveLabelVec(label, vec: v)
-            vocab.append((label: label, vec: v))
-        }
-        guard !vocab.isEmpty, let qv = try? gemma.embedQuery(query) else { return nil }
-        let picked = vocab
-            .map { (label: $0.label, cos: Self.cosine($0.vec, qv)) }
-            .filter { $0.cos >= 0.60 }
-            .sorted { $0.cos > $1.cos }
-            .prefix(3)
-        guard !picked.isEmpty else { return nil }
-        let chosen = Set(picked.map { $0.label })
-        let tokens = Set(picked.flatMap {
-            $0.label.lowercased().components(separatedBy: CharacterSet(charactersIn: ", "))
-        })
-        let rows = (try? store.allPhotoLabels()) ?? []
-        var hits: [SearchHit] = []
-        for row in rows {
-            let lt = Set(row.title.lowercased().components(separatedBy: CharacterSet(charactersIn: ", ")))
-            if !lt.isDisjoint(with: tokens) {
-                hits.append(SearchHit(kind: .photo, refKey: row.refKey, frameIndex: 0,
-                                      space: "label", title: row.title, date: nil,
-                                      score: 1.0, color: nil))
-            }
-            if hits.count >= 120 { break }   // 上限:热门标签会命中全库,不能全部放行
-        }
-        let en = picked.map { $0.label }.sorted().joined(separator: " ")
-        return (en, hits)
-    }
-
-    private static func cosine(_ a: [Float], _ b: [Float]) -> Float {
-        guard a.count == b.count, !a.isEmpty else { return 0 }
-        var dot: Float = 0, na: Float = 0, nb: Float = 0
-        for i in 0..<a.count {
-            dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]
-        }
-        guard na > 0, nb > 0 else { return 0 }
-        return dot / (na.squareRoot() * nb.squareRoot())
-    }
 
     /// 通道内按 refKey 去重(视频多帧/文件多块),供 RRF 按名次计分
     private static func dedupByRef(_ hits: [SearchHit]) -> [SearchHit] {
