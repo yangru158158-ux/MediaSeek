@@ -1,0 +1,65 @@
+name: Tokenizer Chinese Test
+# 判定实验:App 端 swift-transformers 编码中文,与 Python 官方分词器对照
+# Python 真值(256k Gemma BPE):
+#   woman [14172,1]  girl [18200,1]  美女 [73028,1]  人 [235444,1]
+#   证件 [222502,1]  电脑屏幕 [59720,62471,1]  2026 [235284,235276,235284,235318,1]
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 下载分词器文件
+        run: |
+          mkdir -p tokfiles
+          for f in config.json tokenizer_config.json tokenizer.json; do
+            curl -sSL -o tokfiles/$f "https://huggingface.co/google/siglip2-base-patch16-256/resolve/main/$f"
+          done
+          ls -la tokfiles
+
+      - name: Python 官方真值
+        run: |
+          pip3 install -q transformers
+          python3 - <<'PY'
+          from transformers import AutoTokenizer
+          tok = AutoTokenizer.from_pretrained("tokfiles")
+          for t in ["woman", "girl", "美女", "人", "证件", "电脑屏幕", "2026"]:
+              print("PY", t, tok(t)["input_ids"])
+          PY
+
+      - name: Swift(App 同款实现)
+        run: |
+          mkdir toktest && cd toktest
+          cat > Package.swift <<'PKG'
+          // swift-tools-version:5.9
+          import PackageDescription
+          let pkg = Package(
+            name: "TokTest",
+            dependencies: [.package(url: "https://github.com/huggingface/swift-transformers", branch: "main")],
+            targets: [.executableTarget(name: "TokTest",
+                       dependencies: [.product(name: "Tokenizers", package: "swift-transformers")])]
+          )
+          PKG
+          mkdir -p Sources/TokTest
+          cat > Sources/TokTest/main.swift <<'SW'
+          import Foundation
+          import Tokenizers
+          let folder = URL(fileURLWithPath: FileManager.default.currentDirectoryPath + "/../tokfiles")
+          let sema = DispatchSemaphore(value: 0)
+          Task {
+            do {
+              let tok = try await AutoTokenizer.from(modelFolder: folder)
+              for text in ["woman", "girl", "美女", "人", "证件", "电脑屏幕", "2026"] {
+                print("SW", text, "->", tok.encode(text: text))
+              }
+            } catch {
+              print("SW FAIL:", error)
+            }
+            sema.signal()
+          }
+          sema.wait()
+          SW
+          swift run -c release 2>&1 | grep -E "^SW|Compiling|error" | tail -20
