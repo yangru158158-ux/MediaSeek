@@ -19,6 +19,14 @@ jobs:
       - name: 安装 XcodeGen
         run: brew install xcodegen
 
+      - name: 选择最新 Xcode(需 26 以上)
+        run: |
+          ls /Applications | grep Xcode || true
+          LATEST=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          echo "使用 $LATEST"
+          sudo xcode-select -s "$LATEST"
+          xcodebuild -version
+
       - name: 写入上传用 API 密钥
         env:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
