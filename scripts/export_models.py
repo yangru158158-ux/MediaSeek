@@ -50,6 +50,13 @@ def copy_tokenizer(model_id: str, out_dir: str):
     from huggingface_hub import hf_hub_download
     src = hf_hub_download(model_id, "tokenizer.json")
     shutil.copy(src, os.path.join(out_dir, "tokenizer.json"))
+    # swift-transformers 加载时需要 config.json / tokenizer_config.json
+    for name in ("config.json", "tokenizer_config.json"):
+        try:
+            f = hf_hub_download(model_id, name)
+            shutil.copy(f, os.path.join(out_dir, name))
+        except Exception as e:
+            print(f"  警告: {name} 下载失败({e}),App 端会自动补最小配置")
 
 
 def export_gemma(out_root: str, model_id: str, fp16: bool):
