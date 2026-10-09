@@ -207,7 +207,7 @@ struct SearchView: View {
                     .padding(.top, 60)
             } else {
                 LazyVGrid(columns: columns, spacing: 12) {
-                    ForEach(results) { hit in
+                    ForEach(visibleResults) { hit in
                         Button {
                             if selectionMode {
                                 if selected.contains(hit.id) { selected.remove(hit.id) } else { selected.insert(hit.id) }
@@ -231,7 +231,7 @@ struct SearchView: View {
         let q = query.trimmingCharacters(in: .whitespaces)
         Task {
             do {
-                let n = try await SearchExporter.saveToAlbum(title: q, hits: results)
+                let n = try await SearchExporter.saveToAlbum(title: q, hits: visibleResults)
                 await MainActor.run { app.notify("已把 \(n) 个项目存入相册「搜索·\(q)」") }
             } catch {
                 await MainActor.run { app.fail(error) }
@@ -247,7 +247,7 @@ struct SearchView: View {
         Task {
             do {
                 let (n, url) = try await SearchExporter.exportToFiles(
-                    folderName: q, hits: results,
+                    folderName: q, hits: visibleResults,
                     photo: app.photoLib, imports: app.imports)
                 await MainActor.run { app.notify("已导出 \(n) 个文件\n位置:「文件」App → 智搜 → 导出 → \(url.lastPathComponent)") }
             } catch {

@@ -105,6 +105,7 @@ final class IndexingCoordinator: ObservableObject {
 
             try await syncPhotoLibrary()
             try await syncImportedFiles()
+            await prebuildLabelVocab()   // 重建完成后预建路由词表,首次搜索不再有一次性延迟
 
             lastSyncAt = Date()
             phase = .done
@@ -112,6 +113,17 @@ final class IndexingCoordinator: ObservableObject {
             phase = .idle
         } catch {
             phase = .failed(error.localizedDescription)
+        }
+    }
+
+    /// 把库内去重标签全部嵌入词向量表(语义路由用),量级几百条、一次性
+    private func prebuildLabelVocab() async {
+        guard let gemma = models.gemma,
+              let labels = try? store.allDistinctLabels(), !labels.isEmpty else { return }
+        let known = Set(((try? store.labelVocab()) ?? []).map { $0.label })
+        for label in labels.prefix(2000) where !known.contains(label) {
+            guard let v = try? gemma.embedDocument(label) else { continue }
+            try? store.saveLabelVec(label, vec: v)
         }
     }
 
