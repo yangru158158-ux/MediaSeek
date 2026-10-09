@@ -182,14 +182,21 @@ final class IndexingCoordinator: ObservableObject {
         clip: SigLIPEmbedder?, gemma: GemmaTextEmbedder?, useLabels: Bool) async -> Int {
         guard let clip, let gemma else { return 0 }
         do {
-            guard let cg = try await photo.image(for: asset, maxPixel: 320) else { return 0 }
+            // 1280px 用于 OCR 文字识别;320px 用于嵌入向量
+            guard let full = try await photo.image(for: asset, maxPixel: 1280) else { return 0 }
             try Task.checkCancellation()   // 取消:取图后立即中断
-            let colorBucket = PhotoColor.bucket(of: cg)
-            let vec = try clip.embedImage(cg)
+            let small = Self.downscaled(full, to: 320)
+            let colorBucket = PhotoColor.bucket(of: small)
+            let vec = try clip.embedImage(small)
             try store.upsert(kind: .photo, refKey: asset.localIdentifier, space: clip.space,
                              vector: vec, title: nil, date: asset.creationDate, color: colorBucket)
 
-            guard useLabels, let labels = Self.visionLabels(cg: cg), !labels.isEmpty else { return 0 }
+            // OCR 文字层:屏幕文字/证件名/编号可被精确检索
+            if let ocr = Self.recognizeText(in: full) {
+                try store.saveOCR(refKey: asset.localIdentifier, text: ocr)
+            }
+
+            guard useLabels, let labels = Self.visionLabels(cg: small), !labels.isEmpty else { return 0 }
             try Task.checkCancellation()
             let lvec = try gemma.embedDocument("photo tags: \(labels)")
             try store.upsert(kind: .photoLabel, refKey: asset.localIdentifier, space: gemma.space,
@@ -235,6 +242,35 @@ final class IndexingCoordinator: ObservableObject {
         } catch {
             return nil
         }
+    }
+
+    /// Vision 文字识别(OCR):简繁中文+英文,精确检索层的数据来源
+    nonisolated private static func recognizeText(in cg: CGImage) -> String? {
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.recognitionLanguages = ["zh-Hans", "zh-Hant", "en-US"]
+        request.usesLanguageCorrection = false
+        let handler = VNImageRequestHandler(cgImage: cg, options: [:])
+        do {
+            try handler.perform([request])
+            let lines = (request.results as? [VNRecognizedTextObservation])?
+                .compactMap { $0.topCandidates(1).first?.string } ?? []
+            let joined = lines.joined(separator: "\n")
+            return joined.isEmpty ? nil : String(joined.prefix(2000))
+        } catch {
+            return nil
+        }
+    }
+
+    /// 高分辨率图降采样到嵌入模型需要的尺寸
+    nonisolated private static func downscaled(_ image: CGImage, to side: Int) -> CGImage {
+        let cs = CGColorSpaceCreateDeviceRGB()
+        let ctx = CGContext(data: nil, width: side, height: side, bitsPerComponent: 8,
+                            bytesPerRow: side * 4, space: cs,
+                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        ctx.interpolationQuality = .medium
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: side, height: side))
+        return ctx.makeImage()!
     }
 
     // MARK: - 导入文件

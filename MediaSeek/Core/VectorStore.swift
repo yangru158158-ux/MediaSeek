@@ -56,6 +56,7 @@ final class VectorStore {
         try exec("PRAGMA journal_mode=WAL")
         try exec("PRAGMA synchronous=NORMAL")
         try? exec("ALTER TABLE items ADD COLUMN color TEXT")
+        try exec("CREATE TABLE IF NOT EXISTS ocr_text(ref_key TEXT PRIMARY KEY, text TEXT)")
         try exec("""
         CREATE TABLE IF NOT EXISTS items(
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -169,6 +170,8 @@ final class VectorStore {
         let stmt = try prepare("DELETE FROM items WHERE kind IN (\(ph)) AND ref_key = ?")
         defer { sqlite3_finalize(stmt) }
         try exec("BEGIN")
+        let ocrStmt = try prepare("DELETE FROM ocr_text WHERE ref_key = ?")
+        defer { sqlite3_finalize(ocrStmt) }
         for key in stale {
             for (i, k) in kinds.enumerated() {
                 sqlite3_bind_text(stmt, Int32(i + 1), k.rawValue, -1, Self.transient)
@@ -177,6 +180,10 @@ final class VectorStore {
             sqlite3_step(stmt)
             sqlite3_reset(stmt)
             sqlite3_clear_bindings(stmt)
+            sqlite3_bind_text(ocrStmt, 1, key, -1, Self.transient)
+            sqlite3_step(ocrStmt)
+            sqlite3_reset(ocrStmt)
+            sqlite3_clear_bindings(ocrStmt)
         }
         try exec("COMMIT")
     }
@@ -288,12 +295,50 @@ final class VectorStore {
         return out
     }
 
+    /// 移除某照片/视频/文件的**全部**索引行(各类型)
+    func removeEverythingForRef(_ refKey: String) throws {
+        let stmt = try prepare("DELETE FROM items WHERE ref_key = ?")
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, refKey, -1, Self.transient)
+        sqlite3_step(stmt)
+        let stmt2 = try prepare("DELETE FROM ocr_text WHERE ref_key = ?")
+        defer { sqlite3_finalize(stmt2) }
+        sqlite3_bind_text(stmt2, 1, refKey, -1, Self.transient)
+        sqlite3_step(stmt2)
+    }
+
     func deleteUserTag(refKey: String, tag: String) throws {
         let stmt = try prepare("DELETE FROM items WHERE kind = 'userTag' AND ref_key = ? AND title = ?")
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, refKey, -1, Self.transient)
         sqlite3_bind_text(stmt, 2, tag, -1, Self.transient)
         sqlite3_step(stmt)
+    }
+
+    /// 保存照片的 OCR 文字(每照片一行,重复覆盖)
+    func saveOCR(refKey: String, text: String) throws {
+        let stmt = try prepare("INSERT OR REPLACE INTO ocr_text(ref_key, text) VALUES(?,?)")
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, refKey, -1, Self.transient)
+        sqlite3_bind_text(stmt, 2, text, -1, Self.transient)
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw MSError("OCR 保存失败") }
+    }
+
+    /// OCR 文字精确检索(子串匹配,支持中文/数字/编号)
+    func searchOCR(query: String) throws -> [(refKey: String, text: String)] {
+        guard let db, !query.isEmpty else { return [] }
+        let escaped = query
+            .replacingOccurrences(of: "%", with: "\\%")
+            .replacingOccurrences(of: "_", with: "\\_")
+        let stmt = try prepare("SELECT ref_key, text FROM ocr_text WHERE text LIKE ? ESCAPE '\\' LIMIT 80")
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, "%\(escaped)%", -1, Self.transient)
+        var out: [(String, String)] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            out.append((String(cString: sqlite3_column_text(stmt, 0)),
+                        String(cString: sqlite3_column_text(stmt, 1))))
+        }
+        return out.map { (refKey: $0.0, text: $0.1) }
     }
 
     /// 移除某照片/视频/文件的**全部**索引行(各类型)
