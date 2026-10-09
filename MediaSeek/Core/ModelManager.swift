@@ -138,6 +138,10 @@ final class ModelManager: ObservableObject {
 
     /// zip 根目录应包含 TextEmbedder/ 与 ImageEmbedder/(各含 .mlpackage、tokenizer.json、meta.json)
     func importModelZip(at url: URL) async throws {
+        // 文件选择器给的是安全域 URL,必须先申请访问权
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("model-import-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
