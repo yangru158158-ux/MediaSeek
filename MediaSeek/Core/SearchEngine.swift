@@ -46,8 +46,8 @@ final class SearchEngine {
         let query = QueryUnderstanding.core(raw)
         guard !query.isEmpty else { return [] }
 
-        // 多词查询:「2026 电脑屏幕」→ 含数字的词走 OCR 文字匹配(AND),
-        // 其余词走视觉/标签;混合查询的结果须同时满足两边
+        // 多词查询:「2026 电脑屏幕」→ 含数字的词走 OCR 文字匹配,
+        // 其余词走视觉/标签;「或」语义:照片满足任一条件(像/含字)即显示
         let terms = query.components(separatedBy: CharacterSet(charactersIn: " ,、,/"))
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
@@ -140,32 +140,19 @@ final class SearchEngine {
             }
         }
 
-        // OCR 文字精确通道:数字词组合按 AND 求交;混合查询再与视觉结果取交集
-        var ocrMust: Set<String>?
+        // OCR 文字精确通道:「或」语义——每个词独立命中"含该文字"的照片,
+        // 与视觉通道取并集;单字也生效(搜「人」= 有人物形象或有"人"字)
         if scope == .all || scope == .photo {
-            if !textTerms.isEmpty {
-                var acc: Set<String>? = nil
-                for t in textTerms {
-                    let set = Set(((try? store.searchOCR(query: t)) ?? []).map(\.refKey))
-                    acc = (acc ?? set).intersection(set)
-                    if acc?.isEmpty == true { break }
-                }
-                guard let acc, !acc.isEmpty else { return [] }   // AND 无解 → 诚实空
-                let title = "含「\(textTerms.joined(separator: " "))」文字"
-                for (i, ref) in acc.sorted().prefix(topK).enumerated() {
-                    add(SearchHit(kind: .photo, refKey: ref, frameIndex: 0,
-                                  space: "ocr", title: title,
-                                  date: nil, score: 1.0, color: nil),
-                        weight: 8.0, rank: i)
-                }
-                if !visualTerms.isEmpty { ocrMust = acc }   // 混合查询:视觉命中须同时含文字
-            } else if query.count >= 2 {
-                let refs = (try? store.searchOCR(query: query)) ?? []
-                for (i, ref) in refs.enumerated() {
+            var seen = Set<String>()
+            var rank = 0
+            for t in (textTerms.isEmpty ? [query] : textTerms) where !t.isEmpty {
+                for ref in (try? store.searchOCR(query: t)) ?? [] where !seen.contains(ref.refKey) {
+                    seen.insert(ref.refKey)
                     add(SearchHit(kind: .photo, refKey: ref.refKey, frameIndex: 0,
-                                  space: "ocr", title: "含「\(query)」文字",
+                                  space: "ocr", title: "含「\(t)」文字",
                                   date: nil, score: 1.0, color: nil),
-                        weight: 8.0, rank: i)
+                        weight: 8.0, rank: rank)
+                    rank += 1
                 }
             }
         }
@@ -174,10 +161,6 @@ final class SearchEngine {
             for (rank, hit) in ch.hits.enumerated() { add(hit, weight: ch.weight, rank: rank) }
         }
         guard !fused.isEmpty else { return [] }
-        if let ocrMust {
-            fused = fused.filter { ocrMust.contains($0.key) }
-            guard !fused.isEmpty else { return [] }   // 视觉命中里没有同时含文字的 → 诚实空
-        }
 
         // 显示分 = 相对融合分(第一名 100%)
         let maxScore = fused.values.map { $0.score }.max() ?? 1.0
