@@ -16,6 +16,7 @@ enum SearchTarget {
 
 struct DisplayHit: Identifiable {
     let id: String
+    let refKey: String
     let target: SearchTarget
     let kind: ItemKind
     let title: String
@@ -46,10 +47,10 @@ final class SearchEngine {
             ? [.photo] : (scope == .video ? [.videoFrame] : [])
         let gemmaKinds: [ItemKind] = {
             switch scope {
-            case .all: return [.photoLabel, .file, .fileChunk]
-            case .photo: return [.photoLabel]
+            case .all: return [.photoLabel, .userTag, .file, .fileChunk]
+            case .photo: return [.photoLabel, .userTag]
             case .file: return [.file, .fileChunk]
-            case .video: return []
+            case .video: return [.userTag]
             }
         }()
 
@@ -96,10 +97,11 @@ final class SearchEngine {
         var out: [DisplayHit] = []
         for hit in hits {
             switch hit.kind {
-            case .photo, .photoLabel, .videoFrame:
+            case .photo, .photoLabel, .userTag, .videoFrame:
                 guard let asset = assets[hit.refKey] else { continue }
                 let name = asset.mediaType == .video ? "视频" : "照片"
                 out.append(DisplayHit(id: "\(hit.kind.rawValue)-\(hit.refKey)",
+                                      refKey: hit.refKey,
                                       target: .asset(asset),
                                       kind: hit.kind,
                                       title: hit.title ?? name,
@@ -108,6 +110,7 @@ final class SearchEngine {
             case .file, .fileChunk:
                 guard let file = try? store.file(id: hit.refKey) else { continue }
                 out.append(DisplayHit(id: "\(hit.kind.rawValue)-\(hit.refKey)",
+                                      refKey: hit.refKey,
                                       target: .file(file),
                                       kind: hit.kind,
                                       title: hit.title ?? file.name,

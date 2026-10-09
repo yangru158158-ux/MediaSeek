@@ -5,7 +5,7 @@ import Accelerate
 /// 媒体条目类别。photoLabel 是照片的 Vision 标签文本向量(gemma 空间),
 /// 让"一只猫"这类中文查询通过多语言文本模型命中照片。
 enum ItemKind: String, CaseIterable {
-    case photo, photoLabel, videoFrame, file, fileChunk
+    case photo, photoLabel, userTag, videoFrame, file, fileChunk
 }
 
 struct SearchHit {
@@ -188,7 +188,7 @@ final class VectorStore {
         guard let db else { return [:] }
         let stmt = try prepare("""
         SELECT kind, COUNT(DISTINCT ref_key) FROM items
-        WHERE kind != 'photoLabel' GROUP BY kind
+        WHERE kind NOT IN ('photoLabel','userTag') GROUP BY kind
         """)
         defer { sqlite3_finalize(stmt) }
         var out: [ItemKind: Int] = [:]
@@ -262,6 +262,30 @@ final class VectorStore {
             throw MSError("找不到源文件夹,可能已被移动或删除")
         }
         return Data(bytes: blob, count: Int(sqlite3_column_bytes(stmt, 0)))
+    }
+
+    // MARK: - 用户标签(人名/主题)
+
+    func userTags(forRefKey refKey: String) throws -> [String] {
+        guard let db else { return [] }
+        let stmt = try prepare("SELECT title FROM items WHERE kind = 'userTag' AND ref_key = ? ORDER BY id")
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, refKey, -1, Self.transient)
+        var out: [String] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let c = sqlite3_column_text(stmt, 0) {
+                out.append(String(cString: c))
+            }
+        }
+        return out
+    }
+
+    func deleteUserTag(refKey: String, tag: String) throws {
+        let stmt = try prepare("DELETE FROM items WHERE kind = 'userTag' AND ref_key = ? AND title = ?")
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, refKey, -1, Self.transient)
+        sqlite3_bind_text(stmt, 2, tag, -1, Self.transient)
+        sqlite3_step(stmt)
     }
 
     func addFile(_ f: ImportedFile) throws {        let stmt = try prepare("""

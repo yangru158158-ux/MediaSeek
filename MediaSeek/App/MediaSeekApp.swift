@@ -48,6 +48,18 @@ final class AppModel: ObservableObject {
         errorMessage = error.localizedDescription
     }
 
+    /// 给照片/视频添加人名或主题标签(生成 Gemma 语义向量)
+    func addUserTag(refKey: String, tag: String) async throws {
+        guard let gemma = models.gemma else { throw MSError("文本模型未就绪") }
+        let trimmed = tag.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let vec = try await Task.detached(priority: .userInitiated) {
+            try gemma.embedDocument("person: \(trimmed)")
+        }.value
+        try store.upsert(kind: .userTag, refKey: refKey, space: gemma.space,
+                         vector: vec, title: trimmed, date: Date())
+    }
+
     func bootstrap() async {
         do {
             try store.open()

@@ -133,7 +133,7 @@ final class IndexingCoordinator: ObservableObject {
                 newVideos.append(asset)
             }
         }
-        try store.removeRefs(kinds: [.photo, .photoLabel, .videoFrame], notIn: libIDs)
+        try store.removeRefs(kinds: [.photo, .photoLabel, .userTag, .videoFrame], notIn: libIDs)
 
         total += newPhotos.count + newVideos.count
         phase = .photos

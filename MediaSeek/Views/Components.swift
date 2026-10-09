@@ -129,6 +129,9 @@ struct HitCell: View {
         case .photo, .photoLabel: return "照片"
         case .videoFrame: return "视频"
         case .file, .fileChunk: return "文件"
+        case .userTag:
+            if case .asset(let a) = hit.target { return a.mediaType == .video ? "视频" : "照片" }
+            return "标记"
         }
     }
 }
@@ -141,14 +144,25 @@ struct DetailSheet: View {
 
     var body: some View {
         NavigationStack {
-            content
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Button("完成") { dismiss() }
-                    }
+            VStack(spacing: 0) {
+                content
+                if isAsset {
+                    TagEditorView(refKey: hit.refKey)
+                        .padding(.vertical, 8)
                 }
+            }
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("完成") { dismiss() }
+                }
+            }
         }
+    }
+
+    private var isAsset: Bool {
+        if case .asset = hit.target { return true }
+        return false
     }
 
     @ViewBuilder
@@ -233,6 +247,84 @@ struct FilePreviewScreen: View {
             if previewURL == nil, let url = try? app.imports.resolveURL(record) {
                 previewURL = url
             }
+        }
+    }
+}
+
+
+/// 照片/视频的人名与主题标签编辑器
+struct TagEditorView: View {
+    let refKey: String
+    @EnvironmentObject var app: AppModel
+    @State private var tags: [String] = []
+    @State private var showAdd = false
+    @State private var newTag = ""
+    @State private var busy = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("我的标签(人名/主题,可用于搜索)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    ForEach(tags, id: \.self) { tag in
+                        HStack(spacing: 4) {
+                            Text(tag)
+                            Button {
+                                try? app.store.deleteUserTag(refKey: refKey, tag: tag)
+                                load()
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                        .font(.footnote)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(Color(.systemBlue).opacity(0.12), in: Capsule())
+                    }
+                    Button {
+                        showAdd = true
+                    } label: {
+                        Label("添加", systemImage: "plus.circle.fill")
+                            .font(.footnote)
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(busy)
+                }
+                .padding(.horizontal, 2)
+            }
+        }
+        .padding(.horizontal)
+        .task(id: refKey) { load() }
+        .alert("添加标签(如:程小姐)", isPresented: $showAdd) {
+            TextField("标签内容", text: $newTag)
+            Button("添加") { addTag() }
+            Button("取消", role: .cancel) { newTag = "" }
+        } message: {
+            Text("之后在搜索页输入这个标签即可找到本照片/视频")
+        }
+    }
+
+    private func load() {
+        tags = (try? app.store.userTags(forRefKey: refKey)) ?? []
+    }
+
+    private func addTag() {
+        let t = newTag.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty, !busy else { return }
+        busy = true
+        newTag = ""
+        Task {
+            do {
+                try await app.addUserTag(refKey: refKey, tag: t)
+                load()
+            } catch {
+                app.fail(error)
+            }
+            busy = false
         }
     }
 }
