@@ -139,24 +139,34 @@ final class IndexingCoordinator: ObservableObject {
         phase = .photos
         // 双路并发:解码/下载与 ANE 推理流水线重叠
         let useLabels = chineseLabels
-        await withTaskGroup(of: Void.self) { group in
+        let clip = models.siglip
+        let gemma = models.gemma
+        let store = self.store
+        let photo = self.photo
+        await withTaskGroup(of: Int.self) { group in
             var index = 0
             let maxConcurrent = 2
             while index < min(maxConcurrent, newPhotos.count) {
                 let asset = newPhotos[index]; index += 1
-                group.addTask { await self.embedPhoto(asset, useLabels: useLabels) }
+                group.addTask { await Self.embedPhotoWork(
+                    asset: asset, photo: photo, store: store,
+                    clip: clip, gemma: gemma, useLabels: useLabels) }
             }
             while !group.isEmpty {
-                _ = await group.next()
+                let fails = await group.next() ?? 0
+                errorCount += fails
                 processedLocal += 1
                 if processedLocal % 5 == 0 { processed = processedLocal }
-                try? Task.checkCancellation()
+                if Task.isCancelled { break }
                 if index < newPhotos.count {
                     let asset = newPhotos[index]; index += 1
-                    group.addTask { await self.embedPhoto(asset, useLabels: useLabels) }
+                    group.addTask { await Self.embedPhotoWork(
+                        asset: asset, photo: photo, store: store,
+                        clip: clip, gemma: gemma, useLabels: useLabels) }
                 }
             }
         }
+        try Task.checkCancellation()   // 「停止」从这里立即生效
         processed = processedLocal
         phase = .videos
         for asset in newVideos {
@@ -167,25 +177,25 @@ final class IndexingCoordinator: ObservableObject {
         }
     }
 
-    private func embedPhoto(_ asset: PHAsset, useLabels: Bool) async {
+    nonisolated private static func embedPhotoWork(
+        asset: PHAsset, photo: PhotoLibraryService, store: VectorStore,
+        clip: SigLIPEmbedder?, gemma: GemmaTextEmbedder?, useLabels: Bool) async -> Int {
+        guard let clip, let gemma else { return 0 }
         do {
-            guard let clip = models.siglip, let gemma = models.gemma else { return }
-            let store = self.store
-            let photo = self.photo
-            try await Task.detached(priority: .utility) {
-                guard let cg = try await photo.image(for: asset, maxPixel: 320) else { return }
-                let vec = try clip.embedImage(cg)
-                try store.upsert(kind: .photo, refKey: asset.localIdentifier, space: clip.space,
-                                 vector: vec, title: nil, date: asset.creationDate)
+            guard let cg = try await photo.image(for: asset, maxPixel: 320) else { return 0 }
+            try Task.checkCancellation()   // 取消:取图后立即中断
+            let vec = try clip.embedImage(cg)
+            try store.upsert(kind: .photo, refKey: asset.localIdentifier, space: clip.space,
+                             vector: vec, title: nil, date: asset.creationDate)
 
-                // 可选:Vision 图像分类 → 标签文本 → EmbeddingGemma 向量(增强中文查询,但每张多两次推理)
-                guard useLabels, let labels = Self.visionLabels(cg: cg), !labels.isEmpty else { return }
-                let lvec = try gemma.embedDocument("photo tags: \(labels)")
-                try store.upsert(kind: .photoLabel, refKey: asset.localIdentifier, space: gemma.space,
-                                 vector: lvec, title: labels, date: asset.creationDate)
-            }.value
+            guard useLabels, let labels = Self.visionLabels(cg: cg), !labels.isEmpty else { return 0 }
+            try Task.checkCancellation()
+            let lvec = try gemma.embedDocument("photo tags: \(labels)")
+            try store.upsert(kind: .photoLabel, refKey: asset.localIdentifier, space: gemma.space,
+                             vector: lvec, title: labels, date: asset.creationDate)
+            return 0
         } catch {
-            errorCount += 1
+            return Task.isCancelled ? 0 : 1   // 用户停止不算错误
         }
     }
 
