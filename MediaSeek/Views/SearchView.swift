@@ -350,7 +350,10 @@ struct SearchView: View {
                 try app.imports.rename(record, to: newName)
                 await MainActor.run {
                     if let idx = results.firstIndex(where: { $0.id == hitId }) {
-                        results[idx].title = newName
+                        let old = results[idx]
+                        results[idx] = DisplayHit(id: old.id, refKey: old.refKey, target: old.target,
+                                                  kind: old.kind, title: newName,
+                                                  score: old.score, date: old.date)
                     }
                     app.notify("已重命名")
                 }
