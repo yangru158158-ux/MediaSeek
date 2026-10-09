@@ -19,6 +19,7 @@ struct SearchView: View {
     @State private var showDeleteDialog = false
     @State private var showRenameAlert = false
     @State private var renameText = ""
+    @State private var colorFilter: String?
 
     private let exampleQueries = ["一只猫", "海边的日落", "有人的合影", "会议纪要", "发票 PDF"]
 
@@ -154,7 +155,9 @@ struct SearchView: View {
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 } else {
-                    Text("找到 \(results.count) 个结果 · \(elapsedMs) ms")
+                    Text(colorFilter == nil
+                         ? "找到 \(results.count) 个结果 · \(elapsedMs) ms"
+                         : "\(visibleResults.count) / \(results.count) 个结果 · \(elapsedMs) ms")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -169,6 +172,9 @@ struct SearchView: View {
             }
             .padding(.horizontal)
             .padding(.vertical, 6)
+            if !results.isEmpty && !selectionMode {
+                colorFilterBar
+            }
         } else {
             chips
         }
@@ -253,6 +259,60 @@ struct SearchView: View {
 
     private var selectedHits: [DisplayHit] { results.filter { selected.contains($0.id) } }
 
+    private var visibleResults: [DisplayHit] {
+        guard let cf = colorFilter else { return results }
+        return results.filter { $0.color == cf }
+    }
+
+    private func colorFor(_ name: String) -> Color {
+        switch name {
+        case "红": return .red
+        case "橙": return .orange
+        case "黄": return .yellow
+        case "绿": return .green
+        case "青": return .cyan
+        case "蓝": return .blue
+        case "紫": return .purple
+        case "粉": return .pink
+        case "黑": return .black
+        case "灰": return .gray
+        case "白": return .white
+        default: return .clear
+        }
+    }
+
+    private var colorFilterBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(PhotoColor.buckets, id: \.self) { name in
+                    Button {
+                        colorFilter = colorFilter == name ? nil : name
+                    } label: {
+                        HStack(spacing: 4) {
+                            Circle()
+                                .fill(colorFor(name))
+                                .frame(width: 10, height: 10)
+                            Text(name)
+                                .font(.caption)
+                            if let n = results.filter({ $0.color == name }).count as Int?, n > 0 {
+                                Text("\(n)")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 5)
+                        .background(
+                            colorFilter == name ? Color.blue.opacity(0.18) : Color(.systemGray6),
+                            in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal)
+        }
+    }
+
     private var renameTarget: (hitId: String, record: ImportedFile)? {
         guard selectionMode else { return nil }
         let fileHits = selectedHits.compactMap { hit -> (String, ImportedFile)? in
@@ -294,7 +354,7 @@ struct SearchView: View {
     }
 
     private func exportToAlbum(selectedOnly: Bool) {
-        let hits = selectedOnly ? selectedHits : results
+        let hits = selectedOnly ? selectedHits : visibleResults
         guard !exporting, !hits.isEmpty else { return }
         exporting = true
         let q = query.trimmingCharacters(in: .whitespaces)
@@ -310,7 +370,7 @@ struct SearchView: View {
     }
 
     private func exportToFiles(selectedOnly: Bool) {
-        let hits = selectedOnly ? selectedHits : results
+        let hits = selectedOnly ? selectedHits : visibleResults
         guard !exporting, !hits.isEmpty else { return }
         exporting = true
         let q = query.trimmingCharacters(in: .whitespaces)

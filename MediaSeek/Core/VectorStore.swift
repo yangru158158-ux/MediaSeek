@@ -16,6 +16,7 @@ struct SearchHit {
     let title: String?
     let date: Date?
     let score: Float
+    let color: String?
 }
 
 /// 从"文件"App 导入的文件记录(书签持久化,不复制文件本身)
@@ -54,6 +55,7 @@ final class VectorStore {
         db = handle
         try exec("PRAGMA journal_mode=WAL")
         try exec("PRAGMA synchronous=NORMAL")
+        try? exec("ALTER TABLE items ADD COLUMN color TEXT")
         try exec("""
         CREATE TABLE IF NOT EXISTS items(
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -107,14 +109,15 @@ final class VectorStore {
     // MARK: - 向量条目
 
     func upsert(kind: ItemKind, refKey: String, frameIndex: Int = 0,
-                space: String, vector: [Float], title: String?, date: Date?) throws {
+                space: String, vector: [Float], title: String?, date: Date?,
+                color: String? = nil) throws {
         guard let db else { throw MSError("数据库未打开") }
         let sql = """
-        INSERT INTO items(kind, ref_key, frame_index, space, dim, vec, title, created_at)
-        VALUES(?,?,?,?,?,?,?,?)
+        INSERT INTO items(kind, ref_key, frame_index, space, dim, vec, title, created_at, color)
+        VALUES(?,?,?,?,?,?,?,?,?)
         ON CONFLICT(kind, ref_key, frame_index) DO UPDATE SET
           space=excluded.space, dim=excluded.dim, vec=excluded.vec,
-          title=excluded.title, created_at=excluded.created_at
+          title=excluded.title, created_at=excluded.created_at, color=excluded.color
         """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -131,6 +134,8 @@ final class VectorStore {
             if let title { sqlite3_bind_text(stmt, 7, title, -1, Self.transient) }
             else { sqlite3_bind_null(stmt, 7) }
             sqlite3_bind_double(stmt, 8, date?.timeIntervalSince1970 ?? 0)
+            if let color { sqlite3_bind_text(stmt, 9, color, -1, Self.transient) }
+            else { sqlite3_bind_null(stmt, 9) }
             guard sqlite3_step(stmt) == SQLITE_DONE else {
                 throw MSError(String(cString: sqlite3_errmsg(db)))
             }
@@ -212,7 +217,7 @@ final class VectorStore {
         guard let db else { return [] }
         let ph = kinds.map { _ in "?" }.joined(separator: ",")
         let stmt = try prepare("""
-        SELECT kind, ref_key, frame_index, title, created_at, dim, vec
+        SELECT kind, ref_key, frame_index, title, created_at, dim, vec, color
         FROM items WHERE space = ? AND kind IN (\(ph))
         """)
         defer { sqlite3_finalize(stmt) }
@@ -234,9 +239,12 @@ final class VectorStore {
             guard dim == q.count, let blob = sqlite3_column_blob(stmt, 6) else { continue }
             let v = blob.assumingMemoryBound(to: Float.self)
             let score = vDSP.dot(Array(UnsafeBufferPointer(start: v, count: dim)), q)
+            let color = sqlite3_column_type(stmt, 7) == SQLITE_NULL
+                ? nil : String(cString: sqlite3_column_text(stmt, 7))
             if score >= minScore {
                 hits.append(SearchHit(kind: kind, refKey: refKey, frameIndex: frameIndex,
-                                      space: space, title: title, date: date, score: score))
+                                      space: space, title: title, date: date, score: score,
+                                      color: color))
             }
         }
         return Array(hits.sorted { $0.score > $1.score }.prefix(limit))

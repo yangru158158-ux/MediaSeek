@@ -184,9 +184,10 @@ final class IndexingCoordinator: ObservableObject {
         do {
             guard let cg = try await photo.image(for: asset, maxPixel: 320) else { return 0 }
             try Task.checkCancellation()   // 取消:取图后立即中断
+            let colorBucket = PhotoColor.bucket(of: cg)
             let vec = try clip.embedImage(cg)
             try store.upsert(kind: .photo, refKey: asset.localIdentifier, space: clip.space,
-                             vector: vec, title: nil, date: asset.creationDate)
+                             vector: vec, title: nil, date: asset.creationDate, color: colorBucket)
 
             guard useLabels, let labels = Self.visionLabels(cg: cg), !labels.isEmpty else { return 0 }
             try Task.checkCancellation()
@@ -211,7 +212,8 @@ final class IndexingCoordinator: ObservableObject {
                 for (i, frame) in frames.enumerated() {
                     let vec = try clip.embedImage(frame)
                     try store.upsert(kind: .videoFrame, refKey: asset.localIdentifier, frameIndex: i,
-                                     space: clip.space, vector: vec, title: nil, date: asset.creationDate)
+                                     space: clip.space, vector: vec, title: nil, date: asset.creationDate,
+                                     color: PhotoColor.bucket(of: frame))
                 }
             }.value
         } catch {

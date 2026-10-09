@@ -22,6 +22,7 @@ struct DisplayHit: Identifiable {
     let title: String
     let score: Float
     let date: Date?
+    let color: String?
 }
 
 /// 检索:查询同时嵌入 SigLIP 空间(查图/查视频)与 EmbeddingGemma 空间
@@ -106,7 +107,8 @@ final class SearchEngine {
                                       kind: hit.kind,
                                       title: hit.title ?? name,
                                       score: hit.score,
-                                      date: asset.creationDate))
+                                      date: asset.creationDate,
+                                      color: hit.color))
             case .file, .fileChunk:
                 guard let file = try? store.file(id: hit.refKey) else { continue }
                 out.append(DisplayHit(id: "\(hit.kind.rawValue)-\(hit.refKey)",
@@ -115,7 +117,8 @@ final class SearchEngine {
                                       kind: hit.kind,
                                       title: hit.title ?? file.name,
                                       score: hit.score,
-                                      date: hit.date))
+                                      date: hit.date,
+                                      color: hit.color))
             }
         }
         return out
