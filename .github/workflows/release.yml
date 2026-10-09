@@ -1,10 +1,11 @@
 name: Release to TestFlight
-# 手动触发的发布流水线:归档 → 签名 → 上传 TestFlight
-# 运行前需要在仓库 Settings → Secrets and variables → Actions 里配置 4 个 secret:
-#   ASC_KEY_ID         App Store Connect API 密钥 ID(10 位)
-#   ASC_ISSUER_ID      API 密钥的 Issuer ID(UUID)
-#   ASC_API_KEY_P8     .p8 私钥文件内容的 base64(见 docs/TestFlightGuide.md)
-#   DEVELOPMENT_TEAM_ID 开发者团队的 10 位 Team ID
+# 手动签名版:用预创建的 Apple Distribution 证书 + App Store 描述文件
+# Secrets:
+#   DISTRIBUTION_P12        distribution.p12 的 base64
+#   P12_PASSWORD            p12 密码
+#   PROFILE_MOBILEPROVISION 描述文件 .mobileprovision 的 base64
+#   ASC_KEY_ID / ASC_API_KEY_P8  上传用 API 密钥(个人密钥)
+#   DEVELOPMENT_TEAM_ID     QBU3P5SMNS
 on:
   workflow_dispatch:
 
@@ -18,10 +19,9 @@ jobs:
       - name: 安装 XcodeGen
         run: brew install xcodegen
 
-      - name: 写入 App Store Connect API 密钥
+      - name: 写入上传用 API 密钥
         env:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
-          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
         run: |
           mkdir -p $HOME/.appstoreconnect/private_keys
@@ -30,30 +30,46 @@ jobs:
       - name: 生成 Xcode 工程
         run: xcodegen generate
 
-      - name: 归档(自动管理证书与描述文件)
+      - name: 导入分发证书到临时钥匙串
         env:
-          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
-          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          DISTRIBUTION_P12: ${{ secrets.DISTRIBUTION_P12 }}
+          P12_PASSWORD: ${{ secrets.P12_PASSWORD }}
+        run: |
+          CERT_PATH="$RUNNER_TEMP/distribution.p12"
+          echo "$DISTRIBUTION_P12" | base64 --decode > "$CERT_PATH"
+          KC="$RUNNER_TEMP/build.keychain-db"
+          security create-keychain -p medseek-kc "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p medseek-kc "$KC"
+          security import "$CERT_PATH" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KC"
+          security set-key-partition-list -S apple-tool:,apple: -s -k medseek-kc "$KC"
+          security list-keychain -d user -s "$KC" login.keychain-db
+
+      - name: 安装描述文件
+        env:
+          PROFILE: ${{ secrets.PROFILE_MOBILEPROVISION }}
+        run: |
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          CP="$HOME/Library/MobileDevice/Provisioning Profiles/MediaSeek_AppStore.mobileprovision"
+          echo "$PROFILE" | base64 --decode > "$CP"
+
+      - name: 归档(手动签名)
+        env:
           TEAM_ID: ${{ secrets.DEVELOPMENT_TEAM_ID }}
         run: |
-          KEY_PATH="$HOME/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8"
           xcodebuild archive \
             -project MediaSeek.xcodeproj \
             -scheme MediaSeek \
             -configuration Release \
             -destination 'generic/platform=iOS' \
             -archivePath build/MediaSeek.xcarchive \
-            -allowProvisioningUpdates \
-            -authenticationKeyPath "$KEY_PATH" \
-            -authenticationKeyID "$ASC_KEY_ID" \
-            -authenticationKeyIssuerID "$ASC_ISSUER_ID" \
             DEVELOPMENT_TEAM="$TEAM_ID" \
-            CODE_SIGN_STYLE=Automatic
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
+            PROVISIONING_PROFILE_SPECIFIER="MediaSeek AppStore"
 
-      - name: 导出 IPA
+      - name: 导出 IPA(手动签名)
         env:
-          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
-          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           TEAM_ID: ${{ secrets.DEVELOPMENT_TEAM_ID }}
         run: |
           cat > build/ExportOptions.plist <<PLIST
@@ -66,7 +82,14 @@ jobs:
             <key>teamID</key>
             <string>${TEAM_ID}</string>
             <key>signingStyle</key>
-            <string>automatic</string>
+            <string>manual</string>
+            <key>signingCertificate</key>
+            <string>Apple Distribution</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>com.medseek.MediaSeek</key>
+              <string>MediaSeek AppStore</string>
+            </dict>
             <key>uploadSymbols</key>
             <true/>
             <key>manageAppVersionAndBuildNumber</key>
@@ -74,15 +97,10 @@ jobs:
           </dict>
           </plist>
           PLIST
-          KEY_PATH="$HOME/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8"
           xcodebuild -exportArchive \
             -archivePath build/MediaSeek.xcarchive \
             -exportOptionsPlist build/ExportOptions.plist \
-            -exportPath build/ipa \
-            -allowProvisioningUpdates \
-            -authenticationKeyPath "$KEY_PATH" \
-            -authenticationKeyID "$ASC_KEY_ID" \
-            -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+            -exportPath build/ipa
 
       - name: 上传 TestFlight
         env:
@@ -97,6 +115,6 @@ jobs:
 
       - name: 完成
         run: |
-          echo "🎉 已上传!等 5-15 分钟处理完成后:"
-          echo "   App Store Connect → TestFlight → 添加自己为内部测试员"
-          echo "   然后在 iPhone 上用 TestFlight App 安装"
+          echo "🎉 已上传 TestFlight!等待 5-15 分钟处理后:"
+          echo "   ASC → TestFlight → 内部测试 → 添加测试员"
+          echo "   iPhone 的 TestFlight App 中安装"
