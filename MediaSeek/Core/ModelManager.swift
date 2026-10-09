@@ -125,6 +125,7 @@ final class ModelManager: ObservableObject {
                     let modelURL = dir.appendingPathComponent("GemmaText.mlmodelc")
                     gemma = try await GemmaTextEmbedder(modelURL: modelURL, tokenizerFolder: tokURL.deletingLastPathComponent())
                     setState(.ready, for: slot)
+                    if textState == .ready && imageState == .ready { detailText = "" }
                 case "clip":
                     let imgURL = dir.appendingPathComponent("SiglipImage.mlmodelc")
                     let txtURL = dir.appendingPathComponent("SiglipText.mlmodelc")
@@ -134,6 +135,7 @@ final class ModelManager: ObservableObject {
                         imageSize: meta.image_size ?? 256,
                         mean: meta.image_mean ?? 0.5, std: meta.image_std ?? 0.5)
                     setState(.ready, for: slot)
+                    if textState == .ready && imageState == .ready { detailText = "" }
                 default:
                     setState(.failed("未知模型类型 \(meta.type)"), for: slot)
                 }
