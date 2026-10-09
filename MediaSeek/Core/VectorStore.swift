@@ -341,14 +341,6 @@ final class VectorStore {
         return out.map { (refKey: $0.0, text: $0.1) }
     }
 
-    /// 移除某照片/视频/文件的**全部**索引行(各类型)
-    func removeEverythingForRef(_ refKey: String) throws {
-        let stmt = try prepare("DELETE FROM items WHERE ref_key = ?")
-        defer { sqlite3_finalize(stmt) }
-        sqlite3_bind_text(stmt, 1, refKey, -1, Self.transient)
-        sqlite3_step(stmt)
-    }
-
     /// 重命名导入文件记录,并同步其可搜索的文件名
     func renameFile(id: String, newName: String) throws {
         let stmt = try prepare("UPDATE files SET name = ? WHERE id = ?")
