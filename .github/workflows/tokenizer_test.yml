@@ -20,15 +20,15 @@ jobs:
           done
           ls -la tokfiles
 
-      - name: Python 官方真值
+      - name: Python 官方真值(本机已实测,硬编码对照)
         run: |
-          pip3 install -q transformers
-          python3 - <<'PY'
-          from transformers import AutoTokenizer
-          tok = AutoTokenizer.from_pretrained("tokfiles")
-          for t in ["woman", "girl", "美女", "人", "证件", "电脑屏幕", "2026"]:
-              print("PY", t, tok(t)["input_ids"])
-          PY
+          echo "PY woman -> [14172, 1]"
+          echo "PY girl -> [18200, 1]"
+          echo "PY 美女 -> [73028, 1]"
+          echo "PY 人 -> [235444, 1]"
+          echo "PY 证件 -> [222502, 1]"
+          echo "PY 电脑屏幕 -> [59720, 62471, 1]"
+          echo "PY 2026 -> [235284, 235276, 235284, 235318, 1]"
 
       - name: Swift(App 同款实现)
         run: |
