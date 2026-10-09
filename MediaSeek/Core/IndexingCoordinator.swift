@@ -120,11 +120,14 @@ final class IndexingCoordinator: ObservableObject {
     private func syncPhotoLibrary() async throws {
         let fetch = photo.fetchAllAssets()
         let known = try store.refKeys(kinds: [.photo, .photoLabel, .userTag, .videoFrame])
+        let recentlyDeleted = Self.recentlyDeletedIDs()
 
         var libIDs = Set<String>()
         var newPhotos: [PHAsset] = []
         var newVideos: [PHAsset] = []
         fetch.enumerateObjects { asset, _, _ in
+            // 「最近删除」里的照片/视频不入库:不新增索引,旧行按 stale 一并清除
+            guard recentlyDeleted.contains(asset.localIdentifier) == false else { return }
             libIDs.insert(asset.localIdentifier)
             guard !known.contains(asset.localIdentifier) else { return }
             if asset.mediaType == .image {
@@ -175,6 +178,23 @@ final class IndexingCoordinator: ObservableObject {
             processedLocal += 1
             processed = processedLocal
         }
+    }
+
+    /// 「最近删除」智能相册的资产 ID。系统未公开对应枚举,
+    /// 通行做法:按智能相册 subtype 原始值 1000000201 识别(中英文标题兜底);
+    /// 若系统未暴露该相册,返回空集,行为退化为不过滤。
+    private static func recentlyDeletedIDs() -> Set<String> {
+        var ids = Set<String>()
+        let cols = PHAssetCollection.fetchAssetCollections(with: .smartAlbum, subtype: .any, options: nil)
+        cols.enumerateObjects { col, _, _ in
+            let isRD = col.assetSubtype.rawValue == 1000000201
+                || col.localizedTitle == "最近删除" || col.localizedTitle == "Recently Deleted"
+            guard isRD else { return }
+            PHAsset.fetchAssets(in: col, options: nil).enumerateObjects { asset, _, _ in
+                ids.insert(asset.localIdentifier)
+            }
+        }
+        return ids
     }
 
     nonisolated private static func embedPhotoWork(
