@@ -149,25 +149,32 @@ struct SearchView: View {
             .padding(.horizontal)
             .padding(.vertical, 6)
         } else if searchedOnce {
-            HStack(spacing: 10) {
-                if selectionMode {
-                    Text("已选 \(selected.count) 项")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text(colorFilter == nil
-                         ? "找到 \(results.count) 个结果 · \(elapsedMs) ms"
-                         : "\(visibleResults.count) / \(results.count) 个结果 · \(elapsedMs) ms")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-                if !results.isEmpty {
-                    Spacer()
-                    if exporting {
-                        ProgressView()
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 10) {
+                    if selectionMode {
+                        Text("已选 \(selected.count) 项")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
                     } else {
-                        actionsMenu
+                        Text(colorFilter == nil
+                             ? "找到 \(results.count) 个结果 · \(elapsedMs) ms"
+                             : "\(visibleResults.count) / \(results.count) 个结果 · \(elapsedMs) ms")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
                     }
+                    if !results.isEmpty {
+                        Spacer()
+                        if exporting {
+                            ProgressView()
+                        } else {
+                            actionsMenu
+                        }
+                    }
+                }
+                if !results.isEmpty && !selectionMode && colorFilter == nil {
+                    Text("百分比 = 相对相关度(第一名 100%),非绝对概率")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
                 }
             }
             .padding(.horizontal)
@@ -203,7 +210,7 @@ struct SearchView: View {
             if results.isEmpty && searchedOnce && !searching {
                 ContentUnavailableView("没有找到相关内容",
                                        systemImage: "questionmark.folder",
-                                       description: Text("试试换一种说法,或先在「资料库」同步索引"))
+                                       description: Text("已索引 \(app.indexing.indexedPhotoCount) 张照片\n文字条件需要该文字被识别到;索引进行中时结果不完整,跑完再试\n也可以换个说法再搜"))
                     .padding(.top, 60)
             } else {
                 LazyVGrid(columns: columns, spacing: 12) {

@@ -334,6 +334,14 @@ final class VectorStore {
         return String(cString: sqlite3_column_text(stmt, 0))
     }
 
+    /// 已索引照片数(空态提示用)
+    func countPhotos() -> Int {
+        guard let db, let stmt = try? prepare("SELECT COUNT(*) FROM items WHERE kind = 'photo'") else { return 0 }
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
+        return Int(sqlite3_column_int64(stmt, 0))
+    }
+
     /// 全部去重标签字符串(语义路由的封闭词表)
     func allDistinctLabels() throws -> [String] {
         guard let db else { return [] }

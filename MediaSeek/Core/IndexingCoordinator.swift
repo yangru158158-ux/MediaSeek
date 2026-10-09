@@ -27,6 +27,9 @@ final class IndexingCoordinator: ObservableObject {
     }
 
     /// 中文语义标签(Vision+Gemma):增强中文物体查询,但每张照片多两次推理,慢 2-3 倍
+    /// 已索引照片数(空态提示用)
+    var indexedPhotoCount: Int { store.countPhotos() }
+
     var chineseLabels: Bool {
         get { UserDefaults.standard.object(forKey: "chineseLabels") as? Bool ?? true }
         set { UserDefaults.standard.set(newValue, forKey: "chineseLabels") }

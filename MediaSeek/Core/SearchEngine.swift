@@ -82,8 +82,11 @@ final class SearchEngine {
         // 视觉通道:SigLIP2 以英文图文对训练;词典 → 路由结果 → 原文,三级取英文
         if !imageKinds.isEmpty, let siglip {
             let q = try siglip.embedQuery(QueryUnderstanding.english(for: concept) ?? routedEnglish ?? concept)
-            channels.append((1.0, Self.dedupByRef(try store.search(
-                space: siglip.space, kinds: imageKinds, query: q, limit: topK, minScore: 0.12))))
+            let hits = Self.dedupByRef(try store.search(
+                space: siglip.space, kinds: imageKinds, query: q, limit: topK, minScore: 0.12))
+            // 相对尾部截断:远弱于头部的长尾(如「人」里混入的屏幕翻拍照)直接砍掉
+            let best = hits.first?.score ?? 0
+            channels.append((1.0, best > 0 ? hits.filter { $0.score >= best * 0.72 } : hits))
         }
 
         // 标签精确通道:查询词(含词典英译)与 Vision 英文标签做 token 级比对,零幻觉
