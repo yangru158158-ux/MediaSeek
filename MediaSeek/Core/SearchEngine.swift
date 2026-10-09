@@ -46,6 +46,18 @@ final class SearchEngine {
         let query = QueryUnderstanding.core(raw)
         guard !query.isEmpty else { return [] }
 
+        // 多词查询:「2026 电脑屏幕」→ 含数字的词走 OCR 文字匹配(AND),
+        // 其余词走视觉/标签;混合查询的结果须同时满足两边
+        let terms = query.components(separatedBy: CharacterSet(charactersIn: " ,、,/"))
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        func hasDigit(_ t: String) -> Bool {
+            t.unicodeScalars.contains { $0.value >= 48 && $0.value <= 57 }
+        }
+        let textTerms = terms.filter(hasDigit)
+        let visualTerms = terms.filter { !hasDigit($0) }
+        let concept = visualTerms.isEmpty ? query : visualTerms.joined(separator: " ")
+
         let imageKinds: [ItemKind] = scope == .all || scope == .photo
             ? [.photo] : (scope == .video ? [.videoFrame] : [])
         // Gemma 语义只负责文件名/文件内容——照片标签的余弦虚高且区分度低
@@ -61,7 +73,7 @@ final class SearchEngine {
         // 只用语义"选标签",照片匹配仍然精确,零幻觉;词典只是它的兜底。
         var routedEnglish: String?
         if !imageKinds.isEmpty, let gemma {
-            if let routed = Self.routeLabels(query: query, gemma: gemma, store: store) {
+            if let routed = Self.routeLabels(query: concept, gemma: gemma, store: store) {
                 routedEnglish = routed.enQuery
                 if !routed.hits.isEmpty { channels.append((1.5, routed.hits)) }
             }
@@ -69,14 +81,14 @@ final class SearchEngine {
 
         // 视觉通道:SigLIP2 以英文图文对训练;词典 → 路由结果 → 原文,三级取英文
         if !imageKinds.isEmpty, let siglip {
-            let q = try siglip.embedQuery(QueryUnderstanding.english(for: query) ?? routedEnglish ?? query)
+            let q = try siglip.embedQuery(QueryUnderstanding.english(for: concept) ?? routedEnglish ?? concept)
             channels.append((1.0, Self.dedupByRef(try store.search(
                 space: siglip.space, kinds: imageKinds, query: q, limit: topK, minScore: 0.12))))
         }
 
         // 标签精确通道:查询词(含词典英译)与 Vision 英文标签做 token 级比对,零幻觉
         if !imageKinds.isEmpty {
-            let tokens = Self.queryTokens(query: query)
+            let tokens = Self.queryTokens(query: concept)
             if !tokens.isEmpty, let rows = try? store.allPhotoLabels() {
                 var scored: [(refKey: String, matches: Int)] = []
                 for row in rows {
@@ -95,7 +107,7 @@ final class SearchEngine {
         }
 
         // 用户标签通道:中文子串精确匹配
-        if scope != .file, let tagRefs = try? store.searchUserTags(query: query), !tagRefs.isEmpty {
+        if scope != .file, let tagRefs = try? store.searchUserTags(query: concept), !tagRefs.isEmpty {
             channels.append((1.6, tagRefs.map {
                 SearchHit(kind: .photo, refKey: $0, frameIndex: 0,
                           space: "userTag", title: nil, date: nil, score: 1.0, color: nil)
@@ -104,15 +116,9 @@ final class SearchEngine {
 
         // 文件语义通道:Gemma 文本嵌入查文件名/内容
         if !fileKinds.isEmpty, let gemma {
-            let q = try gemma.embedQuery(query)
+            let q = try gemma.embedQuery(concept)
             channels.append((1.0, Self.dedupByRef(try store.search(
                 space: gemma.space, kinds: fileKinds, query: q, limit: topK, minScore: 0.12))))
-        }
-
-        // OCR 文字精确通道:编号/年份/证件文字的子串匹配,权重最高、精确命中置顶
-        var ocrRefs: [(refKey: String, text: String)] = []
-        if scope == .all || scope == .photo, query.count >= 2 {
-            ocrRefs = (try? store.searchOCR(query: query)) ?? []
         }
 
         // Reciprocal Rank Fusion:贡献 = 权重/(60+名次);OCR 通道权重 8,必压语义通道
@@ -130,16 +136,45 @@ final class SearchEngine {
                 fused[hit.refKey] = (hit, s)
             }
         }
+
+        // OCR 文字精确通道:数字词组合按 AND 求交;混合查询再与视觉结果取交集
+        var ocrMust: Set<String>?
+        if scope == .all || scope == .photo {
+            if !textTerms.isEmpty {
+                var acc: Set<String>? = nil
+                for t in textTerms {
+                    let set = Set(((try? store.searchOCR(query: t)) ?? []).map(\.refKey))
+                    acc = (acc ?? set).intersection(set)
+                    if acc?.isEmpty == true { break }
+                }
+                guard let acc, !acc.isEmpty else { return [] }   // AND 无解 → 诚实空
+                let title = "含「\(textTerms.joined(separator: " "))」文字"
+                for (i, ref) in acc.sorted().prefix(topK).enumerated() {
+                    add(SearchHit(kind: .photo, refKey: ref, frameIndex: 0,
+                                  space: "ocr", title: title,
+                                  date: nil, score: 1.0, color: nil),
+                        weight: 8.0, rank: i)
+                }
+                if !visualTerms.isEmpty { ocrMust = acc }   // 混合查询:视觉命中须同时含文字
+            } else if query.count >= 2 {
+                let refs = (try? store.searchOCR(query: query)) ?? []
+                for (i, ref) in refs.enumerated() {
+                    add(SearchHit(kind: .photo, refKey: ref.refKey, frameIndex: 0,
+                                  space: "ocr", title: "含「\(query)」文字",
+                                  date: nil, score: 1.0, color: nil),
+                        weight: 8.0, rank: i)
+                }
+            }
+        }
+
         for ch in channels {
             for (rank, hit) in ch.hits.enumerated() { add(hit, weight: ch.weight, rank: rank) }
         }
-        for (i, ref) in ocrRefs.enumerated() {
-            add(SearchHit(kind: .photo, refKey: ref.refKey, frameIndex: 0,
-                          space: "ocr", title: "含「\(query)」文字",
-                          date: nil, score: 1.0, color: nil),
-                weight: 8.0, rank: i)
-        }
         guard !fused.isEmpty else { return [] }
+        if let ocrMust {
+            fused = fused.filter { ocrMust.contains($0.key) }
+            guard !fused.isEmpty else { return [] }   // 视觉命中里没有同时含文字的 → 诚实空
+        }
 
         // 显示分 = 相对融合分(第一名 100%)
         let maxScore = fused.values.map { $0.score }.max() ?? 1.0
