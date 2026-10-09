@@ -57,6 +57,7 @@ final class VectorStore {
         try exec("PRAGMA synchronous=NORMAL")
         try? exec("ALTER TABLE items ADD COLUMN color TEXT")
         try exec("CREATE TABLE IF NOT EXISTS ocr_text(ref_key TEXT PRIMARY KEY, text TEXT)")
+        try exec("CREATE TABLE IF NOT EXISTS label_vocab(label TEXT PRIMARY KEY, vec BLOB)")
         try exec("""
         CREATE TABLE IF NOT EXISTS items(
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -331,6 +332,46 @@ final class VectorStore {
         sqlite3_bind_text(stmt, 1, refKey, -1, Self.transient)
         guard sqlite3_step(stmt) == SQLITE_ROW, sqlite3_column_text(stmt, 0) != nil else { return nil }
         return String(cString: sqlite3_column_text(stmt, 0))
+    }
+
+    /// 全部去重标签字符串(语义路由的封闭词表)
+    func allDistinctLabels() throws -> [String] {
+        guard let db else { return [] }
+        let stmt = try prepare("SELECT DISTINCT title FROM items WHERE kind = 'photoLabel' AND title IS NOT NULL")
+        defer { sqlite3_finalize(stmt) }
+        var out: [String] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            out.append(String(cString: sqlite3_column_text(stmt, 0)))
+        }
+        return out
+    }
+
+    /// 标签词向量表(把任意中文查询路由到库内实际存在的英文标签)
+    func labelVocab() throws -> [(label: String, vec: [Float])] {
+        guard let db else { return [] }
+        let stmt = try prepare("SELECT label, vec FROM label_vocab")
+        defer { sqlite3_finalize(stmt) }
+        var out: [(String, [Float])] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let label = String(cString: sqlite3_column_text(stmt, 0))
+            let n = Int(sqlite3_column_bytes(stmt, 1))
+            var vec = [Float](repeating: 0, count: n / 4)
+            if let base = sqlite3_column_blob(stmt, 1) {
+                memcpy(&vec, base, n)
+            }
+            out.append((label, vec))
+        }
+        return out.map { (label: $0.0, vec: $0.1) }
+    }
+
+    func saveLabelVec(_ label: String, vec: [Float]) throws {
+        let stmt = try prepare("INSERT OR REPLACE INTO label_vocab(label, vec) VALUES(?,?)")
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, label, -1, Self.transient)
+        _ = vec.withUnsafeBufferPointer { buf in
+            sqlite3_bind_blob(stmt, 2, buf.baseAddress, Int32(buf.count * 4), Self.transient)
+        }
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw MSError("标签词向量保存失败") }
     }
 
     /// 移除某照片/视频/文件的**全部**索引行(各类型)

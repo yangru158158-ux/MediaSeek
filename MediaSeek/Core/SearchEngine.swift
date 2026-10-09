@@ -56,9 +56,20 @@ final class SearchEngine {
         let siglip = await MainActor.run { models.siglip }
         let gemma = await MainActor.run { models.gemma }
 
-        // 视觉通道:SigLIP2 以英文图文对训练,中文查询先过内置词典
+        // 标签语义路由(通用中文入口):任意查询 → Gemma 多语言相似度 →
+        // 库内实际存在的英文标签(封闭集合,惰性建向量表)→ 再按 token 精确捞照片。
+        // 只用语义"选标签",照片匹配仍然精确,零幻觉;词典只是它的兜底。
+        var routedEnglish: String?
+        if !imageKinds.isEmpty, let gemma {
+            if let routed = Self.routeLabels(query: query, gemma: gemma, store: store) {
+                routedEnglish = routed.enQuery
+                if !routed.hits.isEmpty { channels.append((1.5, routed.hits)) }
+            }
+        }
+
+        // 视觉通道:SigLIP2 以英文图文对训练;词典 → 路由结果 → 原文,三级取英文
         if !imageKinds.isEmpty, let siglip {
-            let q = try siglip.embedQuery(QueryUnderstanding.english(for: query) ?? query)
+            let q = try siglip.embedQuery(QueryUnderstanding.english(for: query) ?? routedEnglish ?? query)
             channels.append((1.0, Self.dedupByRef(try store.search(
                 space: siglip.space, kinds: imageKinds, query: q, limit: topK, minScore: 0.12))))
         }
@@ -149,6 +160,53 @@ final class SearchEngine {
             for t in en.lowercased().split(separator: " ") { tokens.insert(String(t)) }
         }
         return QueryUnderstanding.expandedTokens(tokens)
+    }
+
+    /// 语义路由:取语义最近的至多 3 个库内标签(余弦 ≥ 0.60),按 token 精确捞照片;
+    /// 顺带返回标签英文串给视觉通道当查询。词向量表惰性补齐,每次最多嵌 200 条。
+    private static func routeLabels(query: String, gemma: GemmaTextEmbedder, store: VectorStore)
+        -> (enQuery: String, hits: [SearchHit])? {
+        guard let labels = try? store.allDistinctLabels(), !labels.isEmpty else { return nil }
+        var vocab = (try? store.labelVocab()) ?? []
+        let known = Set(vocab.map { $0.label })
+        let missing = labels.filter { !known.contains($0) }.prefix(200)
+        for label in missing {
+            guard let v = try? gemma.embedDocument(label) else { continue }
+            try? store.saveLabelVec(label, vec: v)
+            vocab.append((label: label, vec: v))
+        }
+        guard !vocab.isEmpty, let qv = try? gemma.embedQuery(query) else { return nil }
+        let picked = vocab
+            .map { (label: $0.label, cos: Self.cosine($0.vec, qv)) }
+            .filter { $0.cos >= 0.60 }
+            .sorted { $0.cos > $1.cos }
+            .prefix(3)
+        guard !picked.isEmpty else { return nil }
+        let chosen = Set(picked.map { $0.label })
+        let tokens = Set(picked.flatMap {
+            $0.label.lowercased().components(separatedBy: CharacterSet(charactersIn: ", "))
+        })
+        let rows = (try? store.allPhotoLabels()) ?? []
+        var hits: [SearchHit] = []
+        for row in rows {
+            let lt = Set(row.title.lowercased().components(separatedBy: CharacterSet(charactersIn: ", ")))
+            if !lt.isDisjoint(with: tokens) {
+                hits.append(SearchHit(kind: .photo, refKey: row.refKey, frameIndex: 0,
+                                      space: "label", title: nil, date: nil, score: 1.0, color: nil))
+            }
+        }
+        let en = picked.map { $0.label }.sorted().joined(separator: " ")
+        return (en, hits)
+    }
+
+    private static func cosine(_ a: [Float], _ b: [Float]) -> Float {
+        guard a.count == b.count, !a.isEmpty else { return 0 }
+        var dot: Float = 0, na: Float = 0, nb: Float = 0
+        for i in 0..<a.count {
+            dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]
+        }
+        guard na > 0, nb > 0 else { return 0 }
+        return dot / (na.squareRoot() * nb.squareRoot())
     }
 
     /// 通道内按 refKey 去重(视频多帧/文件多块),供 RRF 按名次计分
