@@ -99,19 +99,15 @@ final class ModelManager: ObservableObject {
                 guard FileManager.default.fileExists(atPath: tokURL.path) else {
                     throw MSError("缺少 tokenizer.json")
                 }
-                // swift-transformers 需要 config.json(+tokenizer_config.json)选择分词器类
+                // swift-transformers 需要 config.json(+tokenizer_config.json)选择分词器类。
+                // 注意:SigLIP2 官方就是 GemmaTokenizer,总是覆盖写入以防历史错误值残留
                 let cfgURL = dir.appendingPathComponent("config.json")
-                if !FileManager.default.fileExists(atPath: cfgURL.path) {
-                    let modelType = meta.type == "gemma" ? "gemma3_text" : "siglip"
-                    try? JSONSerialization.data(withJSONObject: ["model_type": modelType])
-                        .write(to: cfgURL)
-                }
+                let modelType = meta.type == "gemma" ? "gemma3_text" : "siglip"
+                try? JSONSerialization.data(withJSONObject: ["model_type": modelType])
+                    .write(to: cfgURL)
                 let tokCfgURL = dir.appendingPathComponent("tokenizer_config.json")
-                if !FileManager.default.fileExists(atPath: tokCfgURL.path) {
-                    let cls = meta.type == "gemma" ? "GemmaTokenizer" : "SiglipTokenizer"
-                    try? JSONSerialization.data(withJSONObject: ["tokenizer_class": cls])
-                        .write(to: tokCfgURL)
-                }
+                try? JSONSerialization.data(withJSONObject: ["tokenizer_class": "GemmaTokenizer"])
+                    .write(to: tokCfgURL)
                 return .success((dir, tokURL, meta))
             } catch {
                 return .failure(error)
