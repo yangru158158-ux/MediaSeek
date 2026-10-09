@@ -187,7 +187,7 @@ final class IndexingCoordinator: ObservableObject {
         var ids = Set<String>()
         let cols = PHAssetCollection.fetchAssetCollections(with: .smartAlbum, subtype: .any, options: nil)
         cols.enumerateObjects { col, _, _ in
-            let isRD = col.assetSubtype.rawValue == 1000000201
+            let isRD = col.assetCollectionSubtype.rawValue == 1000000201
                 || col.localizedTitle == "最近删除" || col.localizedTitle == "Recently Deleted"
             guard isRD else { return }
             PHAsset.fetchAssets(in: col, options: nil).enumerateObjects { asset, _, _ in
