@@ -93,16 +93,16 @@ final class SearchEngine {
         if !imageKinds.isEmpty {
             let tokens = Self.queryTokens(query: concept)
             if !tokens.isEmpty, let rows = try? store.allPhotoLabels() {
-                var scored: [(refKey: String, matches: Int)] = []
+                var scored: [(refKey: String, matches: Int, title: String)] = []
                 for row in rows {
                     let labelTokens = Set(row.title.lowercased()
                         .components(separatedBy: CharacterSet(charactersIn: ", ")))
                     let m = tokens.intersection(labelTokens).count
-                    if m > 0 { scored.append((row.refKey, m)) }
+                    if m > 0 { scored.append((row.refKey, m, row.title)) }
                 }
                 let hits = scored.sorted { $0.matches > $1.matches }.prefix(topK).map {
                     SearchHit(kind: .photo, refKey: $0.refKey, frameIndex: 0,
-                              space: "label", title: nil, date: nil,
+                              space: "label", title: $0.title, date: nil,
                               score: Float($0.matches), color: nil)
                 }
                 if !hits.isEmpty { channels.append((1.6, Array(hits))) }
@@ -213,7 +213,8 @@ final class SearchEngine {
             let lt = Set(row.title.lowercased().components(separatedBy: CharacterSet(charactersIn: ", ")))
             if !lt.isDisjoint(with: tokens) {
                 hits.append(SearchHit(kind: .photo, refKey: row.refKey, frameIndex: 0,
-                                      space: "label", title: nil, date: nil, score: 1.0, color: nil))
+                                      space: "label", title: row.title, date: nil,
+                                      score: 1.0, color: nil))
             }
             if hits.count >= 120 { break }   // 上限:热门标签会命中全库,不能全部放行
         }

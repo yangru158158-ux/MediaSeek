@@ -179,6 +179,12 @@ struct SearchView: View {
             }
             .padding(.horizontal)
             .padding(.vertical, 6)
+            if app.indexing.isRunning {
+                Text("⚠️ 索引重建中 \(app.indexing.processed)/\(app.indexing.total) · 当前结果暂不完整")
+                    .font(.caption2)
+                    .foregroundStyle(.orange)
+                    .padding(.horizontal)
+            }
             if !results.isEmpty && !selectionMode {
                 colorFilterBar
             }
