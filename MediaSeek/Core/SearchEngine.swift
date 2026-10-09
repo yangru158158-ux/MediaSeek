@@ -229,6 +229,7 @@ final class SearchEngine {
                 hits.append(SearchHit(kind: .photo, refKey: row.refKey, frameIndex: 0,
                                       space: "label", title: nil, date: nil, score: 1.0, color: nil))
             }
+            if hits.count >= 120 { break }   // 上限:热门标签会命中全库,不能全部放行
         }
         let en = picked.map { $0.label }.sorted().joined(separator: " ")
         return (en, hits)
