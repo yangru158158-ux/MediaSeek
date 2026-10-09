@@ -108,6 +108,15 @@ struct SettingsView: View {
 
     private var tuningSection: some View {
         Section("索引选项") {
+            Toggle(isOn: Binding(
+                get: { app.indexing.chineseLabels },
+                set: { app.indexing.chineseLabels = $0 })) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("中文语义标签")
+                    Text("增强中文物体查询,但索引速度慢 2-3 倍")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
             Stepper(value: Binding(
                 get: { app.indexing.videoFramesPerVideo },
                 set: { app.indexing.videoFramesPerVideo = $0 }), in: 1...5) {

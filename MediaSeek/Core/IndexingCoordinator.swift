@@ -26,6 +26,14 @@ final class IndexingCoordinator: ObservableObject {
         set { UserDefaults.standard.set(newValue, forKey: "videoFrames") }
     }
 
+    /// 中文语义标签(Vision+Gemma):增强中文物体查询,但每张照片多两次推理,慢 2-3 倍
+    var chineseLabels: Bool {
+        get { UserDefaults.standard.object(forKey: "chineseLabels") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "chineseLabels") }
+    }
+
+    private var processedLocal = 0
+
     private let store: VectorStore
     private let models: ModelManager
     private let photo: PhotoLibraryService
@@ -75,6 +83,7 @@ final class IndexingCoordinator: ObservableObject {
         guard !isRunning else { return }
         isRunning = true
         processed = 0
+        processedLocal = 0
         total = 0
         errorCount = 0
         phase = models.bothReady ? .photos : .waitingModel
@@ -128,20 +137,37 @@ final class IndexingCoordinator: ObservableObject {
 
         total += newPhotos.count + newVideos.count
         phase = .photos
-        for asset in newPhotos {
-            try Task.checkCancellation()
-            await embedPhoto(asset)
-            processed += 1
+        // 双路并发:解码/下载与 ANE 推理流水线重叠
+        let useLabels = chineseLabels
+        await withTaskGroup(of: Void.self) { group in
+            var index = 0
+            let maxConcurrent = 2
+            while index < min(maxConcurrent, newPhotos.count) {
+                let asset = newPhotos[index]; index += 1
+                group.addTask { await self.embedPhoto(asset, useLabels: useLabels) }
+            }
+            while !group.isEmpty {
+                _ = await group.next()
+                processedLocal += 1
+                if processedLocal % 5 == 0 { processed = processedLocal }
+                try? Task.checkCancellation()
+                if index < newPhotos.count {
+                    let asset = newPhotos[index]; index += 1
+                    group.addTask { await self.embedPhoto(asset, useLabels: useLabels) }
+                }
+            }
         }
+        processed = processedLocal
         phase = .videos
         for asset in newVideos {
             try Task.checkCancellation()
             await embedVideo(asset)
-            processed += 1
+            processedLocal += 1
+            processed = processedLocal
         }
     }
 
-    private func embedPhoto(_ asset: PHAsset) async {
+    private func embedPhoto(_ asset: PHAsset, useLabels: Bool) async {
         do {
             guard let clip = models.siglip, let gemma = models.gemma else { return }
             let store = self.store
@@ -152,12 +178,11 @@ final class IndexingCoordinator: ObservableObject {
                 try store.upsert(kind: .photo, refKey: asset.localIdentifier, space: clip.space,
                                  vector: vec, title: nil, date: asset.creationDate)
 
-                // Vision 图像分类 → 标签文本 → EmbeddingGemma 向量(支持中文语义查询)
-                if let labels = Self.visionLabels(cg: cg), !labels.isEmpty {
-                    let lvec = try gemma.embedDocument("photo tags: \(labels)")
-                    try store.upsert(kind: .photoLabel, refKey: asset.localIdentifier, space: gemma.space,
-                                     vector: lvec, title: labels, date: asset.creationDate)
-                }
+                // 可选:Vision 图像分类 → 标签文本 → EmbeddingGemma 向量(增强中文查询,但每张多两次推理)
+                guard useLabels, let labels = Self.visionLabels(cg: cg), !labels.isEmpty else { return }
+                let lvec = try gemma.embedDocument("photo tags: \(labels)")
+                try store.upsert(kind: .photoLabel, refKey: asset.localIdentifier, space: gemma.space,
+                                 vector: lvec, title: labels, date: asset.creationDate)
             }.value
         } catch {
             errorCount += 1

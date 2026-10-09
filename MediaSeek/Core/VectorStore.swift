@@ -53,6 +53,7 @@ final class VectorStore {
         }
         db = handle
         try exec("PRAGMA journal_mode=WAL")
+        try exec("PRAGMA synchronous=NORMAL")
         try exec("""
         CREATE TABLE IF NOT EXISTS items(
           id INTEGER PRIMARY KEY AUTOINCREMENT,

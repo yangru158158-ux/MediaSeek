@@ -29,13 +29,10 @@ final class PhotoLibraryService: ObservableObject {
         let options = PHImageRequestOptions()
         options.deliveryMode = .highQualityFormat
         options.isNetworkAccessAllowed = true
-        let side = max(asset.pixelWidth, asset.pixelHeight) > 0
-            ? maxPixel * 2   // aspectFill 取方形裁剪,放大一点保清晰
-            : maxPixel
         return try await withCheckedThrowingContinuation { cont in
             PHImageManager.default().requestImage(
                 for: asset,
-                targetSize: CGSize(width: side, height: side),
+                targetSize: CGSize(width: maxPixel, height: maxPixel),
                 contentMode: .aspectFill,
                 options: options) { image, info in
                 if let cg = image?.cgImage {
