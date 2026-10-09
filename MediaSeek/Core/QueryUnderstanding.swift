@@ -98,6 +98,17 @@ enum QueryUnderstanding {
         ("游泳", "swimming"), ("足球", "soccer"), ("篮球", "basketball"),
         ("羽毛球", "badminton"), ("网球", "tennis"), ("爬山", "hiking"), ("瑜伽", "yoga"),
         ("动物", "animal"), ("风景", "landscape scenery"), ("植物", "plant"),
+        ("美女", "beautiful woman"), ("帅哥", "handsome man"),
+        ("合照", "group photo"), ("同学", "student people"), ("老师", "teacher"),
+        ("家人", "family"), ("爸爸", "father man"), ("妈妈", "mother woman"),
+        ("朋友", "friend people"), ("宝宝", "baby"),
+        ("吃的", "food"), ("好吃的", "food"), ("饮品", "drink"),
+        // 证件/文书(同时带上 document 词,便于命中文档类标签)
+        ("证件", "id card document"), ("证件照", "id document portrait"),
+        ("身份证", "id card"), ("驾照", "driver license document"),
+        ("文件", "document"), ("文字", "text document"), ("pdf", "document"),
+        ("网页", "website screenshot"), ("聊天记录", "chat screenshot"),
+        ("桌面", "computer desktop screen"),
         // 物品/电子
         ("手机", "smartphone"), ("电脑", "computer"), ("笔记本", "laptop"),
         ("屏幕", "screen"), ("显示器", "monitor"), ("电视", "television"),
