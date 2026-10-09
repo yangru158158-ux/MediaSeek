@@ -450,7 +450,8 @@ struct SearchView: View {
                         let old = results[idx]
                         results[idx] = DisplayHit(id: old.id, refKey: old.refKey, target: old.target,
                                                   kind: old.kind, title: newName,
-                                                  score: old.score, date: old.date)
+                                                  score: old.score, date: old.date,
+                                                  color: old.color)
                     }
                     app.notify("已重命名")
                 }
