@@ -69,18 +69,6 @@ final class SearchEngine {
                                      limit: topK, minScore: 0.12)
         }
 
-        // OCR 文字精确层:编号/年份/证件文字的子串匹配(与语义通道互补,精确命中置顶)
-        if scope != .file, query.count >= 2,
-           let ocrRefs = try? store.searchOCR(query: query) {
-            for (refKey, _) in ocrRefs where !best.keys.contains(refKey) {
-                hits.append(SearchHit(kind: .photo, refKey: refKey, frameIndex: 0,
-                                      space: "ocr", title: "含「\(query)」文字",
-                                      date: nil, score: 1.0, color: nil))
-            }
-        }
-
-        guard !hits.isEmpty else { return [] }
-
         // 同一 refKey 保留最高分(视频多帧、照片双空间、文件多块都会命中多次)
         var best: [String: SearchHit] = [:]
         for hit in hits {
@@ -90,6 +78,18 @@ final class SearchEngine {
                 best[hit.refKey] = hit
             }
         }
+
+        // OCR 文字精确层:编号/年份/证件文字的子串匹配(与语义通道互补,精确命中置顶)
+        if scope != .file, query.count >= 2,
+           let ocrRefs = try? store.searchOCR(query: query) {
+            for (refKey, _) in ocrRefs where best[refKey] == nil {
+                best[refKey] = SearchHit(kind: .photo, refKey: refKey, frameIndex: 0,
+                                         space: "ocr", title: "含「\(query)」文字",
+                                         date: nil, score: 1.0, color: nil)
+            }
+        }
+
+        guard !best.isEmpty else { return [] }
         let merged = best.values.sorted { $0.score > $1.score }
 
         return resolve(merged)
