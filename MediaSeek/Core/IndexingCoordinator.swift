@@ -124,7 +124,7 @@ final class IndexingCoordinator: ObservableObject {
         // 「最近删除」里的照片 30 天内仍在图库,跳过索引并从索引中清除
         var recentlyDeleted = Set<String>()
         let rdCollections = PHAssetCollection.fetchAssetCollections(
-            with: .smartAlbum, subtype: .smartAlbumRecentlyDeleted, options: nil)
+            with: .smartAlbum, subtype: .albumRecentlyDeleted, options: nil)
         rdCollections.enumerateObjects { collection, _, _ in
             PHAsset.fetchAssets(in: collection, options: nil).enumerateObjects { asset, _, _ in
                 recentlyDeleted.insert(asset.localIdentifier)
