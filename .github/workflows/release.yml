@@ -52,15 +52,19 @@ jobs:
 
       - name: 导出 IPA
         env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           TEAM_ID: ${{ secrets.DEVELOPMENT_TEAM_ID }}
         run: |
-          cat > build/ExportOptions.plist <<'PLIST'
+          cat > build/ExportOptions.plist <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
           <plist version="1.0">
           <dict>
             <key>method</key>
             <string>app-store-connect</string>
+            <key>teamID</key>
+            <string>${TEAM_ID}</string>
             <key>signingStyle</key>
             <string>automatic</string>
             <key>uploadSymbols</key>
@@ -70,11 +74,15 @@ jobs:
           </dict>
           </plist>
           PLIST
+          KEY_PATH="$HOME/.appstoreconnect/private_keys/AuthKey_${ASC_KEY_ID}.p8"
           xcodebuild -exportArchive \
             -archivePath build/MediaSeek.xcarchive \
             -exportOptionsPlist build/ExportOptions.plist \
             -exportPath build/ipa \
-            -allowProvisioningUpdates
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$KEY_PATH" \
+            -authenticationKeyID "$ASC_KEY_ID" \
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID"
 
       - name: 上传 TestFlight
         env:
