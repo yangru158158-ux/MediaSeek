@@ -119,12 +119,23 @@ final class IndexingCoordinator: ObservableObject {
 
     private func syncPhotoLibrary() async throws {
         let fetch = photo.fetchAllAssets()
-        let known = try store.refKeys(kinds: [.photo, .photoLabel, .videoFrame])
+        let known = try store.refKeys(kinds: [.photo, .photoLabel, .userTag, .videoFrame])
+
+        // 「最近删除」里的照片 30 天内仍在图库,跳过索引并从索引中清除
+        var recentlyDeleted = Set<String>()
+        let rdCollections = PHAssetCollection.fetchAssetCollections(
+            with: .smartAlbum, subtype: .smartAlbumRecentlyDeleted, options: nil)
+        rdCollections.enumerateObjects { collection, _, _ in
+            PHAsset.fetchAssets(in: collection, options: nil).enumerateObjects { asset, _, _ in
+                recentlyDeleted.insert(asset.localIdentifier)
+            }
+        }
 
         var libIDs = Set<String>()
         var newPhotos: [PHAsset] = []
         var newVideos: [PHAsset] = []
         fetch.enumerateObjects { asset, _, _ in
+            guard recentlyDeleted.contains(asset.localIdentifier) == false else { return }
             libIDs.insert(asset.localIdentifier)
             guard !known.contains(asset.localIdentifier) else { return }
             if asset.mediaType == .image {
