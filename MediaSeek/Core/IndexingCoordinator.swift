@@ -217,8 +217,8 @@ final class IndexingCoordinator: ObservableObject {
         clip: SigLIPEmbedder?, gemma: GemmaTextEmbedder?, useLabels: Bool) async -> Int {
         guard let clip, let gemma else { return 0 }
         do {
-            // 1280px 用于 OCR 文字识别;320px 用于嵌入向量
-            guard let full = try await photo.image(for: asset, maxPixel: 1280) else { return 0 }
+            // 2048px 用于 OCR 文字识别(拍屏角度/小字也尽量认出);320px 用于嵌入向量
+            guard let full = try await photo.image(for: asset, maxPixel: 2048) else { return 0 }
             try Task.checkCancellation()   // 取消:取图后立即中断
             let small = Self.downscaled(full, to: 320)
             let colorBucket = PhotoColor.bucket(of: small)

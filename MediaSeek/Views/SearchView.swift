@@ -245,7 +245,7 @@ struct SearchView: View {
         Task {
             do {
                 let n = try await SearchExporter.saveToAlbum(title: q, hits: visibleResults)
-                await MainActor.run { app.notify("已把 \(n) 个项目存入相册「搜索·\(q)」") }
+                await MainActor.run { app.notify("已把 \(n) 个项目加入相册「搜索·\(q)」\n在 系统相册 App → 我的相册 里查看") }
             } catch {
                 await MainActor.run { app.fail(error) }
             }
@@ -374,7 +374,7 @@ struct SearchView: View {
         Task {
             do {
                 let n = try await SearchExporter.saveToAlbum(title: q, hits: hits)
-                await MainActor.run { app.notify("已把 \(n) 个项目存入相册「搜索·\(q)」") }
+                await MainActor.run { app.notify("已把 \(n) 个项目加入相册「搜索·\(q)」\n在 系统相册 App → 我的相册 里查看") }
             } catch {
                 await MainActor.run { app.fail(error) }
             }
