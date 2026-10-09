@@ -180,8 +180,7 @@ struct SearchView: View {
                 let (n, url) = try await SearchExporter.exportToFiles(
                     folderName: q, hits: results,
                     photo: app.photoLib, imports: app.imports)
-                await MainActor.run { app.notify("已导出 \(n) 个文件
-位置:「文件」App → 智搜 → 导出 → \(url.lastPathComponent)") }
+                await MainActor.run { app.notify("已导出 \(n) 个文件\n位置:「文件」App → 智搜 → 导出 → \(url.lastPathComponent)") }
             } catch {
                 await MainActor.run { app.fail(error) }
             }

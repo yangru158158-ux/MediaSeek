@@ -47,7 +47,7 @@ enum SearchExporter {
 
         let fetch = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil)
         try await PHPhotoLibrary.shared().performChanges {
-            if let req = PHAssetCollectionChangeRequest(forAssetCollection: target) {
+            if let req = PHAssetCollectionChangeRequest(for: target) {
                 req.addAssets(fetch as NSFastEnumeration)
             }
         }
