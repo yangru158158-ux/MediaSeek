@@ -46,13 +46,17 @@ enum SearchExporter {
         guard let target = album else { throw MSError("相册不可用") }
 
         let fetch = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil)
+        final class FailBox { var on = false }
+        let fail = FailBox()
         try await PHPhotoLibrary.shared().performChanges {
-            // iOS 26 上相册修改请求可能返回 nil(静默 no-op),必须显式报错
+            // iOS 26 上相册修改请求可能返回 nil(静默 no-op),记下失败,块外显式报错
             guard let req = PHAssetCollectionChangeRequest(for: target) else {
-                throw MSError("相册「\(albumTitle)」无法修改,请重试")
+                fail.on = true
+                return
             }
             req.addAssets(fetch as NSFastEnumeration)
         }
+        if fail.on { throw MSError("相册「\(albumTitle)」无法修改,请重试") }
         return fetch.count
     }
 
