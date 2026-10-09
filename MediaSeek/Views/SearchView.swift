@@ -11,6 +11,7 @@ struct SearchView: View {
     @State private var searchedOnce = false
     @State private var elapsedMs = 0
     @State private var selectedHit: DisplayHit?
+    @State private var exporting = false
 
     private let exampleQueries = ["一只猫", "海边的日落", "有人的合影", "会议纪要", "发票 PDF"]
 
@@ -84,10 +85,35 @@ struct SearchView: View {
         if searching {
             ProgressView("正在检索…").padding(.vertical, 6)
         } else if searchedOnce {
-            Text("找到 \(results.count) 个结果 · \(elapsedMs) ms")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .padding(.vertical, 6)
+            HStack(spacing: 10) {
+                Text("找到 \(results.count) 个结果 · \(elapsedMs) ms")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                if !results.isEmpty {
+                    Spacer()
+                    Menu {
+                        Button {
+                            exportToAlbum()
+                        } label: {
+                            Label("存入系统相册(新建专辑)", systemImage: "photo.stack")
+                        }
+                        Button {
+                            exportToFiles()
+                        } label: {
+                            Label("导出到「文件」App", systemImage: "folder")
+                        }
+                    } label: {
+                        if exporting {
+                            ProgressView()
+                        } else {
+                            Label("导出", systemImage: "square.and.arrow.up")
+                                .font(.footnote)
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 6)
         } else {
             chips
         }
@@ -127,6 +153,39 @@ struct SearchView: View {
                 }
                 .padding(.horizontal)
             }
+        }
+    }
+
+    private func exportToAlbum() {
+        guard !exporting, !results.isEmpty else { return }
+        exporting = true
+        let q = query.trimmingCharacters(in: .whitespaces)
+        Task {
+            do {
+                let n = try await SearchExporter.saveToAlbum(title: q, hits: results)
+                await MainActor.run { app.notify("已把 \(n) 个项目存入相册「搜索·\(q)」") }
+            } catch {
+                await MainActor.run { app.fail(error) }
+            }
+            exporting = false
+        }
+    }
+
+    private func exportToFiles() {
+        guard !exporting, !results.isEmpty else { return }
+        exporting = true
+        let q = query.trimmingCharacters(in: .whitespaces)
+        Task {
+            do {
+                let (n, url) = try await SearchExporter.exportToFiles(
+                    folderName: q, hits: results,
+                    photo: app.photoLib, imports: app.imports)
+                await MainActor.run { app.notify("已导出 \(n) 个文件
+位置:「文件」App → 智搜 → 导出 → \(url.lastPathComponent)") }
+            } catch {
+                await MainActor.run { app.fail(error) }
+            }
+            exporting = false
         }
     }
 

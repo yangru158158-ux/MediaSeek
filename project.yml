@@ -43,6 +43,8 @@ targets:
         CFBundleShortVersionString: "1.0"
         CFBundleVersion: "1"
         UILaunchScreen: {}
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
         NSPhotoLibraryUsageDescription: 「智搜」需要读取你的照片与视频,在本机建立索引以支持语义搜索。所有处理均在设备本地完成,数据不会上传。

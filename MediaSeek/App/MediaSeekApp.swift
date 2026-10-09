@@ -25,6 +25,7 @@ final class AppModel: ObservableObject {
     let search: SearchEngine
 
     @Published var errorMessage: String?
+    @Published var successMessage: String?
     private var bag = Set<AnyCancellable>()
 
     init() {
@@ -46,6 +47,10 @@ final class AppModel: ObservableObject {
 
     func fail(_ error: Error) {
         errorMessage = error.localizedDescription
+    }
+
+    func notify(_ message: String) {
+        successMessage = message
     }
 
     /// 给照片/视频添加人名或主题标签(生成 Gemma 语义向量)

@@ -20,5 +20,12 @@ struct RootView: View {
         } message: {
             Text(app.errorMessage ?? "")
         }
+        .alert("完成", isPresented: .init(
+            get: { app.successMessage != nil },
+            set: { if !$0 { app.successMessage = nil } })) {
+            Button("好") { app.successMessage = nil }
+        } message: {
+            Text(app.successMessage ?? "")
+        }
     }
 }
