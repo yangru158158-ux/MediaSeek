@@ -38,6 +38,7 @@ jobs:
           import PackageDescription
           let pkg = Package(
             name: "TokTest",
+            platforms: [.macOS(.v13)],
             dependencies: [.package(url: "https://github.com/huggingface/swift-transformers", branch: "main")],
             targets: [.executableTarget(name: "TokTest",
                        dependencies: [.product(name: "Tokenizers", package: "swift-transformers")])]
