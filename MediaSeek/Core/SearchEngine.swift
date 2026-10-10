@@ -197,7 +197,8 @@ final class SearchEngine {
         return resolve(merged)
     }
 
-    /// 查询词集合:清洗后的原文分词 + 词典英译分词,再做一跳同义扩展(供标签 token 比对)
+    /// 查询词集合:清洗后的原文分词 + 词典英译分词,再做一跳同义扩展(供标签 token 比对)。
+    /// 长查询(≥3 字)剔除泛化词:people/document 这类标签什么照片都能沾,只制造噪声
     private static func queryTokens(query: String) -> Set<String> {
         var tokens = Set(query.lowercased()
             .components(separatedBy: .whitespacesAndNewlines)
@@ -205,7 +206,11 @@ final class SearchEngine {
         if let en = QueryUnderstanding.english(for: query) {
             for t in en.lowercased().split(separator: " ") { tokens.insert(String(t)) }
         }
-        return QueryUnderstanding.expandedTokens(tokens)
+        tokens = QueryUnderstanding.expandedTokens(tokens)
+        if query.count >= 3 {
+            tokens.subtract(QueryUnderstanding.genericTokens)
+        }
+        return tokens
     }
 
 

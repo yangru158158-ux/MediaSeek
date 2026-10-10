@@ -42,17 +42,30 @@ enum QueryUnderstanding {
         return out.isEmpty ? trimmed : out
     }
 
-    /// 核心词命中的词典条目按出现位置拼成英文查询(视觉通道用),无命中返回 nil
+    /// 核心词命中的词典条目按出现位置拼成英文查询(视觉通道用),无命中返回 nil。
+    /// 单字键只在整词完全相等时生效:「中华人民共和国」含「人」字,
+    /// 但搜它不是在搜人像——子串匹配会让全库 people/adult 标签灌进来。
     static func english(for core: String) -> String? {
         var matches: [(pos: Int, en: String)] = []
         for (zh, en) in dictionary {
+            if zh.count == 1 {
+                if core == zh { matches.append((0, en)) }
+                continue
+            }
             if let r = core.range(of: zh) {
                 matches.append((core.distance(from: core.startIndex, to: r.lowerBound), en))
             }
         }
         guard !matches.isEmpty else { return nil }
-        return matches.sorted { $0.pos < $1.pos }.map(\.en).joined(separator: " ")
+        return matches.sorted { $0.pos < $1.pos }.map { $0.en }.joined(separator: " ")
     }
+
+    /// 泛化标签词:长查询(≥3 字)不带这些词去匹配标签——
+    /// 它们什么照片都能沾上,是「一个词灌出全库」的元凶
+    static let genericTokens: Set<String> = [
+        "people", "person", "adult", "human", "document", "screenshot",
+        "text", "structure", "outdoor", "machine", "clothing", "plant",
+    ]
 
     /// 英文同义扩展:标签是 woman、查询是 girl 时精确匹配会漏,必须互相打通
     static let synonyms: [String: [String]] = [
@@ -134,7 +147,7 @@ enum QueryUnderstanding {
         ("朋友", "friend people"), ("宝宝", "baby"),
         ("吃的", "food"), ("好吃的", "food"), ("饮品", "drink"),
         // 证件/文书(同时带上 document 词,便于命中文档类标签)
-        ("证件", "id card document"), ("证件照", "id document portrait"),
+        ("证件", "id card"), ("证件照", "id portrait"),
         ("身份证", "id card"), ("驾照", "driver license document"),
         ("文件", "document"), ("文字", "text document"), ("pdf", "document"),
         ("网页", "website screenshot"), ("聊天记录", "chat screenshot"),
