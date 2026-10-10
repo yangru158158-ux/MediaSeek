@@ -14,6 +14,7 @@ struct SearchView: View {
     @State private var exporting = false
     @State private var selectionMode = false
     @State private var selected = Set<String>()
+    @State private var refineMode = false
     @State private var batchTagText = ""
     @State private var showTagAlert = false
     @State private var showDeleteDialog = false
@@ -164,6 +165,18 @@ struct SearchView: View {
                     }
                     if !results.isEmpty {
                         Spacer()
+                        if !selectionMode {
+                            Button {
+                                refineMode.toggle()
+                            } label: {
+                                Text(refineMode ? "结果内:开" : "结果内")
+                                    .font(.caption)
+                                    .padding(.horizontal, 8).padding(.vertical, 4)
+                                    .background(refineMode ? Color.blue.opacity(0.18) : Color(.systemGray6),
+                                                in: Capsule())
+                            }
+                            .buttonStyle(.plain)
+                        }
                         if exporting {
                             ProgressView()
                         } else {
@@ -175,6 +188,11 @@ struct SearchView: View {
                     Text("百分比 = 相对相关度(第一名 100%),非绝对概率")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
+                }
+                if refineMode && !results.isEmpty && !selectionMode {
+                    Text("结果内搜索已开启:下一次搜索只在这些结果里进行")
+                        .font(.caption2)
+                        .foregroundStyle(.blue)
                 }
             }
             .padding(.horizontal)
@@ -491,15 +509,21 @@ struct SearchView: View {
         let q = query.trimmingCharacters(in: .whitespaces)
         guard !q.isEmpty else { return }
         app.addSearchHistory(q)
+        // 结果内搜索:开启时,新搜索只保留落在上一轮结果里的命中(可连续收窄)
+        let refining = refineMode && !results.isEmpty
+        let previousIDs = Set(results.map(\.refKey))
         searching = true
         searchedOnce = true
-        Task.detached(priority: .userInitiated) { [scope] in
+        Task.detached(priority: .userInitiated) { [scope, previousIDs, refining] in
             var hits: [DisplayHit] = []
             var ms = 0
             do {
                 let start = Date()
                 hits = try await app.search.search(q, scope: scope)
                 ms = Int(Date().timeIntervalSince(start) * 1000)
+                if refining {
+                    hits = hits.filter { previousIDs.contains($0.refKey) }
+                }
             } catch {
                 await app.fail(error)
             }
