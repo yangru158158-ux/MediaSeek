@@ -224,12 +224,17 @@ final class SearchEngine {
         // 与视觉通道取并集;标题附命中片段,方便核对为什么命中(小字/页脚也会算)
         // 语义: 前缀模式下跳过(只要语义命中)
         if !semanticOnly, scope == .all || scope == .photo {
+            // OCR 命中可能来自导入文件(PDF OCR 原文):按 files 表区分 文件/照片
+            let fileIds = (try? store.fileIds()) ?? []
+            func ocrKind(_ ref: String) -> ItemKind {
+                (scope == .all && fileIds.contains(ref)) ? .file : .photo
+            }
             var seen = Set<String>()
             var rank = 0
             for t in (textTerms.isEmpty ? [query] : textTerms) where !t.isEmpty {
                 for ref in (try? store.searchOCR(query: t)) ?? [] where !seen.contains(ref.refKey) {
                     seen.insert(ref.refKey)
-                    add(SearchHit(kind: .photo, refKey: ref.refKey, frameIndex: 0,
+                    add(SearchHit(kind: ocrKind(ref.refKey), refKey: ref.refKey, frameIndex: 0,
                                   space: "ocr", title: "含「\(t)」:\(Self.ocrSnippet(ref.text, t))",
                                   date: nil, score: 1.0, color: nil),
                         weight: 8.0, rank: rank)
@@ -256,7 +261,7 @@ final class SearchEngine {
                         .sorted { $0.value > $1.value }
                         .prefix(topK)
                     for (i, e) in multi.enumerated() {
-                        add(SearchHit(kind: .photo, refKey: e.key, frameIndex: 0,
+                        add(SearchHit(kind: ocrKind(e.key), refKey: e.key, frameIndex: 0,
                                       space: "ocr", title: "含「\(query)」相关文字(命中\(e.value)处)",
                                       date: nil, score: 1.0, color: nil),
                             weight: 5.0, rank: rank + i)
@@ -332,8 +337,10 @@ final class SearchEngine {
         }
         guard !satisfied.isEmpty else { return [] }
 
+        let fileIds = (try? store.fileIds()) ?? []
         let hits = satisfied.sorted().map {
-            SearchHit(kind: .photo, refKey: $0, frameIndex: 0, space: "within",
+            SearchHit(kind: (fileIds.contains($0) ? .file : .photo), refKey: $0, frameIndex: 0,
+                      space: "within",
                       title: "结果内命中(\(semanticTerms.isEmpty ? "文字" : "语义+文字"))",
                       date: nil, score: 1.0, color: store.colorForRef($0))
         }
@@ -351,6 +358,10 @@ final class SearchEngine {
         // and 模式标题列出全部命中词(交集里每张都含全部词,不能只显示第一个)
         // 结果内模式:只在这些照片的文字索引里查
         if spec.channel == .text {
+            let fileIds = (try? store.fileIds()) ?? []
+            func ocrKind(_ ref: String) -> ItemKind {
+                (scope == .all && fileIds.contains(ref)) ? .file : .photo
+            }
             var perTerm: [[SearchHit]] = []
             for t in terms {
                 let refs: [(refKey: String, text: String)] = within.map { among in
@@ -363,7 +374,7 @@ final class SearchEngine {
                         : (connectorIsAnd
                            ? "文字全含:\(terms.joined(separator: " ")) —「\(t)」\(Self.ocrSnippet(ref.text, t))"
                            : "文字命中「\(t)」:\(Self.ocrSnippet(ref.text, t))")
-                    return SearchHit(kind: .photo, refKey: ref.refKey, frameIndex: 0, space: "ocr",
+                    return SearchHit(kind: ocrKind(ref.refKey), refKey: ref.refKey, frameIndex: 0, space: "ocr",
                               title: base,
                               date: nil, score: Float(1.0 / Double(rank + 1)), color: nil)
                 })

@@ -404,6 +404,20 @@ final class IndexingCoordinator: ObservableObject {
                         try store.upsert(kind: .fileChunk, refKey: record.id, frameIndex: 1000 + i,
                                          space: clip.space, vector: vec, title: record.name, date: date)
                     }
+                } else if type.conforms(to: .pdf) || url.pathExtension.lowercased() == "pdf" {
+                    // 扫描件月结单等:PDF 无文字层,逐页 OCR(繁简)。原文入 ocr_text
+                    // 供 文字: 精确搜;每页文本做 Gemma 嵌入供 语义: 搜
+                    let pages = TextExtractor.pdfPageTexts(at: url)
+                    if !pages.isEmpty {
+                        let joined = pages.map { "【第\($0.page)页】\($0.text)" }.joined(separator: "\n")
+                        try store.saveOCR(refKey: record.id, text: String(joined.prefix(40000)))
+                    }
+                    for (i, page) in pages.enumerated() where !page.text.isEmpty {
+                        let vec = try gemma.embedDocument(page.text)
+                        try store.upsert(kind: .fileChunk, refKey: record.id, frameIndex: 3000 + i,
+                                         space: gemma.space, vector: vec,
+                                         title: String(page.text.prefix(60)), date: date)
+                    }
                 } else if let text = TextExtractor.extractText(at: url), !text.isEmpty {
                     for (i, chunk) in TextExtractor.chunks(of: text).enumerated() {
                         let vec = try gemma.embedDocument(chunk)
@@ -500,6 +514,29 @@ enum TextExtractor {
             return all.isEmpty ? nil : all
         }
         return nil
+    }
+
+    /// 扫描件 PDF 没有文字层:逐页渲染 2048px 位图后走 Vision OCR
+    /// (繁体 zh-Hant/简体/英文)。返回 [(页码, 该页文本)],页数封顶防病态文件。
+    static func pdfPageTexts(at url: URL, maxPages: Int = 24) -> [(page: Int, text: String)] {
+        guard let doc = PDFDocument(url: url) else { return [] }
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.recognitionLanguages = ["zh-Hant", "zh-Hans", "en-US"]
+        request.usesLanguageCorrection = false
+        var out: [(page: Int, text: String)] = []
+        for i in 0..<min(doc.pageCount, maxPages) {
+            guard let page = doc.page(at: i),
+                  let cg = page.thumbnail(of: CGSize(width: 2048, height: 2048), for: .mediaBox).cgImage
+            else { continue }
+            let handler = VNImageRequestHandler(cgImage: cg, options: [:])
+            guard (try? handler.perform([request])) == true else { continue }
+            let text = ((request.results as? [VNRecognizedTextObservation]) ?? [])
+                .compactMap { $0.topCandidates(1).first?.string }
+                .joined(separator: "\n")
+            if !text.isEmpty { out.append((i + 1, text)) }
+        }
+        return out
     }
 
     /// 按段落聚合为 ~500 字块,相邻块重叠 ~80 字

@@ -113,6 +113,13 @@ final class VectorStore {
         """)
         // 自愈:清剿漏绑 id 时代写入的 NULL 毒行(记录已无主,重导即重建)
         try? exec("DELETE FROM files WHERE id IS NULL")
+        // 自愈:已入库但从未做过 OCR 的 PDF 置回待索引,下次同步逐页 OCR
+        // (扫描件月结单此前只有文件名可搜;有 ocr_text 原文的不再折腾)
+        try? exec("""
+        UPDATE files SET indexed = 0
+        WHERE indexed = 1 AND lower(name || COALESCE(rel_path,'')) LIKE '%.pdf'
+          AND id NOT IN (SELECT ref_key FROM ocr_text)
+        """)
     } }
 
     private func exec(_ sql: String) throws {
@@ -566,6 +573,18 @@ final class VectorStore {
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, id, -1, Self.transient)
         sqlite3_step(stmt)
+    } }
+
+    /// 全部已导入文件的 id(OCR 命中区分 文件/照片 用,files 表量级小)
+    func fileIds() throws -> Set<String> { try serialized {
+        guard let db else { return [] }
+        let stmt = try prepare("SELECT id FROM files")
+        defer { sqlite3_finalize(stmt) }
+        var out = Set<String>()
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            out.insert(String(cString: sqlite3_column_text(stmt, 0)))
+        }
+        return out
     } }
 
     func deleteFile(id: String) throws { try serialized {
