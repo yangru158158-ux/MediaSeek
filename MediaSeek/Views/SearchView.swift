@@ -114,7 +114,7 @@ struct SearchView: View {
     private var statusLine: some View {
         if searching {
             ProgressView("正在检索…").padding(.vertical, 6)
-        } else if query.isEmpty {
+        } else if query.isEmpty && !searchedOnce {
             VStack(alignment: .leading, spacing: 10) {
                 if !app.recentSearches.isEmpty {
                     HStack {
