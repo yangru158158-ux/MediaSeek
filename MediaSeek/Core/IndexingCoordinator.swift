@@ -146,10 +146,17 @@ final class IndexingCoordinator: ObservableObject {
         guard let gemma = models.gemma,
               let labels = try? store.allDistinctLabels(), !labels.isEmpty else { return }
         let known = Set(((try? store.labelVocab()) ?? []).map { $0.label })
-        for label in labels.prefix(2000) where !known.contains(label) {
-            guard let v = try? gemma.embedDocument(label) else { continue }
-            try? store.saveLabelVec(label, vec: v)
-        }
+        // 推理必须放后台线程:主线程逐个嵌几百个标签会卡死主线程,
+        // 触发 scene-update 看门狗(10 秒上限)被系统击杀(18:01/18:03 两次崩溃根因)
+        let missing = labels.prefix(2000).filter { !known.contains($0) }
+        guard !missing.isEmpty else { return }
+        await Task.detached(priority: .utility) { [store] in
+            for label in missing {
+                guard let v = try? gemma.embedDocument(label) else { continue }
+                try? store.saveLabelVec(label, vec: v)
+                try? await Task.sleep(nanoseconds: 2_000_000)   // 每 2ms 让路,防持续满载
+            }
+        }.value
     }
 
     // MARK: - 相册
