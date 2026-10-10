@@ -96,6 +96,7 @@ final class IndexingCoordinator: ObservableObject {
     func cancel() {
         task?.cancel()
         task = nil
+        UIApplication.shared.isIdleTimerDisabled = false
     }
 
     private func startRun(full: Bool) {
@@ -107,11 +108,14 @@ final class IndexingCoordinator: ObservableObject {
         errorCount = 0
         firstErrorMessage = nil
         phase = models.bothReady ? .photos : .waitingModel
+        // 重建期间禁止自动锁屏:保持前台+插电即可连续索引(iOS 后台会冻结 App)
+        UIApplication.shared.isIdleTimerDisabled = true
         let errors = FirstErrorBox()
         task = Task { [full, errors] in
             await self.run(full: full, errors: errors)
             self.isRunning = false
             self.task = nil
+            UIApplication.shared.isIdleTimerDisabled = false
         }
     }
 
