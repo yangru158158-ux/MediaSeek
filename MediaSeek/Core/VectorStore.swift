@@ -592,8 +592,8 @@ final class VectorStore {
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, id, -1, Self.transient)
         sqlite3_step(stmt)
-        try removeByRef(kind: .file, refKey: id)
-        try removeByRef(kind: .fileChunk, refKey: id)
+        // 全量清除:文件名向量、每页文本向量(fileChunk)、PDF OCR 原文(ocr_text)
+        try removeEverythingForRef(id)
     } }
 
     var fileCount: Int {
