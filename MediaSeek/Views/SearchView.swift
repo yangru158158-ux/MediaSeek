@@ -538,7 +538,7 @@ struct SearchView: View {
         let refining = refineMode && !refineBaseIDs.isEmpty
         searching = true
         searchedOnce = true
-        Task.detached(priority: .userInitiated) { [scope, refineBaseIDs, refining] in
+        Task.detached(priority: .userInitiated) { [scope, refining] in
             var hits: [DisplayHit] = []
             var ms = 0
             do {
