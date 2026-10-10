@@ -167,23 +167,24 @@ struct SearchView: View {
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     }
-                    if !results.isEmpty {
-                        Spacer()
-                        if !selectionMode {
-                            Button {
-                                refineMode.toggle()
-                                // 基数在拨动开关瞬间锁定:之后清空输入框、改词都不丢
-                                refineBaseIDs = refineMode ? Set(results.map(\.refKey)) : []
-                                lastRoundCount = refineMode ? results.count : 0
-                            } label: {
-                                Text(refineMode ? "结果内:开" : "结果内")
-                                    .font(.caption)
-                                    .padding(.horizontal, 8).padding(.vertical, 4)
-                                    .background(refineMode ? Color.blue.opacity(0.18) : Color(.systemGray6),
-                                                in: Capsule())
-                            }
-                            .buttonStyle(.plain)
+                    Spacer()
+                    if !selectionMode {
+                        // 结果内开关常驻(零结果时也要能关闭,否则会死循环)
+                        Button {
+                            refineMode.toggle()
+                            // 基数在拨动开关瞬间锁定:之后清空输入框、改词都不丢
+                            refineBaseIDs = refineMode ? Set(results.map(\.refKey)) : []
+                            lastRoundCount = refineMode ? results.count : 0
+                        } label: {
+                            Text(refineMode ? "结果内:开" : "结果内")
+                                .font(.caption)
+                                .padding(.horizontal, 8).padding(.vertical, 4)
+                                .background(refineMode ? Color.blue.opacity(0.18) : Color(.systemGray6),
+                                            in: Capsule())
                         }
+                        .buttonStyle(.plain)
+                    }
+                    if !results.isEmpty {
                         if exporting {
                             ProgressView()
                         } else {
@@ -254,10 +255,24 @@ struct SearchView: View {
     private var resultGrid: some View {
         ScrollView {
             if results.isEmpty && searchedOnce && !searching {
-                ContentUnavailableView("没有找到相关内容",
-                                       systemImage: "questionmark.folder",
-                                       description: Text(emptyStateHint(query, refining: refineMode)))
-                    .padding(.top, 60)
+                VStack(spacing: 14) {
+                    ContentUnavailableView("没有找到相关内容",
+                                           systemImage: "questionmark.folder",
+                                           description: Text(emptyStateHint(query, refining: refineMode)))
+                    if refineMode {
+                        Button {
+                            refineMode = false
+                            refineBaseIDs = []
+                            lastRoundCount = 0
+                            runSearch()
+                        } label: {
+                            Text("关闭结果内,全局重搜")
+                                .font(.footnote.weight(.medium))
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                }
+                .padding(.top, 60)
             } else {
                 LazyVGrid(columns: columns, spacing: 12) {
                     ForEach(visibleResults) { hit in
