@@ -55,7 +55,6 @@ final class VectorStore {
         db = handle
         try exec("PRAGMA journal_mode=WAL")
         try exec("PRAGMA synchronous=NORMAL")
-        try? exec("ALTER TABLE items ADD COLUMN color TEXT")
         try exec("CREATE TABLE IF NOT EXISTS ocr_text(ref_key TEXT PRIMARY KEY, text TEXT)")
         try exec("CREATE TABLE IF NOT EXISTS label_vocab(label TEXT PRIMARY KEY, vec BLOB)")
         try exec("""
@@ -69,9 +68,13 @@ final class VectorStore {
           vec BLOB NOT NULL,
           title TEXT,
           created_at REAL,
+          color TEXT,
           UNIQUE(kind, ref_key, frame_index)
         )
         """)
+        // 旧库补列迁移:必须放在建表之后——放前面的话,新库上表还不存在,
+        // ALTER 被 try? 静默吞掉,color 列就永远缺失(导致全部照片索引失败的事故)
+        try? exec("ALTER TABLE items ADD COLUMN color TEXT")
         try exec("CREATE INDEX IF NOT EXISTS idx_items_kind_space ON items(kind, space)")
         try exec("""
         CREATE TABLE IF NOT EXISTS folders(
@@ -113,6 +116,23 @@ final class VectorStore {
     func upsert(kind: ItemKind, refKey: String, frameIndex: Int = 0,
                 space: String, vector: [Float], title: String?, date: Date?,
                 color: String? = nil) throws {
+        guard let db else { throw MSError("数据库未打开") }
+        do {
+            try upsertRow(kind: kind, refKey: refKey, frameIndex: frameIndex, space: space,
+                          vector: vector, title: title, date: date, color: color)
+        } catch {
+            // 自愈:旧库缺 color 列时补列并重试一次
+            let msg = String(cString: sqlite3_errmsg(db))
+            guard msg.contains("no column named color") else { throw MSError(msg) }
+            try? exec("ALTER TABLE items ADD COLUMN color TEXT")
+            try upsertRow(kind: kind, refKey: refKey, frameIndex: frameIndex, space: space,
+                          vector: vector, title: title, date: date, color: color)
+        }
+    }
+
+    private func upsertRow(kind: ItemKind, refKey: String, frameIndex: Int,
+                           space: String, vector: [Float], title: String?, date: Date?,
+                           color: String?) throws {
         guard let db else { throw MSError("数据库未打开") }
         let sql = """
         INSERT INTO items(kind, ref_key, frame_index, space, dim, vec, title, created_at, color)
