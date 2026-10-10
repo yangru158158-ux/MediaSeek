@@ -15,6 +15,7 @@ struct SearchView: View {
     @State private var selectionMode = false
     @State private var selected = Set<String>()
     @State private var refineMode = false
+    @State private var refineBaseIDs = Set<String>()  // 拨动「结果内」瞬间锁定的搜索范围(清空输入框/改词不丢)
     @State private var lastRoundCount = 0   // 结果内搜索的上一轮结果数(计数行展示/refine 校验)
     @State private var batchTagText = ""
     @State private var showTagAlert = false
@@ -171,6 +172,9 @@ struct SearchView: View {
                         if !selectionMode {
                             Button {
                                 refineMode.toggle()
+                                // 基数在拨动开关瞬间锁定:之后清空输入框、改词都不丢
+                                refineBaseIDs = refineMode ? Set(results.map(\.refKey)) : []
+                                lastRoundCount = refineMode ? results.count : 0
                             } label: {
                                 Text(refineMode ? "结果内:开" : "结果内")
                                     .font(.caption)
@@ -515,34 +519,33 @@ struct SearchView: View {
         let q = query.trimmingCharacters(in: .whitespaces)
         guard !q.isEmpty else { return }
         app.addSearchHistory(q)
-        // 结果内搜索:开启时,新搜索只保留落在上一轮结果里的命中(可连续收窄)
-        let refining = refineMode && !results.isEmpty
-        lastRoundCount = refining ? results.count : 0
-        let previousIDs = Set(results.map(\.refKey))
+        // 结果内搜索:范围=拨动「结果内」开关瞬间锁定的基数(清空输入框/改词都不丢)
+        let refining = refineMode && !refineBaseIDs.isEmpty
         searching = true
         searchedOnce = true
-        Task.detached(priority: .userInitiated) { [scope, previousIDs, refining] in
+        Task.detached(priority: .userInitiated) { [scope, refineBaseIDs, refining] in
             var hits: [DisplayHit] = []
             var ms = 0
             do {
                 let start = Date()
                 hits = try await app.search.search(q, scope: scope,
-                                                   within: refining ? previousIDs : nil)
+                                                   within: refining ? refineBaseIDs : nil)
                 ms = Int(Date().timeIntervalSince(start) * 1000)
                 if refining {
-                    // 硬保证:结果内搜索的输出绝不超过上一轮集合(数学不变量)
-                    hits = hits.filter { previousIDs.contains($0.refKey) }
+                    // 硬保证:结果内搜索的输出绝不超过基数集合(数学不变量)
+                    hits = hits.filter { refineBaseIDs.contains($0.refKey) }
                 }
             } catch {
                 await app.fail(error)
             }
             await MainActor.run {
-                if refining, hits.count > results.count {
-                    hits = Array(hits.prefix(results.count))
+                if refining, hits.count > refineBaseIDs.count {
+                    hits = Array(hits.prefix(refineBaseIDs.count))
                 }
                 results = hits
                 elapsedMs = ms
                 searching = false
+                if refining { lastRoundCount = hits.count }   // 级联:下一轮的「上一轮」= 本轮结果
             }
         }
     }
