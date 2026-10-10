@@ -117,7 +117,7 @@ struct LibraryView: View {
                     ProgressView(value: app.indexing.total > 0
                                  ? Double(app.indexing.processed) / Double(app.indexing.total) : 0)
                     if app.indexing.errorCount > 0 {
-                        Text("\(app.indexing.errorCount) 项处理失败(已跳过)")
+                        Text("\(app.indexing.errorCount) 项处理失败(已跳过)\(app.indexing.firstErrorMessage.map { ":\($0)" } ?? "")")
                             .font(.caption2).foregroundStyle(.orange)
                     }
                     Button("停止", role: .destructive) { app.indexing.cancel() }

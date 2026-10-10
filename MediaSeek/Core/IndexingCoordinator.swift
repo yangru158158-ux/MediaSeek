@@ -19,7 +19,23 @@ final class IndexingCoordinator: ObservableObject {
     @Published private(set) var total = 0
     @Published private(set) var isRunning = false
     @Published private(set) var errorCount = 0
+    @Published private(set) var firstErrorMessage: String?
     @Published private(set) var lastSyncAt: Date?
+
+    /// 跨并发记录第一个处理错误(线程安全)
+    final class FirstErrorBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var message: String?
+        func set(_ m: String) {
+            lock.lock()
+            if message == nil { message = m }
+            lock.unlock()
+        }
+        func get() -> String? {
+            lock.lock(); defer { lock.unlock() }
+            return message
+        }
+    }
 
     var videoFramesPerVideo: Int {
         get { UserDefaults.standard.object(forKey: "videoFrames") as? Int ?? 3 }
@@ -89,15 +105,17 @@ final class IndexingCoordinator: ObservableObject {
         processedLocal = 0
         total = 0
         errorCount = 0
+        firstErrorMessage = nil
         phase = models.bothReady ? .photos : .waitingModel
-        task = Task { [full] in
-            await self.run(full: full)
+        let errors = FirstErrorBox()
+        task = Task { [full, errors] in
+            await self.run(full: full, errors: errors)
             self.isRunning = false
             self.task = nil
         }
     }
 
-    private func run(full: Bool) async {
+    private func run(full: Bool, errors: FirstErrorBox) async {
         do {
             let ready = await models.waitReady()
             guard ready else {
@@ -106,7 +124,7 @@ final class IndexingCoordinator: ObservableObject {
             }
             // 全量重建不再先清空旧索引:全量覆盖更新,搜索全程不断档
             // (结束时按现有相册清单自动清理已删除照片的旧行)
-            try await syncPhotoLibrary(forceAll: full)
+            try await syncPhotoLibrary(forceAll: full, errors: errors)
             try await syncImportedFiles()
             await prebuildLabelVocab()   // 重建完成后预建路由词表,首次搜索不再有一次性延迟
 
@@ -132,7 +150,7 @@ final class IndexingCoordinator: ObservableObject {
 
     // MARK: - 相册
 
-    private func syncPhotoLibrary(forceAll: Bool = false) async throws {
+    private func syncPhotoLibrary(forceAll: Bool = false, errors: FirstErrorBox) async throws {
         let fetch = photo.fetchAllAssets()
         // 全量重建:所有照片视为新照片全量覆盖;增量同步:跳过已索引
         let known = forceAll ? Set<String>() : try store.refKeys(kinds: [.photo, .photoLabel, .userTag, .videoFrame])
@@ -169,19 +187,27 @@ final class IndexingCoordinator: ObservableObject {
                 let asset = newPhotos[index]; index += 1
                 group.addTask { await Self.embedPhotoWork(
                     asset: asset, photo: photo, store: store,
-                    clip: clip, gemma: gemma, useLabels: useLabels) }
+                    clip: clip, gemma: gemma, useLabels: useLabels, errors: errors) }
             }
             while !group.isEmpty {
                 let fails = await group.next() ?? 0
                 errorCount += fails
                 processedLocal += 1
                 if processedLocal % 5 == 0 { processed = processedLocal }
+                if fails > 0, firstErrorMessage == nil {
+                    firstErrorMessage = errors.get()
+                }
+                // 连续失败 20 张 = 系统性故障,立即停止并显示原因(不空烧全库)
+                if errorCount >= 20, let msg = errors.get() {
+                    phase = .failed("连续处理失败已停止:\(msg)")
+                    return
+                }
                 if Task.isCancelled { break }
                 if index < newPhotos.count {
                     let asset = newPhotos[index]; index += 1
                     group.addTask { await Self.embedPhotoWork(
                         asset: asset, photo: photo, store: store,
-                        clip: clip, gemma: gemma, useLabels: useLabels) }
+                        clip: clip, gemma: gemma, useLabels: useLabels, errors: errors) }
                 }
             }
         }
@@ -190,7 +216,7 @@ final class IndexingCoordinator: ObservableObject {
         phase = .videos
         for asset in newVideos {
             try Task.checkCancellation()
-            await embedVideo(asset)
+            await embedVideo(asset, errors: errors)
             processedLocal += 1
             processed = processedLocal
         }
@@ -215,11 +241,15 @@ final class IndexingCoordinator: ObservableObject {
 
     nonisolated private static func embedPhotoWork(
         asset: PHAsset, photo: PhotoLibraryService, store: VectorStore,
-        clip: SigLIPEmbedder?, gemma: GemmaTextEmbedder?, useLabels: Bool) async -> Int {
+        clip: SigLIPEmbedder?, gemma: GemmaTextEmbedder?, useLabels: Bool,
+        errors: FirstErrorBox) async -> Int {
         guard let clip, let gemma else { return 0 }
         do {
             // 2048px 用于 OCR 文字识别(拍屏角度/小字也尽量认出);320px 用于嵌入向量
-            guard let full = try await photo.image(for: asset, maxPixel: 2048) else { return 0 }
+            guard let full = try await photo.image(for: asset, maxPixel: 2048) else {
+                errors.set("取图失败(可能 iCloud 未下载或存储空间不足):\(asset.localIdentifier)")
+                return 1
+            }
             try Task.checkCancellation()   // 取消:取图后立即中断
             let small = Self.downscaled(full, to: 320)
             let colorBucket = PhotoColor.bucket(of: small)
@@ -239,11 +269,13 @@ final class IndexingCoordinator: ObservableObject {
                              vector: lvec, title: labels, date: asset.creationDate)
             return 0
         } catch {
-            return Task.isCancelled ? 0 : 1   // 用户停止不算错误
+            if Task.isCancelled { return 0 }   // 用户停止不算错误
+            errors.set("照片处理失败:\(error)")
+            return 1
         }
     }
 
-    private func embedVideo(_ asset: PHAsset) async {
+    private func embedVideo(_ asset: PHAsset, errors: FirstErrorBox) async {
         do {
             guard let clip = models.siglip else { return }
             let store = self.store
@@ -259,7 +291,10 @@ final class IndexingCoordinator: ObservableObject {
                                      color: PhotoColor.bucket(of: frame))
                 }
             }.value
+        } catch is CancellationError {
+            return   // 用户停止不算错误
         } catch {
+            errors.set("视频处理失败:\(error)")
             errorCount += 1
         }
     }
