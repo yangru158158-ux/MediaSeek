@@ -208,7 +208,9 @@ struct LibraryView: View {
                         app.errorMessage = n > 0 ? "已加入 \(n) 个文件,正在后台建立索引…" : nil
                         refresh()
                     }
-                    if n > 0 { app.indexing.runIncremental() }
+                    // IndexingCoordinator 是 @MainActor:detached 上下文里必须显式跳回主线程,
+                    // 否则 startRun 在后台线程执行(@Published 跨线程写、Task 丢失 actor 上下文)
+                    if n > 0 { await MainActor.run { app.indexing.runIncremental() } }
                 } catch {
                     await MainActor.run { app.fail(error) }
                 }

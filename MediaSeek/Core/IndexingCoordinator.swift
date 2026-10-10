@@ -264,7 +264,10 @@ final class IndexingCoordinator: ObservableObject {
                 return 1
             }
             try Task.checkCancellation()   // 取消:取图后立即中断
-            let small = Self.downscaled(full, to: 320)
+            guard let small = Self.downscaled(full, to: 320) else {
+                errors.set("图像降采样失败:\(asset.localIdentifier)")
+                return 1
+            }
             let colorBucket = PhotoColor.bucket(of: small)
             let vec = try clip.embedImage(small)
             try store.upsert(kind: .photo, refKey: asset.localIdentifier, space: clip.space,
@@ -346,15 +349,15 @@ final class IndexingCoordinator: ObservableObject {
         }
     }
 
-    /// 高分辨率图降采样到嵌入模型需要的尺寸
-    nonisolated private static func downscaled(_ image: CGImage, to side: Int) -> CGImage {
+    /// 高分辨率图降采样到嵌入模型需要的尺寸(资源不足时返回 nil,不再强解包)
+    nonisolated private static func downscaled(_ image: CGImage, to side: Int) -> CGImage? {
         let cs = CGColorSpaceCreateDeviceRGB()
-        let ctx = CGContext(data: nil, width: side, height: side, bitsPerComponent: 8,
-                            bytesPerRow: side * 4, space: cs,
-                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        guard let ctx = CGContext(data: nil, width: side, height: side, bitsPerComponent: 8,
+                                  bytesPerRow: side * 4, space: cs,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
         ctx.interpolationQuality = .medium
         ctx.draw(image, in: CGRect(x: 0, y: 0, width: side, height: side))
-        return ctx.makeImage()!
+        return ctx.makeImage()
     }
 
     // MARK: - 导入文件

@@ -30,17 +30,22 @@ final class PhotoLibraryService: ObservableObject {
         options.deliveryMode = .highQualityFormat
         options.isNetworkAccessAllowed = true
         return try await withCheckedThrowingContinuation { cont in
+            var finished = false
             PHImageManager.default().requestImage(
                 for: asset,
                 targetSize: CGSize(width: maxPixel, height: maxPixel),
                 contentMode: .aspectFill,
                 options: options) { image, info in
+                guard !finished else { return }
+                // 降质中间帧不结束请求,继续等最终回调。判定必须放在取图之前:
+                // 曾因先判 image 非空,降质帧提前 resume,最终帧再 resume
+                // 触发 continuation 重复恢复 → EXC_BREAKPOINT 主线程崩溃
+                if (info?[PHImageResultIsDegradedKey] as? Bool) == true { return }
+                finished = true
                 if let cg = image?.cgImage {
                     cont.resume(returning: cg)
                 } else if let err = info?[PHImageErrorKey] as? Error {
                     cont.resume(throwing: err)
-                } else if info?[PHImageResultIsDegradedKey] as? Bool == true {
-                    // 忽略降质中间帧,等待最终回调
                 } else {
                     cont.resume(returning: nil)
                 }
