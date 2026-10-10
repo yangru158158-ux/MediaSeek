@@ -286,7 +286,7 @@ final class SearchEngine {
             for t in terms {
                 let refs = (try? store.searchOCR(query: t)) ?? []
                 let connectorIsAnd = (spec.connector == .and)
-                perTerm.append(refs.prefix(60).enumerated().map { rank, ref in
+                perTerm.append(refs.prefix(topK).enumerated().map { rank, ref in
                     let title = connectorIsAnd
                         ? "文字全含:\(terms.joined(separator: " ")) —「\(t)」\(Self.ocrSnippet(ref.text, t))"
                         : "文字命中「\(t)」:\(Self.ocrSnippet(ref.text, t))"
@@ -303,7 +303,7 @@ final class SearchEngine {
         for t in terms {
             if Self.containsDigit(t) {
                 let refs = (try? store.searchOCR(query: t)) ?? []
-                perTerm.append(refs.prefix(40).enumerated().map { rank, ref in
+                perTerm.append(refs.prefix(topK).enumerated().map { rank, ref in
                     SearchHit(kind: .photo, refKey: ref.refKey, frameIndex: 0, space: "ocr",
                               title: "含「\(t)」文字", date: nil,
                               score: Float(1.0 / Double(rank + 1)), color: nil)
