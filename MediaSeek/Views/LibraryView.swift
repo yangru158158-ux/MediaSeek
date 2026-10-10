@@ -215,7 +215,8 @@ struct LibraryView: View {
                 do {
                     let n = try app.imports.importURLs(urls)
                     await MainActor.run {
-                        app.errorMessage = n > 0 ? "已加入 \(n) 个文件,正在后台建立索引…" : nil
+                        // 成功提示走「完成」弹窗,别占用 errorMessage(顶着「出错了」标题吓人)
+                        if n > 0 { app.notify("已加入 \(n) 个文件,正在后台建立索引…") }
                         refresh()
                     }
                     // IndexingCoordinator 是 @MainActor:detached 上下文里必须显式跳回主线程,
