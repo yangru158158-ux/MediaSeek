@@ -199,13 +199,19 @@ struct LibraryView: View {
     private func handleImport(_ result: Result<[URL], Error>) {
         switch result {
         case .success(let urls):
-            do {
-                let n = try app.imports.importURLs(urls)
-                app.errorMessage = n > 0 ? "已加入 \(n) 个文件,正在后台建立索引…" : nil
-                if n > 0 { app.indexing.runIncremental() }
-                refresh()
-            } catch {
-                app.fail(error)
+            // 文件选择器回调上下文里同步做重活(枚举+写库)会在 iOS 26 崩溃,
+            // 导入搬到后台线程,主线程只刷新界面
+            Task.detached(priority: .userInitiated) {
+                do {
+                    let n = try app.imports.importURLs(urls)
+                    await MainActor.run {
+                        app.errorMessage = n > 0 ? "已加入 \(n) 个文件,正在后台建立索引…" : nil
+                        refresh()
+                    }
+                    if n > 0 { app.indexing.runIncremental() }
+                } catch {
+                    await MainActor.run { app.fail(error) }
+                }
             }
         case .failure(let error):
             app.fail(error)
