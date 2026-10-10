@@ -184,6 +184,7 @@ final class IndexingCoordinator: ObservableObject {
         let gemma = models.gemma
         let store = self.store
         let photo = self.photo
+        var abortReason: String? = nil
         await withTaskGroup(of: Int.self) { group in
             var index = 0
             let maxConcurrent = 2
@@ -201,10 +202,10 @@ final class IndexingCoordinator: ObservableObject {
                 if fails > 0, firstErrorMessage == nil {
                     firstErrorMessage = errors.get()
                 }
-                // 连续失败 20 张 = 系统性故障,立即停止并显示原因(不空烧全库)
+                // 连续失败 20 张 = 系统性故障,不再排新任务(在组外统一抛错停止)
                 if errorCount >= 20, let msg = errors.get() {
-                    try Task.checkCancellation()   // 以取消错误抛出,让外层显示失败原因(不被 .done 覆盖)
-                    throw MSError("连续处理失败已停止:\(msg)")
+                    abortReason = "连续处理失败已停止:\(msg)"
+                    break
                 }
                 if Task.isCancelled { break }
                 if index < newPhotos.count {
@@ -215,6 +216,7 @@ final class IndexingCoordinator: ObservableObject {
                 }
             }
         }
+        if let abortReason { throw MSError(abortReason) }
         try Task.checkCancellation()   // 「停止」从这里立即生效
         processed = processedLocal
         phase = .videos
