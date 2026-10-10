@@ -56,9 +56,15 @@ final class SearchEngine {
         var s = raw
         var connector = QuerySpec.Connector.none
         let lower = s.lowercased()
-        if lower.hasPrefix("and ") { connector = .and; s = String(s.dropFirst(4)) }
-        else if lower.hasPrefix("or ") { connector = .or; s = String(s.dropFirst(3)) }
-        s = s.trimmingCharacters(in: .whitespaces)
+        // and:/or:(冒号,40 版写法)与 and /or:(空格)都支持
+        if lower.hasPrefix("and:") || lower.hasPrefix("and ") {
+            connector = .and
+            s = String(s.dropFirst(4))
+        } else if lower.hasPrefix("or:") || lower.hasPrefix("or ") {
+            connector = .or
+            s = String(s.dropFirst(3))
+        }
+        s = s.trimmingCharacters(in: CharacterSet(charactersIn: " :"))
 
         var channel = QuerySpec.Channel.any
         if s.hasPrefix("文字:") || s.hasPrefix("文字:") {
