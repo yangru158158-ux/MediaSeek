@@ -560,7 +560,11 @@ struct SearchView: View {
                 results = hits
                 elapsedMs = ms
                 searching = false
-                if refining { lastRoundCount = hits.count }   // 级联:下一轮的「上一轮」= 本轮结果
+                // 级联收窄:本轮结果自动成为下一轮「结果内」的范围
+                if refining {
+                    refineBaseIDs = Set(hits.map(\.refKey))
+                    lastRoundCount = hits.count
+                }
             }
         }
     }
