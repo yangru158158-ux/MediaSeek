@@ -104,9 +104,9 @@ final class IndexingCoordinator: ObservableObject {
                 phase = .failed("模型未就绪,请先在「设置」中导入模型包")
                 return
             }
-            if full { try store.deleteAll() }
-
-            try await syncPhotoLibrary()
+            // 全量重建不再先清空旧索引:全量覆盖更新,搜索全程不断档
+            // (结束时按现有相册清单自动清理已删除照片的旧行)
+            try await syncPhotoLibrary(forceAll: full)
             try await syncImportedFiles()
             await prebuildLabelVocab()   // 重建完成后预建路由词表,首次搜索不再有一次性延迟
 
@@ -132,9 +132,10 @@ final class IndexingCoordinator: ObservableObject {
 
     // MARK: - 相册
 
-    private func syncPhotoLibrary() async throws {
+    private func syncPhotoLibrary(forceAll: Bool = false) async throws {
         let fetch = photo.fetchAllAssets()
-        let known = try store.refKeys(kinds: [.photo, .photoLabel, .userTag, .videoFrame])
+        // 全量重建:所有照片视为新照片全量覆盖;增量同步:跳过已索引
+        let known = forceAll ? Set<String>() : try store.refKeys(kinds: [.photo, .photoLabel, .userTag, .videoFrame])
         let recentlyDeleted = Self.recentlyDeletedIDs()
 
         var libIDs = Set<String>()
