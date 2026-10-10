@@ -136,7 +136,6 @@ final class SearchEngine {
         let fileKinds: [ItemKind] = scope == .all || scope == .file ? [.file, .fileChunk] : []
 
         var channels: [(weight: Double, hits: [SearchHit])] = []
-        let siglip = await MainActor.run { models.siglip }
         let gemma = await MainActor.run { models.gemma }
 
         // 标签精确通道(优先):词典英译+同义词与 Vision 英文标签 token 级比对,零幻觉
