@@ -150,7 +150,9 @@ enum QueryUnderstanding {
         ("证件", "id card"), ("证件照", "id portrait"),
         ("身份证", "id card"), ("驾照", "driver license document"),
         ("文件", "document"), ("文字", "text document"), ("pdf", "document"),
-        ("网页", "website screenshot"), ("聊天记录", "chat screenshot"),
+        ("网页", "website screenshot"), ("聊天记录", "chat messages screenshot"),
+        ("聊天", "chat conversation messages"), ("对话", "chat conversation messages"),
+        ("消息", "chat messages"), ("微信", "wechat chat app"), ("qq", "qq chat app"),
         ("桌面", "computer desktop screen"),
         // 物品/电子
         ("手机", "smartphone"), ("电脑", "computer"), ("笔记本", "laptop"),

@@ -33,6 +33,10 @@ final class SearchEngine {
     private let photo: PhotoLibraryService
     private let imports: ImportLibrary
 
+    /// 空结果诊断:本次查询在全库的最高原始语义分(百分数展示用);
+    /// 有结果或语义通道未参与时为 nil
+    private(set) var lastSemanticTopScore: Float?
+
     init(store: VectorStore, models: ModelManager, photo: PhotoLibraryService, imports: ImportLibrary) {
         self.store = store
         self.models = models
@@ -108,6 +112,7 @@ final class SearchEngine {
 
         let semanticOnly = spec.semanticOnly
         let siglip = await MainActor.run { models.siglip }
+        lastSemanticTopScore = nil
 
         // 结果内搜索:不在全库重搜再取交集(会受排名截断/重建进度影响),
         // 而是用现有索引对上一轮照片逐条件核验——文字条件直接查这些照片的
@@ -121,7 +126,6 @@ final class SearchEngine {
         if spec.channel == .text || spec.connector != .none {
             return try await searchScoped(spec: spec, scope: scope, topK: topK, siglip: siglip, within: nil)
         }
-
         // 多词查询:「2026 电脑屏幕」→ 含数字的词走 OCR 文字匹配,
         // 其余词走视觉/标签;「或」语义:照片满足任一条件(像/含字)即显示
         let terms = Self.splitTerms(query)
@@ -166,8 +170,20 @@ final class SearchEngine {
         if !imageKinds.isEmpty, let siglip {
             let q = try siglip.embedQuery(QueryUnderstanding.english(for: concept) ?? concept)
             let floor = semanticOnly ? 0.14 : 0.18
-            let hits = Self.dedupByRef(try store.search(
+            var hits = Self.dedupByRef(try store.search(
                 space: siglip.space, kinds: imageKinds, query: q, limit: topK, minScore: Float(floor)))
+            // 弱信号兜底:品牌词/抽象词(「微信」「聊天」)对截图的视觉相似度
+            // 天然低于常规门槛,一刀切会整词清零(2026-10-10 用户实测三个词全空);
+            // 相似度排序仍然有效,降到 0.08 取相对头部,好过空页
+            if hits.isEmpty {
+                hits = Self.dedupByRef(try store.search(
+                    space: siglip.space, kinds: imageKinds, query: q, limit: topK, minScore: 0.08))
+            }
+            // 兜底后仍空 = 全库最高分都不到 0.08,记下最高原始分供空态提示
+            if hits.isEmpty {
+                lastSemanticTopScore = (try? store.search(
+                    space: siglip.space, kinds: imageKinds, query: q, limit: 1, minScore: -1))?.first?.score
+            }
             // 相对尾部截断:远弱于头部的长尾(如「人」里混入的屏幕翻拍照)直接砍掉
             let best = hits.first?.score ?? 0
             channels.append((1.0, best > 0 ? hits.filter { $0.score >= best * 0.85 } : hits))
@@ -376,12 +392,16 @@ final class SearchEngine {
         return resolve(combine(perTerm, connector: spec.connector))
     }
 
-    /// 单词语义命中(SigLIP 视觉,门槛 0.18 + 相对尾部截断)
+    /// 单词语义命中(SigLIP 视觉,门槛 0.14 + 0.08 弱信号兜底 + 相对尾部截断)
     private func semanticHits(_ term: String, siglip: SigLIPEmbedder?, topK: Int) -> [SearchHit] {
         guard let siglip else { return [] }
         guard let q = try? siglip.embedQuery(QueryUnderstanding.english(for: term) ?? term) else { return [] }
         var hits = Self.dedupByRef((try? store.search(
-            space: siglip.space, kinds: [.photo], query: q, limit: topK, minScore: 0.18)) ?? [])
+            space: siglip.space, kinds: [.photo], query: q, limit: topK, minScore: 0.14)) ?? [])
+        if hits.isEmpty {
+            hits = Self.dedupByRef((try? store.search(
+                space: siglip.space, kinds: [.photo], query: q, limit: topK, minScore: 0.08)) ?? [])
+        }
         let best = hits.first?.score ?? 0
         if best > 0 { hits = hits.filter { $0.score >= best * 0.85 } }
         return hits

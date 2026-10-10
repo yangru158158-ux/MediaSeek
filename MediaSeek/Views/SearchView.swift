@@ -244,6 +244,9 @@ struct SearchView: View {
             return "结果内搜索无命中:上一轮结果与新条件没有交集\n可点「结果内」关闭后全局重搜,或换个条件"
         }
         if q.hasPrefix("语义:") {
+            if let top = app.search.lastSemanticTopScore {
+                return "语义通道最高相关度仅 \(Int(top * 100))%,未达 14% 门槛(已索引 \(app.indexing.indexedPhotoCount) 张)\n品牌词/抽象词的视觉相似度天然偏低,建议改用 文字:微信 直接搜截图上的字"
+            }
             return "语义通道未命中(已索引 \(app.indexing.indexedPhotoCount) 张)\n试试 文字:身份证 用文字精确查找\n或换更具体的词;索引重建完成后召回会增加"
         }
         if q.hasPrefix("文字:") {
