@@ -98,18 +98,28 @@ final class SearchEngine {
     }
 
     // topK 4000 ≈ 全库:SQLite 向量检索本就全表扫描,加大 LIMIT 几乎零成本
-    func search(_ rawQuery: String, scope: SearchScope, topK: Int = 4000) async throws -> [DisplayHit] {
+    func search(_ rawQuery: String, scope: SearchScope, topK: Int = 4000,
+                within: Set<String>? = nil) async throws -> [DisplayHit] {
         let raw = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !raw.isEmpty else { return [] }
         let spec = Self.parseQuery(raw)
         let query = QueryUnderstanding.core(spec.body)
         guard !query.isEmpty else { return [] }
 
-        // 显式语法(文字:/and:/or:/and 语义: 等)走独立流程;纯「语义:词」走主流程但跳过 OCR
         let semanticOnly = spec.semanticOnly
+        let siglip = await MainActor.run { models.siglip }
+
+        // 结果内搜索:不在全库重搜再取交集(会受排名截断/重建进度影响),
+        // 而是用现有索引对上一轮照片逐条件核验——文字条件直接查这些照片的
+        // OCR 文字,语义条件查它们的视觉向量,全部条件满足才保留
+        if let within, !within.isEmpty {
+            return try await searchWithin(query: query, spec: spec, semanticOnly: semanticOnly,
+                                          scope: scope, topK: topK, within: within, siglip: siglip)
+        }
+
+        // 显式语法(文字:/and:/or:/and 语义: 等)走独立流程;纯「语义:词」走主流程但跳过 OCR
         if spec.channel == .text || spec.connector != .none {
-            let siglip = await MainActor.run { models.siglip }
-            return try await searchScoped(spec: spec, scope: scope, topK: topK, siglip: siglip)
+            return try await searchScoped(spec: spec, scope: scope, topK: topK, siglip: siglip, within: nil)
         }
 
         // 多词查询:「2026 电脑屏幕」→ 含数字的词走 OCR 文字匹配,
@@ -272,26 +282,74 @@ final class SearchEngine {
     }
 
 
+    /// 结果内搜索:对上一轮命中的照片用现有索引逐条件核验。
+    /// 文字条件:直接查这些照片的 OCR 文字;语义条件:视觉命中后限定在这些照片里。
+    /// 全部条件满足才保留——与全库排名、截断、重建进度完全解耦
+    private func searchWithin(query: String, spec: QuerySpec, semanticOnly: Bool,
+                              scope: SearchScope, topK: Int,
+                              within: Set<String>, siglip: SigLIPEmbedder?) async throws -> [DisplayHit] {
+        guard scope == .all || scope == .photo else { return [] }
+        let terms = Self.splitTerms(spec.body)
+        guard !terms.isEmpty else { return [] }
+
+        let textTerms: [String]
+        let semanticTerms: [String]
+        if spec.channel == .text {
+            textTerms = terms; semanticTerms = []
+        } else if spec.channel == .semantic {
+            textTerms = []; semanticTerms = terms
+        } else {
+            textTerms = terms.filter(Self.containsDigit)
+            semanticTerms = terms.filter { !Self.containsDigit($0) }
+        }
+
+        var satisfied = within
+        for t in textTerms where !t.isEmpty {
+            let ok = Set((try? store.searchOCR(query: t, among: Array(satisfied))) ?? [])
+            satisfied.formIntersection(ok)
+            if satisfied.isEmpty { break }
+        }
+        if !semanticTerms.isEmpty, !satisfied.isEmpty, let siglip {
+            for t in semanticTerms where !satisfied.isEmpty {
+                let ok = Set(semanticHits(t, siglip: siglip, topK: topK).map(\.refKey))
+                satisfied.formIntersection(ok)
+            }
+        }
+        guard !satisfied.isEmpty else { return [] }
+
+        let hits = satisfied.sorted().map {
+            SearchHit(kind: .photo, refKey: $0, frameIndex: 0, space: "within",
+                      title: "结果内命中(\(semanticTerms.isEmpty ? "文字" : "语义+文字"))",
+                      date: nil, score: 1.0, color: store.colorForRef($0))
+        }
+        return resolve(normalized(hits))
+    }
+
     /// 显式语法流程:通道(文字/语义/自动)× 连接词(and/or)自由组合
     private func searchScoped(spec: QuerySpec, scope: SearchScope,
-                              topK: Int, siglip: SigLIPEmbedder?) async throws -> [DisplayHit] {
+                              topK: Int, siglip: SigLIPEmbedder?, within: Set<String>? = nil) async throws -> [DisplayHit] {
         guard scope == .all || scope == .photo else { return [] }   // v1 只作用于照片
         let terms = Self.splitTerms(spec.body)
         guard !terms.isEmpty else { return [] }
 
         // 文字通道:每个词独立查 OCR,连接词决定 AND/OR。
         // and 模式标题列出全部命中词(交集里每张都含全部词,不能只显示第一个)
+        // 结果内模式:只在这些照片的文字索引里查
         if spec.channel == .text {
             var perTerm: [[SearchHit]] = []
             for t in terms {
-                let refs = (try? store.searchOCR(query: t)) ?? []
+                let refs: [(refKey: String, text: String)] = within.map { among in
+                    ((try? store.searchOCR(query: t, among: Array(among))) ?? []).map { ($0, "") }
+                } ?? (((try? store.searchOCR(query: t)) ?? []).prefix(topK).map { ($0.refKey, $0.text) })
                 let connectorIsAnd = (spec.connector == .and)
-                perTerm.append(refs.prefix(topK).enumerated().map { rank, ref in
-                    let title = connectorIsAnd
-                        ? "文字全含:\(terms.joined(separator: " ")) —「\(t)」\(Self.ocrSnippet(ref.text, t))"
-                        : "文字命中「\(t)」:\(Self.ocrSnippet(ref.text, t))"
+                perTerm.append(refs.enumerated().map { rank, ref in
+                    let base = within != nil
+                        ? "结果内文字命中「\(t)」"
+                        : (connectorIsAnd
+                           ? "文字全含:\(terms.joined(separator: " ")) —「\(t)」\(Self.ocrSnippet(ref.text, t))"
+                           : "文字命中「\(t)」:\(Self.ocrSnippet(ref.text, t))")
                     return SearchHit(kind: .photo, refKey: ref.refKey, frameIndex: 0, space: "ocr",
-                              title: title,
+                              title: base,
                               date: nil, score: Float(1.0 / Double(rank + 1)), color: nil)
                 })
             }
@@ -302,14 +360,18 @@ final class SearchEngine {
         var perTerm: [[SearchHit]] = []
         for t in terms {
             if Self.containsDigit(t) {
-                let refs = (try? store.searchOCR(query: t)) ?? []
-                perTerm.append(refs.prefix(topK).enumerated().map { rank, ref in
-                    SearchHit(kind: .photo, refKey: ref.refKey, frameIndex: 0, space: "ocr",
+                let refs: [String] = within.map { among in
+                    (try? store.searchOCR(query: t, among: Array(among))) ?? []
+                } ?? ((try? store.searchOCR(query: t)) ?? []).prefix(topK).map(\.refKey)
+                perTerm.append(refs.enumerated().map { rank, refKey in
+                    SearchHit(kind: .photo, refKey: refKey, frameIndex: 0, space: "ocr",
                               title: "含「\(t)」文字", date: nil,
                               score: Float(1.0 / Double(rank + 1)), color: nil)
                 })
             } else {
-                perTerm.append(semanticHits(t, siglip: siglip, topK: topK))
+                var hits = semanticHits(t, siglip: siglip, topK: topK)
+                if let within { hits = hits.filter { within.contains($0.refKey) } }
+                perTerm.append(hits)
             }
         }
         return resolve(combine(perTerm, connector: spec.connector))

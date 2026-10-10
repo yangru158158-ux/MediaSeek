@@ -417,7 +417,7 @@ final class VectorStore {
         let escaped = query
             .replacingOccurrences(of: "%", with: "\\%")
             .replacingOccurrences(of: "_", with: "\\_")
-        let stmt = try prepare("SELECT ref_key, text FROM ocr_text WHERE text LIKE ? ESCAPE '\\' LIMIT 80")
+        let stmt = try prepare("SELECT ref_key, text FROM ocr_text WHERE text LIKE ? ESCAPE '\\' LIMIT 4000")
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, "%\(escaped)%", -1, Self.transient)
         var out: [(String, String)] = []
@@ -426,6 +426,30 @@ final class VectorStore {
                         String(cString: sqlite3_column_text(stmt, 1))))
         }
         return out.map { (refKey: $0.0, text: $0.1) }
+    }
+
+    /// 文字检索(限定范围):只在给定 ref 集合里做子串匹配(结果内搜索用)
+    func searchOCR(query: String, among: [String]) throws -> [String] {
+        guard let db, !query.isEmpty, !among.isEmpty else { return [] }
+        let escaped = query
+            .replacingOccurrences(of: "%", with: "\\%")
+            .replacingOccurrences(of: "_", with: "\\_")
+        var out = Set<String>()
+        // IN 列表分片绑定,避免变量数上限
+        for chunkStart in stride(from: 0, to: among.count, by: 400) {
+            let part = Array(among[chunkStart..<min(chunkStart + 400, among.count)])
+            let marks = Array(repeating: "?", count: part.count).joined(separator: ",")
+            let stmt = try prepare("SELECT ref_key FROM ocr_text WHERE text LIKE ? ESCAPE '\\' AND ref_key IN (\(marks))")
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_text(stmt, 1, "%\(escaped)%", -1, Self.transient)
+            for (i, id) in part.enumerated() {
+                sqlite3_bind_text(stmt, Int32(i + 2), id, -1, Self.transient)
+            }
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                out.insert(String(cString: sqlite3_column_text(stmt, 0)))
+            }
+        }
+        return Array(out)
     }
 
     /// 重命名导入文件记录,并同步其可搜索的文件名

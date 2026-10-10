@@ -524,7 +524,8 @@ struct SearchView: View {
             var ms = 0
             do {
                 let start = Date()
-                hits = try await app.search.search(q, scope: scope)
+                hits = try await app.search.search(q, scope: scope,
+                                                   within: refining ? previousIDs : nil)
                 ms = Int(Date().timeIntervalSince(start) * 1000)
                 if refining {
                     hits = hits.filter { previousIDs.contains($0.refKey) }
