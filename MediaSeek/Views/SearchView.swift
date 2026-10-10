@@ -158,7 +158,9 @@ struct SearchView: View {
                             .foregroundStyle(.secondary)
                     } else {
                         Text(colorFilter == nil
-                             ? "找到 \(results.count) 个结果 · \(elapsedMs) ms"
+                             ? (refineMode
+                                ? "结果内命中 \(results.count) 个 · \(elapsedMs) ms"
+                                : "找到 \(results.count) 个结果 · \(elapsedMs) ms")
                              : "\(visibleResults.count) / \(results.count) 个结果 · \(elapsedMs) ms")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
@@ -230,8 +232,11 @@ struct SearchView: View {
     }
 
     /// 空结果提示:按查询模式分别说明
-    private func emptyStateHint(_ query: String) -> String {
+    private func emptyStateHint(_ query: String, refining: Bool) -> String {
         let q = query.lowercased()
+        if refining {
+            return "结果内搜索无命中:上一轮结果与新条件没有交集\n可点「结果内」关闭后全局重搜,或换个条件"
+        }
         if q.hasPrefix("语义:") {
             return "语义通道未命中(已索引 \(app.indexing.indexedPhotoCount) 张)\n试试 文字:身份证 用文字精确查找\n或换更具体的词;索引重建完成后召回会增加"
         }
@@ -246,7 +251,7 @@ struct SearchView: View {
             if results.isEmpty && searchedOnce && !searching {
                 ContentUnavailableView("没有找到相关内容",
                                        systemImage: "questionmark.folder",
-                                       description: Text(emptyStateHint(query)))
+                                       description: Text(emptyStateHint(query, refining: refineMode)))
                     .padding(.top, 60)
             } else {
                 LazyVGrid(columns: columns, spacing: 12) {

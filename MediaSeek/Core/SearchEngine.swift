@@ -97,7 +97,7 @@ final class SearchEngine {
             .filter { !$0.isEmpty }
     }
 
-    func search(_ rawQuery: String, scope: SearchScope, topK: Int = 120) async throws -> [DisplayHit] {
+    func search(_ rawQuery: String, scope: SearchScope, topK: Int = 4000)   // 4000≈全库:SQLite 向量检索本就全表扫描,加大 LIMIT 几乎零成本 async throws -> [DisplayHit] {
         let raw = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !raw.isEmpty else { return [] }
         let spec = Self.parseQuery(raw)
