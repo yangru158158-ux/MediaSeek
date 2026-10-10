@@ -122,6 +122,12 @@ jobs:
             --apiKey "$ASC_KEY_ID" \
             --apiIssuer "$ASC_ISSUER_ID"
 
+      - name: 存档 dSYM(本地解析 .ips 崩溃用)
+        uses: actions/upload-artifact@v4
+        with:
+          name: MediaSeek-dSYM
+          path: build/MediaSeek.xcarchive/dSYMs/
+
       - name: 完成
         run: |
           echo "🎉 已上传 TestFlight!等待 5-15 分钟处理后:"
