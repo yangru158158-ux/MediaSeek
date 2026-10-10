@@ -38,9 +38,25 @@ final class VectorStore {
     private static let transient = unsafeBitCast(OpaquePointer(bitPattern: -1),
                                                  to: sqlite3_destructor_type.self)
 
+    /// 数据库并发防护:FULLMUTEX 只保证单条 API 调用原子,跨线程的
+    /// 事务/多语句序列仍会交错(构建 68 导入崩溃的归因)。所有公开方法
+    /// 经串行队列执行;已在队列上的调用直接执行,事务嵌套不死锁。
+    private static let dbKey = DispatchSpecificKey<UInt8>()
+    private let dbQueue: DispatchQueue
+    private var onDbQueue: Bool { DispatchQueue.getSpecific(key: Self.dbKey) == 1 }
+    private func serialized<T>(_ work: () throws -> T) rethrows -> T {
+        if onDbQueue { return try work() }
+        return try dbQueue.sync(execute: work)
+    }
+
+    init() {
+        dbQueue = DispatchQueue(label: "com.medseek.vectordb", qos: .userInitiated)
+        dbQueue.setSpecific(key: Self.dbKey, value: 1)
+    }
+
     // MARK: - 打开 / 建表
 
-    func open() throws {
+    func open() throws { try serialized {
         guard db == nil else { return }
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("MediaSeek", isDirectory: true)
@@ -95,7 +111,7 @@ final class VectorStore {
           indexed INTEGER NOT NULL DEFAULT 0
         )
         """)
-    }
+    } }
 
     private func exec(_ sql: String) throws {
         guard let db else { throw MSError("数据库未打开") }
@@ -121,7 +137,7 @@ final class VectorStore {
 
     func upsert(kind: ItemKind, refKey: String, frameIndex: Int = 0,
                 space: String, vector: [Float], title: String?, date: Date?,
-                color: String? = nil) throws {
+                color: String? = nil) throws { try serialized {
         guard let db else { throw MSError("数据库未打开") }
         do {
             try upsertRow(kind: kind, refKey: refKey, frameIndex: frameIndex, space: space,
@@ -134,7 +150,7 @@ final class VectorStore {
             try upsertRow(kind: kind, refKey: refKey, frameIndex: frameIndex, space: space,
                           vector: vector, title: title, date: date, color: color)
         }
-    }
+    } }
 
     private func upsertRow(kind: ItemKind, refKey: String, frameIndex: Int,
                            space: String, vector: [Float], title: String?, date: Date?,
@@ -170,7 +186,7 @@ final class VectorStore {
         }
     }
 
-    func refKeys(kinds: [ItemKind]) throws -> Set<String> {
+    func refKeys(kinds: [ItemKind]) throws -> Set<String> { try serialized {
         guard let db else { return [] }
         let ph = kinds.map { _ in "?" }.joined(separator: ",")
         let stmt = try prepare("SELECT DISTINCT ref_key FROM items WHERE kind IN (\(ph))")
@@ -185,10 +201,10 @@ final class VectorStore {
             }
         }
         return result
-    }
+    } }
 
     /// 库同步:删除已不在系统相册里的条目
-    func removeRefs(kinds: [ItemKind], notIn keep: Set<String>) throws {
+    func removeRefs(kinds: [ItemKind], notIn keep: Set<String>) throws { try serialized {
         guard let db else { return }
         let existing = try refKeys(kinds: kinds)
         let stale = existing.subtracting(keep)
@@ -213,17 +229,17 @@ final class VectorStore {
             sqlite3_clear_bindings(ocrStmt)
         }
         try exec("COMMIT")
-    }
+    } }
 
-    func removeByRef(kind: ItemKind, refKey: String) throws {
+    func removeByRef(kind: ItemKind, refKey: String) throws { try serialized {
         let stmt = try prepare("DELETE FROM items WHERE kind = ? AND ref_key = ?")
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, kind.rawValue, -1, Self.transient)
         sqlite3_bind_text(stmt, 2, refKey, -1, Self.transient)
         sqlite3_step(stmt)
-    }
+    } }
 
-    func counts() throws -> [ItemKind: Int] {
+    func counts() throws -> [ItemKind: Int] { try serialized {
         guard let db else { return [:] }
         let stmt = try prepare("""
         SELECT kind, COUNT(DISTINCT ref_key) FROM items
@@ -238,16 +254,16 @@ final class VectorStore {
             }
         }
         return out
-    }
+    } }
 
-    func deleteAll() throws {
+    func deleteAll() throws { try serialized {
         try exec("DELETE FROM items")
         try exec("UPDATE files SET indexed = 0")
-    }
+    } }
 
     /// 余弦检索(向量写入时已归一化,点积即余弦)
     func search(space: String, kinds: [ItemKind], query: [Float],
-                limit: Int, minScore: Float) throws -> [SearchHit] {
+                limit: Int, minScore: Float) throws -> [SearchHit] { try serialized {
         guard let db else { return [] }
         let ph = kinds.map { _ in "?" }.joined(separator: ",")
         let stmt = try prepare("""
@@ -282,20 +298,20 @@ final class VectorStore {
             }
         }
         return Array(hits.sorted { $0.score > $1.score }.prefix(limit))
-    }
+    } }
 
     // MARK: - 导入文件
 
-    func addFolder(bookmark: Data) throws -> Int64 {
+    func addFolder(bookmark: Data) throws -> Int64 { try serialized {
         let stmt = try prepare("INSERT INTO folders(bookmark, added_at) VALUES(?,?)")
         defer { sqlite3_finalize(stmt) }
         _ = bookmark.withUnsafeBytes { sqlite3_bind_blob(stmt, 1, $0.baseAddress, Int32(bookmark.count), Self.transient) }
         sqlite3_bind_double(stmt, 2, Date().timeIntervalSince1970)
         guard sqlite3_step(stmt) == SQLITE_DONE else { throw MSError("写入文件夹记录失败") }
         return sqlite3_last_insert_rowid(db)
-    }
+    } }
 
-    func folderBookmark(id: Int64) throws -> Data {
+    func folderBookmark(id: Int64) throws -> Data { try serialized {
         let stmt = try prepare("SELECT bookmark FROM folders WHERE id = ?")
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_int64(stmt, 1, id)
@@ -304,11 +320,11 @@ final class VectorStore {
             throw MSError("找不到源文件夹,可能已被移动或删除")
         }
         return Data(bytes: blob, count: Int(sqlite3_column_bytes(stmt, 0)))
-    }
+    } }
 
     // MARK: - 用户标签(人名/主题)
 
-    func userTags(forRefKey refKey: String) throws -> [String] {
+    func userTags(forRefKey refKey: String) throws -> [String] { try serialized {
         guard let db else { return [] }
         let stmt = try prepare("SELECT title FROM items WHERE kind = 'userTag' AND ref_key = ? ORDER BY id")
         defer { sqlite3_finalize(stmt) }
@@ -320,10 +336,10 @@ final class VectorStore {
             }
         }
         return out
-    }
+    } }
 
     /// 全部照片标签行(检索端做 token 级精确匹配用)
-    func allPhotoLabels() throws -> [(refKey: String, title: String)] {
+    func allPhotoLabels() throws -> [(refKey: String, title: String)] { try serialized {
         guard let db else { return [] }
         let stmt = try prepare("SELECT ref_key, title FROM items WHERE kind = 'photoLabel' AND title IS NOT NULL")
         defer { sqlite3_finalize(stmt) }
@@ -333,10 +349,10 @@ final class VectorStore {
                         String(cString: sqlite3_column_text(stmt, 1))))
         }
         return out.map { (refKey: $0.0, title: $0.1) }
-    }
+    } }
 
     /// 用户标签子串精确匹配(中文)
-    func searchUserTags(query: String) throws -> [String] {
+    func searchUserTags(query: String) throws -> [String] { try serialized {
         guard let db, !query.isEmpty else { return [] }
         let escaped = query
             .replacingOccurrences(of: "%", with: "\\%")
@@ -349,27 +365,27 @@ final class VectorStore {
             out.append(String(cString: sqlite3_column_text(stmt, 0)))
         }
         return out
-    }
+    } }
 
     /// 某索引对象已记录的主色调(任取一行)
-    func colorForRef(_ refKey: String) -> String? {
+    func colorForRef(_ refKey: String) -> String? { try serialized {
         guard let db, let stmt = try? prepare("SELECT color FROM items WHERE ref_key = ? AND color IS NOT NULL LIMIT 1") else { return nil }
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, refKey, -1, Self.transient)
         guard sqlite3_step(stmt) == SQLITE_ROW, sqlite3_column_text(stmt, 0) != nil else { return nil }
         return String(cString: sqlite3_column_text(stmt, 0))
-    }
+    } }
 
     /// 已索引照片数(空态提示用)
-    func countPhotos() -> Int {
+    func countPhotos() -> Int { try serialized {
         guard let db, let stmt = try? prepare("SELECT COUNT(*) FROM items WHERE kind = 'photo'") else { return 0 }
         defer { sqlite3_finalize(stmt) }
         guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
         return Int(sqlite3_column_int64(stmt, 0))
-    }
+    } }
 
     /// 全部去重标签字符串(语义路由的封闭词表)
-    func allDistinctLabels() throws -> [String] {
+    func allDistinctLabels() throws -> [String] { try serialized {
         guard let db else { return [] }
         let stmt = try prepare("SELECT DISTINCT title FROM items WHERE kind = 'photoLabel' AND title IS NOT NULL")
         defer { sqlite3_finalize(stmt) }
@@ -378,10 +394,10 @@ final class VectorStore {
             out.append(String(cString: sqlite3_column_text(stmt, 0)))
         }
         return out
-    }
+    } }
 
     /// 标签词向量表(把任意中文查询路由到库内实际存在的英文标签)
-    func labelVocab() throws -> [(label: String, vec: [Float])] {
+    func labelVocab() throws -> [(label: String, vec: [Float])] { try serialized {
         guard let db else { return [] }
         let stmt = try prepare("SELECT label, vec FROM label_vocab")
         defer { sqlite3_finalize(stmt) }
@@ -396,9 +412,9 @@ final class VectorStore {
             out.append((label, vec))
         }
         return out.map { (label: $0.0, vec: $0.1) }
-    }
+    } }
 
-    func saveLabelVec(_ label: String, vec: [Float]) throws {
+    func saveLabelVec(_ label: String, vec: [Float]) throws { try serialized {
         let stmt = try prepare("INSERT OR REPLACE INTO label_vocab(label, vec) VALUES(?,?)")
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, label, -1, Self.transient)
@@ -406,10 +422,10 @@ final class VectorStore {
             sqlite3_bind_blob(stmt, 2, buf.baseAddress, Int32(buf.count * 4), Self.transient)
         }
         guard sqlite3_step(stmt) == SQLITE_DONE else { throw MSError("标签词向量保存失败") }
-    }
+    } }
 
     /// 移除某照片/视频/文件的**全部**索引行(各类型)
-    func removeEverythingForRef(_ refKey: String) throws {
+    func removeEverythingForRef(_ refKey: String) throws { try serialized {
         let stmt = try prepare("DELETE FROM items WHERE ref_key = ?")
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, refKey, -1, Self.transient)
@@ -418,27 +434,27 @@ final class VectorStore {
         defer { sqlite3_finalize(stmt2) }
         sqlite3_bind_text(stmt2, 1, refKey, -1, Self.transient)
         sqlite3_step(stmt2)
-    }
+    } }
 
-    func deleteUserTag(refKey: String, tag: String) throws {
+    func deleteUserTag(refKey: String, tag: String) throws { try serialized {
         let stmt = try prepare("DELETE FROM items WHERE kind = 'userTag' AND ref_key = ? AND title = ?")
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, refKey, -1, Self.transient)
         sqlite3_bind_text(stmt, 2, tag, -1, Self.transient)
         sqlite3_step(stmt)
-    }
+    } }
 
     /// 保存照片的 OCR 文字(每照片一行,重复覆盖)
-    func saveOCR(refKey: String, text: String) throws {
+    func saveOCR(refKey: String, text: String) throws { try serialized {
         let stmt = try prepare("INSERT OR REPLACE INTO ocr_text(ref_key, text) VALUES(?,?)")
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, refKey, -1, Self.transient)
         sqlite3_bind_text(stmt, 2, text, -1, Self.transient)
         guard sqlite3_step(stmt) == SQLITE_DONE else { throw MSError("OCR 保存失败") }
-    }
+    } }
 
     /// OCR 文字精确检索(子串匹配,支持中文/数字/编号)
-    func searchOCR(query: String) throws -> [(refKey: String, text: String)] {
+    func searchOCR(query: String) throws -> [(refKey: String, text: String)] { try serialized {
         guard let db, !query.isEmpty else { return [] }
         let escaped = query
             .replacingOccurrences(of: "%", with: "\\%")
@@ -452,10 +468,10 @@ final class VectorStore {
                         String(cString: sqlite3_column_text(stmt, 1))))
         }
         return out.map { (refKey: $0.0, text: $0.1) }
-    }
+    } }
 
     /// 文字检索(限定范围):只在给定 ref 集合里做子串匹配(结果内搜索用)
-    func searchOCR(query: String, among: [String]) throws -> [String] {
+    func searchOCR(query: String, among: [String]) throws -> [String] { try serialized {
         guard let db, !query.isEmpty, !among.isEmpty else { return [] }
         let escaped = query
             .replacingOccurrences(of: "%", with: "\\%")
@@ -476,10 +492,10 @@ final class VectorStore {
             }
         }
         return Array(out)
-    }
+    } }
 
     /// 重命名导入文件记录,并同步其可搜索的文件名
-    func renameFile(id: String, newName: String) throws {
+    func renameFile(id: String, newName: String) throws { try serialized {
         let stmt = try prepare("UPDATE files SET name = ? WHERE id = ?")
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, newName, -1, Self.transient)
@@ -490,7 +506,7 @@ final class VectorStore {
         sqlite3_bind_text(stmt2, 1, newName, -1, Self.transient)
         sqlite3_bind_text(stmt2, 2, id, -1, Self.transient)
         sqlite3_step(stmt2)
-    }
+    } }
 
     func addFile(_ f: ImportedFile) throws {        let stmt = try prepare("""
         INSERT OR REPLACE INTO files(id, folder_id, rel_path, bookmark, name, size, added_at, indexed)
@@ -508,7 +524,7 @@ final class VectorStore {
         guard sqlite3_step(stmt) == SQLITE_DONE else { throw MSError("写入文件记录失败") }
     }
 
-    func allFiles() throws -> [ImportedFile] {
+    func allFiles() throws -> [ImportedFile] { try serialized {
         guard let db else { return [] }
         let stmt = try prepare("""
         SELECT id, folder_id, rel_path, bookmark, name, size, added_at, indexed FROM files ORDER BY added_at DESC
@@ -530,27 +546,27 @@ final class VectorStore {
                                     name: name, size: size, addedAt: addedAt, indexed: indexed))
         }
         return out
-    }
+    } }
 
-    func file(id: String) throws -> ImportedFile? {
+    func file(id: String) throws -> ImportedFile? { try serialized {
         try allFiles().first { $0.id == id }
-    }
+    } }
 
-    func setFileIndexed(id: String) throws {
+    func setFileIndexed(id: String) throws { try serialized {
         let stmt = try prepare("UPDATE files SET indexed = 1 WHERE id = ?")
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, id, -1, Self.transient)
         sqlite3_step(stmt)
-    }
+    } }
 
-    func deleteFile(id: String) throws {
+    func deleteFile(id: String) throws { try serialized {
         let stmt = try prepare("DELETE FROM files WHERE id = ?")
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, id, -1, Self.transient)
         sqlite3_step(stmt)
         try removeByRef(kind: .file, refKey: id)
         try removeByRef(kind: .fileChunk, refKey: id)
-    }
+    } }
 
     var fileCount: Int {
         guard let db else { return 0 }

@@ -122,11 +122,13 @@ jobs:
             --apiKey "$ASC_KEY_ID" \
             --apiIssuer "$ASC_ISSUER_ID"
 
-      - name: 存档 dSYM(本地解析 .ips 崩溃用)
+      - name: 存档 dSYM 与原始二进制(本地解析 .ips 崩溃用)
         uses: actions/upload-artifact@v4
         with:
           name: MediaSeek-dSYM
-          path: build/MediaSeek.xcarchive/dSYMs/
+          path: |
+            build/MediaSeek.xcarchive/dSYMs/
+            build/MediaSeek.xcarchive/Products/Applications/MediaSeek.app/MediaSeek
 
       - name: 完成
         run: |
