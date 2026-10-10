@@ -21,7 +21,7 @@ struct SearchView: View {
     @State private var renameText = ""
     @State private var colorFilter: String?
 
-    private let exampleQueries = ["一只猫", "海边的日落", "有人的合影", "会议纪要", "发票 PDF"]
+    private let exampleQueries = ["一只猫", "海边的日落", "文字:身份证", "语义:身份证", "and:2026 屏幕", "or:猫 狗"]
 
     private let columns = [GridItem(.adaptive(minimum: 105), spacing: 10)]
 

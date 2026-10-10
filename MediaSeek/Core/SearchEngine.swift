@@ -40,22 +40,51 @@ final class SearchEngine {
         self.imports = imports
     }
 
+    /// 查询模式:前缀语法 文字:/语义:/and:/or:,无前缀=auto(现行启发式)
+    enum QueryMode { case auto, text, semantic, and, or }
+
+    static func parseMode(_ raw: String) -> (mode: QueryMode, body: String) {
+        let pairs: [(String, QueryMode)] = [("文字:", .text), ("文字:", .text),
+                                            ("语义:", .semantic), ("语义:", .semantic),
+                                            ("and:", .and), ("or:", .or)]
+        let lower = raw.lowercased()
+        for (p, m) in pairs where lower.hasPrefix(p) {
+            let body = raw.dropFirst(p.count).trimmingCharacters(in: CharacterSet(charactersIn: " :"))
+            return (m, body)
+        }
+        return (.auto, raw)
+    }
+
+    static func containsDigit(_ t: String) -> Bool {
+        t.unicodeScalars.contains { $0.value >= 48 && $0.value <= 57 }
+    }
+
+    static func splitTerms(_ query: String) -> [String] {
+        query.components(separatedBy: CharacterSet(charactersIn: " ,、,/"))
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+    }
+
     func search(_ rawQuery: String, scope: SearchScope, topK: Int = 120) async throws -> [DisplayHit] {
         let raw = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !raw.isEmpty else { return [] }
-        let query = QueryUnderstanding.core(raw)
+        let (mode, body) = Self.parseMode(raw)
+        let query = QueryUnderstanding.core(body)
         guard !query.isEmpty else { return [] }
+
+        // 显式模式:文字: / and: / or: 走独立流程;语义: 走主流程但跳过 OCR
+        let semanticOnly = (mode == .semantic)
+        if mode == .text || mode == .and || mode == .or {
+            let siglip = await MainActor.run { models.siglip }
+            return try await searchExplicit(mode: mode, query: query,
+                                            scope: scope, topK: topK, siglip: siglip)
+        }
 
         // 多词查询:「2026 电脑屏幕」→ 含数字的词走 OCR 文字匹配,
         // 其余词走视觉/标签;「或」语义:照片满足任一条件(像/含字)即显示
-        let terms = query.components(separatedBy: CharacterSet(charactersIn: " ,、,/"))
-            .map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-        func hasDigit(_ t: String) -> Bool {
-            t.unicodeScalars.contains { $0.value >= 48 && $0.value <= 57 }
-        }
-        let textTerms = terms.filter(hasDigit)
-        let visualTerms = terms.filter { !hasDigit($0) }
+        let terms = Self.splitTerms(query)
+        let textTerms = terms.filter(Self.containsDigit)
+        let visualTerms = terms.filter { !Self.containsDigit($0) }
         let concept = visualTerms.isEmpty ? query : visualTerms.joined(separator: " ")
 
         let imageKinds: [ItemKind] = scope == .all || scope == .photo
@@ -134,7 +163,8 @@ final class SearchEngine {
 
         // OCR 文字精确通道:「或」语义——每个词独立命中"含该文字"的照片,
         // 与视觉通道取并集;标题附命中片段,方便核对为什么命中(小字/页脚也会算)
-        if scope == .all || scope == .photo {
+        // 语义: 前缀模式下跳过(只要语义命中)
+        if !semanticOnly, scope == .all || scope == .photo {
             func snippet(_ text: String, _ term: String) -> String {
                 guard let r = text.range(of: term) else { return String(text.prefix(30)) }
                 let s = text.index(r.lowerBound, offsetBy: -12, limitedBy: text.startIndex) ?? text.startIndex
@@ -213,6 +243,89 @@ final class SearchEngine {
         return tokens
     }
 
+
+    /// 显式前缀模式:文字:(只查 OCR,多词 AND)/ and:(各词通道命中取交集)/ or:(并集)
+    private func searchExplicit(mode: QueryMode, query: String, scope: SearchScope,
+                                topK: Int, siglip: SigLIPEmbedder?) async throws -> [DisplayHit] {
+        guard scope == .all || scope == .photo else { return [] }   // v1 只作用于照片
+        let terms = Self.splitTerms(query)
+        guard !terms.isEmpty else { return [] }
+
+        if mode == .text {
+            var acc: Set<String>? = nil
+            for t in terms {
+                let set = Set(((try? store.searchOCR(query: t)) ?? []).map(\.refKey))
+                acc = (acc ?? set).intersection(set)
+                if acc?.isEmpty == true { break }
+            }
+            guard let acc, !acc.isEmpty else { return [] }
+            let hits = acc.sorted().prefix(topK).map {
+                SearchHit(kind: .photo, refKey: $0, frameIndex: 0, space: "ocr",
+                          title: "文字命中:「\(terms.joined(separator: " "))」",
+                          date: nil, score: 1.0, color: nil)
+            }
+            return resolve(normalized(hits))
+        }
+
+        // and / or:每个词走各自通道(数字词→文字,其余→视觉)
+        var perTerm: [[SearchHit]] = []
+        for t in terms {
+            if Self.containsDigit(t) {
+                let refs = (try? store.searchOCR(query: t)) ?? []
+                perTerm.append(refs.prefix(40).enumerated().map { rank, ref in
+                    SearchHit(kind: .photo, refKey: ref.refKey, frameIndex: 0, space: "ocr",
+                              title: "含「\(t)」文字", date: nil,
+                              score: Float(1.0 / Double(rank + 1)), color: nil)
+                })
+            } else if let siglip {
+                let q = try siglip.embedQuery(QueryUnderstanding.english(for: t) ?? t)
+                var hits = Self.dedupByRef(try store.search(
+                    space: siglip.space, kinds: [.photo], query: q, limit: topK, minScore: 0.18))
+                let best = hits.first?.score ?? 0
+                if best > 0 { hits = hits.filter { $0.score >= best * 0.85 } }
+                perTerm.append(hits)
+            }
+        }
+        perTerm.removeAll { $0.isEmpty }
+        guard !perTerm.isEmpty else { return [] }
+
+        if mode == .or {
+            var merged: [SearchHit] = []
+            var seen = Set<String>()
+            for list in perTerm {
+                for h in list where !seen.contains(h.refKey) {
+                    seen.insert(h.refKey)
+                    merged.append(h)
+                }
+            }
+            return resolve(normalized(merged))
+        }
+
+        // and:交集
+        var common = Set(perTerm[0].map(\.refKey))
+        for list in perTerm.dropFirst() { common.formIntersection(Set(list.map(\.refKey))) }
+        guard !common.isEmpty else { return [] }
+        var out: [SearchHit] = []
+        var placed = Set<String>()
+        for list in perTerm {
+            for h in list where common.contains(h.refKey) && !placed.contains(h.refKey) {
+                placed.insert(h.refKey)
+                out.append(h)
+            }
+        }
+        return resolve(normalized(out))
+    }
+
+    /// 相对化显示分(第一名 100%)
+    private func normalized(_ hits: [SearchHit]) -> [SearchHit] {
+        let maxS = hits.map(\.score).max() ?? 1
+        guard maxS > 0 else { return hits }
+        return hits.map {
+            SearchHit(kind: $0.kind, refKey: $0.refKey, frameIndex: $0.frameIndex,
+                      space: $0.space, title: $0.title, date: $0.date,
+                      score: $0.score / maxS, color: $0.color)
+        }
+    }
 
     /// 通道内按 refKey 去重(视频多帧/文件多块),供 RRF 按名次计分
     private static func dedupByRef(_ hits: [SearchHit]) -> [SearchHit] {
