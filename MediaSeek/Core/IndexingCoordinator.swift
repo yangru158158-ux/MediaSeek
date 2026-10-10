@@ -52,6 +52,7 @@ final class IndexingCoordinator: ObservableObject {
     }
 
     private var processedLocal = 0
+    private var rerunPending = false
 
     private let store: VectorStore
     private let models: ModelManager
@@ -100,7 +101,11 @@ final class IndexingCoordinator: ObservableObject {
     }
 
     private func startRun(full: Bool) {
-        guard !isRunning else { return }
+        guard !isRunning else {
+            // 已有任务在跑:记一笔,本轮结束自动补跑(治「导入第二轮文件一直待索引」)
+            rerunPending = true
+            return
+        }
         isRunning = true
         processed = 0
         processedLocal = 0
@@ -116,6 +121,11 @@ final class IndexingCoordinator: ObservableObject {
             self.isRunning = false
             self.task = nil
             UIApplication.shared.isIdleTimerDisabled = false
+            // 跑完后若期间有新导入排队,立刻补跑一轮(文件秒级变「已索引」)
+            if self.rerunPending {
+                self.rerunPending = false
+                self.startRun(full: false)
+            }
         }
     }
 
@@ -128,8 +138,9 @@ final class IndexingCoordinator: ObservableObject {
             }
             // 全量重建不再先清空旧索引:全量覆盖更新,搜索全程不断档
             // (结束时按现有相册清单自动清理已删除照片的旧行)
-            try await syncPhotoLibrary(forceAll: full, errors: errors)
+            // 文件量级小(几十个)先跑完,用户立刻能看到「已索引」;相册大批量随后
             try await syncImportedFiles()
+            try await syncPhotoLibrary(forceAll: full, errors: errors)
             await prebuildLabelVocab()   // 重建完成后预建路由词表,首次搜索不再有一次性延迟
 
             lastSyncAt = Date()
