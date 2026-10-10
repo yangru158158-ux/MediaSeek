@@ -530,7 +530,7 @@ enum TextExtractor {
                   let cg = page.thumbnail(of: CGSize(width: 2048, height: 2048), for: .mediaBox).cgImage
             else { continue }
             let handler = VNImageRequestHandler(cgImage: cg, options: [:])
-            guard (try? handler.perform([request])) == true else { continue }
+            guard (try? handler.perform([request])) != nil else { continue }
             let text = ((request.results as? [VNRecognizedTextObservation]) ?? [])
                 .compactMap { $0.topCandidates(1).first?.string }
                 .joined(separator: "\n")
