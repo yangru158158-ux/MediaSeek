@@ -111,6 +111,8 @@ final class VectorStore {
           indexed INTEGER NOT NULL DEFAULT 0
         )
         """)
+        // 自愈:清剿漏绑 id 时代写入的 NULL 毒行(记录已无主,重导即重建)
+        try? exec("DELETE FROM files WHERE id IS NULL")
     } }
 
     private func exec(_ sql: String) throws {
@@ -513,6 +515,10 @@ final class VectorStore {
         VALUES(?,?,?,?,?,?,?,?)
         """)
         defer { sqlite3_finalize(stmt) }
+        // ⚠️ 参数 1=id 必须绑定:此前漏绑,SQLite 以 NULL 主键写行,
+        // allFiles 读 NULL id 时 String(cString:) 强解包=EXC_BREAKPOINT
+        // (构建 68-70 导入文件夹后必崩的总根源)
+        sqlite3_bind_text(stmt, 1, f.id, -1, Self.transient)
         if let fid = f.folderID { sqlite3_bind_int64(stmt, 2, fid) } else { sqlite3_bind_null(stmt, 2) }
         if let p = f.relPath { sqlite3_bind_text(stmt, 3, p, -1, Self.transient) } else { sqlite3_bind_null(stmt, 3) }
         if let b = f.bookmark { _ = b.withUnsafeBytes { sqlite3_bind_blob(stmt, 4, $0.baseAddress, Int32(b.count), Self.transient) } }
@@ -532,6 +538,9 @@ final class VectorStore {
         defer { sqlite3_finalize(stmt) }
         var out: [ImportedFile] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
+            // 毒行防御:漏绑 id 的旧版本写入过 id=NULL 的行,
+            // 对 NULL 列做 String(cString:) 是强解包陷阱——跳过,绝不解包
+            guard sqlite3_column_type(stmt, 0) != SQLITE_NULL else { continue }
             let id = String(cString: sqlite3_column_text(stmt, 0))
             let folderID: Int64? = sqlite3_column_type(stmt, 1) == SQLITE_NULL ? nil : sqlite3_column_int64(stmt, 1)
             let relPath: String? = sqlite3_column_type(stmt, 2) == SQLITE_NULL ? nil : String(cString: sqlite3_column_text(stmt, 2))
