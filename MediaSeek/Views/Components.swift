@@ -17,15 +17,17 @@ final class PhotoThumbLoader {
         options.deliveryMode = .highQualityFormat
         options.isNetworkAccessAllowed = true
         let image: UIImage? = await withCheckedContinuation { cont in
+            var finished = false
             manager.requestImage(for: asset,
                                  targetSize: CGSize(width: pixel, height: pixel),
                                  contentMode: .aspectFill,
                                  options: options) { img, info in
-                if info?[PHImageResultIsDegradedKey] as? Bool == true {
-                    // 等最终结果
-                } else {
-                    cont.resume(returning: img)
-                }
+                guard !finished else { return }
+                // 降质帧等最终回调;iCloud 照片会先回调「图在云端」(img=nil 且非降质)
+                // 再回调最终帧——无一次性守卫时两次都 resume = EXC_BREAKPOINT
+                if (info?[PHImageResultIsDegradedKey] as? Bool) == true { return }
+                finished = true
+                cont.resume(returning: img)
             }
         }
         if let image { cache.setObject(image, forKey: key) }
