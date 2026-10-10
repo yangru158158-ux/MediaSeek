@@ -146,10 +146,12 @@ final class SearchEngine {
         // 视觉通道:SigLIP2 原生多语言(分词实验已证),中文原文直接查;
         // 不再用语义路由——泛化标签(document/screenshot)会被几乎任何词
         // 以 ≥0.60 命中,造成整库截图照灌进结果(「医学出生证明」事故)
+        // 显式「语义:」查询门槛放宽到 0.14(用户点名要语义召回)
         if !imageKinds.isEmpty, let siglip {
             let q = try siglip.embedQuery(QueryUnderstanding.english(for: concept) ?? concept)
+            let floor = semanticOnly ? 0.14 : 0.18
             let hits = Self.dedupByRef(try store.search(
-                space: siglip.space, kinds: imageKinds, query: q, limit: topK, minScore: 0.18))
+                space: siglip.space, kinds: imageKinds, query: q, limit: topK, minScore: Float(floor)))
             // 相对尾部截断:远弱于头部的长尾(如「人」里混入的屏幕翻拍照)直接砍掉
             let best = hits.first?.score ?? 0
             channels.append((1.0, best > 0 ? hits.filter { $0.score >= best * 0.85 } : hits))
