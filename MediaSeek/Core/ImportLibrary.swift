@@ -30,20 +30,30 @@ final class ImportLibrary: ObservableObject {
                     at: url,
                     includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey],
                     options: [.skipsHiddenFiles, .skipsPackageDescendants])
-                while let child = enumerator?.nextObject() as? URL {
-                    let values = try? child.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
-                    guard values?.isRegularFile == true else { continue }
-                    let record = ImportedFile(
-                        id: UUID().uuidString,
-                        folderID: folderID,
-                        relPath: child.path.replacingOccurrences(of: url.path + "/", with: ""),
-                        bookmark: nil,
-                        name: child.lastPathComponent,
-                        size: Int64(values?.fileSize ?? 0),
-                        addedAt: Date(),
-                        indexed: false)
-                    try store.addFile(record)
-                    count += 1
+                // 大文件夹:整体事务批量入库(快且崩溃/中断时全量回滚,不留半截)
+                try store.beginTransaction()
+                do {
+                    while let child = enumerator?.nextObject() as? URL {
+                        try autoreleasepool {
+                            let values = try? child.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+                            guard values?.isRegularFile == true else { return }
+                            let record = ImportedFile(
+                                id: UUID().uuidString,
+                                folderID: folderID,
+                                relPath: child.path.replacingOccurrences(of: url.path + "/", with: ""),
+                                bookmark: nil,
+                                name: child.lastPathComponent,
+                                size: Int64(values?.fileSize ?? 0),
+                                addedAt: Date(),
+                                indexed: false)
+                            try store.addFile(record)
+                            count += 1
+                        }
+                    }
+                    try store.endTransaction()
+                } catch {
+                    store.rollback()
+                    throw error
                 }
             } else {
                 let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0

@@ -111,6 +111,12 @@ final class VectorStore {
         if let db { sqlite3_close_v2(db) }
     }
 
+    // MARK: - 事务
+
+    func beginTransaction() throws { try exec("BEGIN IMMEDIATE") }
+    func endTransaction() throws { try exec("COMMIT") }
+    func rollback() { try? exec("ROLLBACK") }
+
     // MARK: - 向量条目
 
     func upsert(kind: ItemKind, refKey: String, frameIndex: Int = 0,
