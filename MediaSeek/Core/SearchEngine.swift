@@ -202,15 +202,12 @@ final class SearchEngine {
             var seen = Set<String>()
             var rank = 0
             for t in (textTerms.isEmpty ? [query] : textTerms) where !t.isEmpty {
-                // 数字词(2026/单号)权重 8 置顶;纯中文词降权 2.5——
-                // 中文词的"含字"命中常是 App 自身截图(搜索词就在图里),不能压过视觉真命中
-                let weight = Self.containsDigit(t) ? 8.0 : 2.5
                 for ref in (try? store.searchOCR(query: t)) ?? [] where !seen.contains(ref.refKey) {
                     seen.insert(ref.refKey)
                     add(SearchHit(kind: .photo, refKey: ref.refKey, frameIndex: 0,
                                   space: "ocr", title: "含「\(t)」:\(Self.ocrSnippet(ref.text, t))",
                                   date: nil, score: 1.0, color: nil),
-                        weight: weight, rank: rank)
+                        weight: 8.0, rank: rank)
                     rank += 1
                 }
 
