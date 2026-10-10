@@ -211,21 +211,24 @@ struct SearchView: View {
         .padding(.bottom, 4)
     }
 
+    /// 空结果提示:按查询模式分别说明
+    private func emptyStateHint(_ query: String) -> String {
+        let q = query.lowercased()
+        if q.hasPrefix("语义:") {
+            return "语义通道未命中(已索引 \(app.indexing.indexedPhotoCount) 张)\n试试 文字:身份证 用文字精确查找\n或换更具体的词;索引重建完成后召回会增加"
+        }
+        if q.hasPrefix("文字:") {
+            return "文字通道未命中:该文字未被识别到\n或这些照片还没重建索引(已索引 \(app.indexing.indexedPhotoCount) 张)"
+        }
+        return "已索引 \(app.indexing.indexedPhotoCount) 张照片\n文字条件需要该文字被识别到;索引进行中时结果不完整,跑完再试\n也可以换个说法再搜,或用 文字:/语义: 前缀精确控制"
+    }
+
     private var resultGrid: some View {
         ScrollView {
             if results.isEmpty && searchedOnce && !searching {
-                let q = query.lowercased()
-                let hint: String
-                if q.hasPrefix("语义:") {
-                    hint = "语义通道未命中(已索引 \(app.indexing.indexedPhotoCount) 张)\n试试 文字:身份证 用文字精确查找\n或换更具体的词;索引重建完成后召回会增加"
-                } else if q.hasPrefix("文字:") {
-                    hint = "文字通道未命中:该文字未被识别到\n或这些照片还没重建索引(已索引 \(app.indexing.indexedPhotoCount) 张)"
-                } else {
-                    hint = "已索引 \(app.indexing.indexedPhotoCount) 张照片\n文字条件需要该文字被识别到;索引进行中时结果不完整,跑完再试\n也可以换个说法再搜,或用 文字:/语义: 前缀精确控制"
-                }
                 ContentUnavailableView("没有找到相关内容",
                                        systemImage: "questionmark.folder",
-                                       description: Text(hint))
+                                       description: Text(emptyStateHint(query)))
                     .padding(.top, 60)
             } else {
                 LazyVGrid(columns: columns, spacing: 12) {
