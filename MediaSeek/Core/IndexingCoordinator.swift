@@ -203,8 +203,8 @@ final class IndexingCoordinator: ObservableObject {
                 }
                 // 连续失败 20 张 = 系统性故障,立即停止并显示原因(不空烧全库)
                 if errorCount >= 20, let msg = errors.get() {
-                    phase = .failed("连续处理失败已停止:\(msg)")
-                    return
+                    try Task.checkCancellation()   // 以取消错误抛出,让外层显示失败原因(不被 .done 覆盖)
+                    throw MSError("连续处理失败已停止:\(msg)")
                 }
                 if Task.isCancelled { break }
                 if index < newPhotos.count {
