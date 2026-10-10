@@ -12,6 +12,7 @@ struct LibraryView: View {
     @State private var showFilePicker = false
     @State private var showFolderPicker = false
     @State private var confirmRebuild = false
+    @State private var refreshPending = false
 
     private let columns = [GridItem(.flexible()), GridItem(.flexible())]
 
@@ -189,11 +190,20 @@ struct LibraryView: View {
     // MARK: - 动作
 
     private func refresh() {
-        let counts = (try? app.store.counts()) ?? [:]
-        photoCount = counts[.photo] ?? 0
-        videoCount = counts[.videoFrame] ?? 0
-        vectorCount = counts.values.reduce(0, +)
-        importedFiles = app.imports.allFiles()
+        // SwiftUI 26 对「视图更新进行中写 @State」直接断言崩溃(EXC_BREAKPOINT):
+        // 导入完成后 alert 绑定翻转 + onChange(phase) 同步刷新正撞在更新中途
+        // (21:32 构建 69 崩溃栈:body witness→refresh)。一律推迟到本轮更新
+        // 结束后执行,短时间连发合并成一次。
+        guard !refreshPending else { return }
+        refreshPending = true
+        DispatchQueue.main.async { [self] in
+            refreshPending = false
+            let counts = (try? app.store.counts()) ?? [:]
+            photoCount = counts[.photo] ?? 0
+            videoCount = counts[.videoFrame] ?? 0
+            vectorCount = counts.values.reduce(0, +)
+            importedFiles = app.imports.allFiles()
+        }
     }
 
     private func handleImport(_ result: Result<[URL], Error>) {
