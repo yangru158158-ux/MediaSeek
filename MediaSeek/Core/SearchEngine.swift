@@ -278,14 +278,19 @@ final class SearchEngine {
         let terms = Self.splitTerms(spec.body)
         guard !terms.isEmpty else { return [] }
 
-        // 文字通道:每个词独立查 OCR,连接词决定 AND/OR
+        // 文字通道:每个词独立查 OCR,连接词决定 AND/OR。
+        // and 模式标题列出全部命中词(交集里每张都含全部词,不能只显示第一个)
         if spec.channel == .text {
             var perTerm: [[SearchHit]] = []
             for t in terms {
                 let refs = (try? store.searchOCR(query: t)) ?? []
+                let connectorIsAnd = (spec.connector == .and)
                 perTerm.append(refs.prefix(60).enumerated().map { rank, ref in
-                    SearchHit(kind: .photo, refKey: ref.refKey, frameIndex: 0, space: "ocr",
-                              title: "文字命中「\(t)」:\(Self.ocrSnippet(ref.text, t))",
+                    let title = connectorIsAnd
+                        ? "文字全含:\(terms.joined(separator: " ")) —「\(t)」\(Self.ocrSnippet(ref.text, t))"
+                        : "文字命中「\(t)」:\(Self.ocrSnippet(ref.text, t))"
+                    return SearchHit(kind: .photo, refKey: ref.refKey, frameIndex: 0, space: "ocr",
+                              title: title,
                               date: nil, score: Float(1.0 / Double(rank + 1)), color: nil)
                 })
             }
