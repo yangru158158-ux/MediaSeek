@@ -702,7 +702,7 @@ enum MiniZip {
 final class XLSXTextParser: NSObject, XMLParserDelegate {
     enum Mode { case sharedStrings, sheet }
     private let mode: Mode
-    private var shared: [String]
+    private(set) var shared: [String]
     private(set) var rows: [String] = []
 
     private var siBuffer = ""
@@ -742,7 +742,13 @@ final class XLSXTextParser: NSObject, XMLParserDelegate {
     }
 
     func parser(_ parser: XMLParser, foundCDATA CDATA: Data) {
-        if let s = String(data: CDATA, encoding: .utf8) { parser(self, foundCharacters: s) }
+        guard let tag = collecting, let s = String(data: CDATA, encoding: .utf8) else { return }
+        switch (mode, tag) {
+        case (.sharedStrings, "t"): siBuffer += s
+        case (.sheet, "v"): cellValue += s
+        case (.sheet, "t"): cellText += s
+        default: break
+        }
     }
 
     func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
