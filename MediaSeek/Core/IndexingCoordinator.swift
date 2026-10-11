@@ -188,11 +188,13 @@ final class IndexingCoordinator: ObservableObject {
         // 跑多少存多少、中断可续,无需全量重建(无字照片有 "" 占位行,不会反复补)
         if !forceAll {
             for key in try store.photoRefKeysMissingOCR() { known.remove(key) }
-            // 抽帧数变更:已索引视频的帧行数与设置不符 → 原位重索引
-            // (改设置只影响新视频的话,旧视频永远停在旧帧数)
-            if let stats = try? store.videoFrameStats(), stats.videos > 0 {
-                for (key, n) in stats.perVideo where n != videoFramesPerVideo {
-                    known.remove(key)
+            // 抽帧数变更:视频记录了「处理时用的抽帧数」,设置真变了才重处理。
+            // 不能直接比帧行数——部分帧黑(114 起跳过)后行数天然小于设置值,
+            // 直接比会无限重跑(2026-10-11 用户实测 25 部视频反复索引)
+            if let cfg = UserDefaults.standard.dictionary(forKey: "vidFrameCfg") as? [String: Int],
+               let stats = try? store.videoFrameStats(), stats.videos > 0 {
+                for key in stats.perVideo.keys {
+                    if let used = cfg[key], used != videoFramesPerVideo { known.remove(key) }
                 }
             }
             // 帧标签自愈:有帧向量但缺标签行的视频原位重处理一次
@@ -205,6 +207,8 @@ final class IndexingCoordinator: ObservableObject {
             }
         }
         let recentlyDeleted = Self.recentlyDeletedIDs()
+        // 黑屏录音类视频记账(全帧黑、无可索引内容):跳过抽帧,不再每轮同步反复扫
+        let fullyBlack = Set(UserDefaults.standard.stringArray(forKey: "vidAllBlack") ?? [])
 
         var libIDs = Set<String>()
         var newPhotos: [PHAsset] = []
@@ -212,6 +216,8 @@ final class IndexingCoordinator: ObservableObject {
         fetch.enumerateObjects { asset, _, _ in
             // 「最近删除」里的照片/视频不入库:不新增索引,旧行按 stale 一并清除
             guard recentlyDeleted.contains(asset.localIdentifier) == false else { return }
+            // 全黑视频:不进 libIDs(遗留行顺带清除),也不重新处理
+            guard !fullyBlack.contains(asset.localIdentifier) else { return }
             libIDs.insert(asset.localIdentifier)
             guard !known.contains(asset.localIdentifier) else { return }
             if asset.mediaType == .image {
@@ -344,16 +350,17 @@ final class IndexingCoordinator: ObservableObject {
                 // 先清旧帧再采新帧:重索引(如抽帧数变更)后不残留旧帧行
                 try? store.removeFrames(refKey: asset.localIdentifier)
                 let frames = try await FrameSampler.sample(asset: avAsset, count: frameCount)
+                var rows = 0
                 for (i, frame) in frames.enumerated() {
                     // 近全黑帧不入索引:黑屏录音类视频没有视觉内容,入库后只会被
                     // 视频相对标定灌进任何搜索结果(2026-10-11 用户实测 water/常住
-                    // 混入"只有声音"黑视频)。全黑视频 0 行 → 不在 known 集,每次
-                    // 同步只重抽帧(无推理),写不进就永远不进视觉/标签结果
+                    // 混入"只有声音"黑视频)
                     if PhotoColor.isTooDark(frame) { continue }
                     let vec = try clip.embedImage(frame)
                     try store.upsert(kind: .videoFrame, refKey: asset.localIdentifier, frameIndex: i,
                                      space: clip.space, vector: vec, title: nil, date: asset.creationDate,
                                      color: PhotoColor.bucket(of: frame))
+                    rows += 1
                     // 帧标签:视频侧唯一可靠的召回通道(与照片同款 Vision 分类)。
                     // SigLIP 图文分数在本库区分度不足(马尔代夫 vs 抖音噪声分不开),
                     // 标签零幻觉:海滩/水上屋帧得 beach/island/water,抖音室内帧得
@@ -363,6 +370,20 @@ final class IndexingCoordinator: ObservableObject {
                         try store.upsert(kind: .videoFrameLabel, refKey: asset.localIdentifier,
                                          frameIndex: i, space: gemma.space, vector: lvec,
                                          title: labels, date: asset.creationDate)
+                    }
+                }
+                // 记账:≥1 帧入库记下当时的抽帧数(「抽帧数变更」判断的唯一依据,
+                // 直接比行数会因黑帧跳过而无限重跑);采到帧但全黑(0 行)拉黑名单,
+                // 同步直接跳过;抽帧失败(0 帧)不记,下次同步重试
+                if !frames.isEmpty {
+                    if rows > 0 {
+                        var cfg = (UserDefaults.standard.dictionary(forKey: "vidFrameCfg") as? [String: Int]) ?? [:]
+                        cfg[asset.localIdentifier] = frameCount
+                        UserDefaults.standard.set(cfg, forKey: "vidFrameCfg")
+                    } else {
+                        var set = Set(UserDefaults.standard.stringArray(forKey: "vidAllBlack") ?? [])
+                        set.insert(asset.localIdentifier)
+                        UserDefaults.standard.set(Array(set), forKey: "vidAllBlack")
                     }
                 }
             }.value

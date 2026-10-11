@@ -43,6 +43,9 @@ struct SettingsView: View {
                                 isPresented: $confirmWipe, titleVisibility: .visible) {
                 Button("清空索引", role: .destructive) {
                     try? app.store.deleteAll()
+                    // 视频处理记账一并清掉,否则黑屏视频/抽帧数快照会挡住重建后的重索引
+                    UserDefaults.standard.removeObject(forKey: "vidFrameCfg")
+                    UserDefaults.standard.removeObject(forKey: "vidAllBlack")
                 }
                 Button("取消", role: .cancel) {}
             }
@@ -139,6 +142,11 @@ struct SettingsView: View {
             do {
                 let stats = try store.videoFrameStats()
                 lines.append("已有帧向量视频数:\(stats.videos)")
+                // 帧标签落库情况:判断「标签没写进库」还是「写进了但词对不上」
+                let labelRows = (try? store.allVideoFrameLabels()) ?? []
+                let labelByRef = Dictionary(labelRows.map { ($0.refKey, $0.title) },
+                                            uniquingKeysWith: { a, _ in a })
+                lines.append("已打标签视频数:\(Set(labelRows.map { $0.refKey }).count)")
                 let opts = PHFetchOptions()
                 opts.predicate = NSPredicate(format: "mediaType = %d", PHAssetMediaType.video.rawValue)
                 let fetch = PHAsset.fetchAssets(with: .video, options: opts)
@@ -149,7 +157,8 @@ struct SettingsView: View {
                 func line(_ a: PHAsset) -> String {
                     let d = a.creationDate.map { DateFormatter.localizedString(from: $0, dateStyle: .medium, timeStyle: .none) } ?? "无日期"
                     let n = stats.perVideo[a.localIdentifier] ?? 0
-                    return "  \(d) · 帧\(n > 0 ? "\(n) ✓" : "0 ✗未索引")"
+                    let lab = labelByRef[a.localIdentifier].map { " · 标签:" + String($0.prefix(46)) } ?? " · 无标签"
+                    return "  \(d) · 帧\(n > 0 ? "\(n) ✓" : "0 ✗未索引")\(lab)"
                 }
                 lines.append("最新 3 个:")
                 lines.append(contentsOf: sorted.prefix(3).map(line))
