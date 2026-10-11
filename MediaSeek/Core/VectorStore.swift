@@ -122,7 +122,7 @@ final class VectorStore {
         """)
         // 一次性迁移:历史向量未归一化(点积≠余弦,门槛随查询漂移)→ 统一单位化
         if !UserDefaults.standard.bool(forKey: "vec_norm_migrated_1") {
-            var updates: [(rowid: Int32, vec: Data)] = []
+            var updates: [(rowid: Int64, vec: Data)] = []
             let sel = try prepare("SELECT rowid, vec, dim FROM items")
             while sqlite3_step(sel) == SQLITE_ROW {
                 let d = Int(sqlite3_column_int(sel, 2))
@@ -132,7 +132,7 @@ final class VectorStore {
                 let norm = vDSP.dot(v, v).squareRoot()
                 guard norm > 0.0001, abs(norm - 1) > 0.001 else { continue }
                 var unit = v.map { $0 / norm }
-                updates.append((Int32(sqlite3_column_int64(sel, 0)),
+                updates.append((sqlite3_column_int64(sel, 0),
                                 unit.withUnsafeBytes { Data($0) }))
             }
             sqlite3_finalize(sel)
