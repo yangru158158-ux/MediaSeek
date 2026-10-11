@@ -200,6 +200,14 @@ final class IndexingCoordinator: ObservableObject {
         try store.removeRefs(kinds: [.photo, .photoLabel, .userTag, .videoFrame], notIn: libIDs)
 
         total += newPhotos.count + newVideos.count
+        // 视频量级小先处理:几分钟后即可被「视频」范围搜到,不必等全部照片
+        phase = .videos
+        for asset in newVideos {
+            try Task.checkCancellation()
+            await embedVideo(asset, errors: errors)
+            processedLocal += 1
+            processed = processedLocal
+        }
         phase = .photos
         // 双路并发:解码/下载与 ANE 推理流水线重叠
         let useLabels = chineseLabels
@@ -242,13 +250,6 @@ final class IndexingCoordinator: ObservableObject {
         if let abortReason { throw MSError(abortReason) }
         try Task.checkCancellation()   // 「停止」从这里立即生效
         processed = processedLocal
-        phase = .videos
-        for asset in newVideos {
-            try Task.checkCancellation()
-            await embedVideo(asset, errors: errors)
-            processedLocal += 1
-            processed = processedLocal
-        }
     }
 
     /// 「最近删除」智能相册的资产 ID。系统未公开对应枚举,

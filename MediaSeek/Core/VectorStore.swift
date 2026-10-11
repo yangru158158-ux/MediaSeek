@@ -606,6 +606,20 @@ final class VectorStore {
         return out
     } }
 
+    /// 视频帧向量统计:有帧向量的视频数 + 每个视频的帧数(诊断用)
+    func videoFrameStats() throws -> (videos: Int, perVideo: [String: Int]) { try serialized {
+        guard let db else { return (0, [:]) }
+        let stmt = try prepare("""
+        SELECT ref_key, COUNT(*) FROM items WHERE kind = 'videoFrame' GROUP BY ref_key
+        """)
+        defer { sqlite3_finalize(stmt) }
+        var per: [String: Int] = [:]
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            per[String(cString: sqlite3_column_text(stmt, 0))] = Int(sqlite3_column_int(stmt, 1))
+        }
+        return (per.count, per)
+    } }
+
     /// 全部照片的 clip 向量(查重用):keys 与 flat 内的行一一对应
     func allPhotoVectors() throws -> (keys: [String], flat: [Float], dim: Int) { try serialized {
         guard let db else { return ([], [], 0) }

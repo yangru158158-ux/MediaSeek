@@ -1,4 +1,5 @@
 import SwiftUI
+import Photos
 import UniformTypeIdentifiers
 
 struct SettingsView: View {
@@ -7,12 +8,15 @@ struct SettingsView: View {
     @State private var showModelPicker = false
     @State private var importing = false
     @State private var confirmWipe = false
+    @State private var videoDiagRunning = false
+    @State private var videoDiagText: String?
 
     var body: some View {
         NavigationStack {
             List {
                 modelSection
                 tuningSection
+                videoDiagSection
                 aboutSection
             }
             .navigationTitle("设置")
@@ -105,6 +109,70 @@ struct SettingsView: View {
     }
 
     // MARK: - 调优
+
+    /// 视频索引诊断:相册视频总数 vs 已有帧向量视频数,
+    /// 并列出最旧/最新各 3 个视频的索引状态——定位「视频搜不到」断在哪一环
+    private var videoDiagSection: some View {
+        Section("视频索引诊断") {
+            Button {
+                runVideoDiag()
+            } label: {
+                if videoDiagRunning {
+                    HStack { ProgressView(); Text("诊断中…") }
+                } else {
+                    Label("运行诊断", systemImage: "stethoscope")
+                }
+            }
+            .disabled(videoDiagRunning)
+            if let t = videoDiagText {
+                Text(t).font(.caption2).monospaced().foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+        }
+    }
+
+    private func runVideoDiag() {
+        videoDiagRunning = true
+        let store = app.store
+        Task.detached(priority: .userInitiated) {
+            var lines: [String] = []
+            do {
+                let stats = try store.videoFrameStats()
+                lines.append("已有帧向量视频数:\(stats.videos)")
+                let opts = PHFetchOptions()
+                opts.predicate = NSPredicate(format: "mediaType = %d", PHAssetMediaType.video.rawValue)
+                let fetch = PHAsset.fetchAssets(with: opts, options: nil)
+                lines.append("相册视频总数:\(fetch.count)")
+                var assets: [PHAsset] = []
+                fetch.enumerateObjects { a, _, _ in assets.append(a) }
+                let sorted = assets.sorted { ($0.creationDate ?? .distantPast) > ($1.creationDate ?? .distantPast) }
+                func line(_ a: PHAsset) -> String {
+                    let d = a.creationDate.map { DateFormatter.localizedString(from: $0, dateStyle: .medium, timeStyle: .none) } ?? "无日期"
+                    let n = stats.perVideo[a.localIdentifier] ?? 0
+                    return "  \(d) · 帧\(n > 0 ? "\(n) ✓" : "0 ✗未索引")"
+                }
+                lines.append("最新 3 个:")
+                lines.append(contentsOf: sorted.prefix(3).map(line))
+                lines.append("最旧 3 个:")
+                lines.append(contentsOf: sorted.suffix(3).map(line))
+                let missing = assets.filter { (stats.perVideo[$0.localIdentifier] ?? 0) == 0 }
+                lines.append("未索引视频:\(missing.count) 个")
+                if let oldest = missing.map({ ($0.creationDate ?? .distantPast, $0) }).min(by: { $0.0 < $1.0 }) {
+                    let d = DateFormatter.localizedString(from: oldest.0, dateStyle: .medium, timeStyle: .none)
+                    lines.append("最旧未索引:\(d)")
+                }
+            } catch {
+                lines.append("诊断失败:\(error.localizedDescription)")
+            }
+            let out = lines.joined(separator: "
+")
+            await MainActor.run {
+                videoDiagText = out
+                videoDiagRunning = false
+            }
+        }
+        _ = store
+    }
 
     private var tuningSection: some View {
         Section("索引选项") {
