@@ -265,16 +265,24 @@ final class SearchEngine {
         }
 
         // 文件语义通道:Gemma 文本嵌入查文件名/内容。
-        // 文本-文本嵌入基线相似度高(无关内容也常 ≥0.3,「马尔代夫」灌入
-        // 汇丰结单/rar 事故):全局搜索只在「真提及/强相关」(≥0.50)时让
-        // 文件出现;文件标签页(范围=文件)才是完整语义浏览(0.30+相对截断)
+        // 绝对门槛不可靠:嵌入基线高且随查询/语言漂移(「马尔代夫」能把
+        // 汇丰结单和 rar 灌进来,0.30/0.50 都拦不住)。改自校准离群检测:
+        // 低门槛取候选后,只有「最高分 ≥0.40 且显著高于中位数(+0.10)」
+        // 才认为查询真的指向文件,否则整通道静默。
+        // 文件标签页(范围=文件)不做离群门槛,保留完整语义浏览。
         if !fileKinds.isEmpty, let gemma {
             let q = try gemma.embedQuery(concept)
             var fileHits = Self.dedupByRef(try store.search(
                 space: gemma.space, kinds: fileKinds, query: q, limit: topK,
-                minScore: scope == .file ? 0.30 : 0.50))
-            let best = fileHits.first?.score ?? 0
-            if best > 0 { fileHits = fileHits.filter { $0.score >= best * 0.70 } }
+                minScore: scope == .file ? 0.25 : 0.20))
+            if scope != .file, fileHits.count > 1 {
+                let scores = fileHits.map(\.score).sorted()
+                let median = scores[scores.count / 2]
+                let best = scores.last ?? 0
+                if best < 0.40 || best - median < 0.10 { fileHits = [] }
+            }
+            let topScore = fileHits.first?.score ?? 0
+            if topScore > 0 { fileHits = fileHits.filter { $0.score >= topScore * 0.75 } }
             if fileHits.count > 60 { fileHits = Array(fileHits.prefix(60)) }
             channels.append((1.0, fileHits))
         }
