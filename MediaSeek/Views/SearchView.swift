@@ -1,6 +1,11 @@
 import SwiftUI
 import Photos
 
+/// 结果维度:一次搜索同时给出 全部/文字吻合/语义吻合 三套,可切换查看
+enum ResultTab: Hashable {
+    case all, text, semantic
+}
+
 struct SearchView: View {
     @EnvironmentObject var app: AppModel
 
@@ -20,6 +25,11 @@ struct SearchView: View {
     // 结果内收窄历史:每次收窄前压栈,可逐步退回上一轮
     @State private var refineHistory: [(query: String, results: [DisplayHit], baseIDs: Set<String>, lastCount: Int)] = []
     @State private var lastExecutedQuery = ""
+    // 三维度结果切换:全部 / 文字吻合 / 语义吻合(结果集按命中通道归类)
+    @State private var resultTab: ResultTab = .all
+    @State private var textHitIDs: Set<String> = []
+    @State private var timeChip: String?
+    @State private var placeChip: String?
     @State private var batchTagText = ""
     @State private var showTagAlert = false
     @State private var showDeleteDialog = false
@@ -89,6 +99,10 @@ struct SearchView: View {
                     query = ""
                     results = []
                     searchedOnce = false
+                    textHitIDs = []
+                    timeChip = nil
+                    placeChip = nil
+                    resultTab = .all
                     refineHistory.removeAll()
                 } label: {
                     Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
@@ -167,6 +181,17 @@ struct SearchView: View {
             .padding(.vertical, 6)
         } else if searchedOnce {
             VStack(alignment: .leading, spacing: 2) {
+                if !results.isEmpty {
+                    Picker("", selection: $resultTab) {
+                        let textN = results.filter { textHitIDs.contains($0.id) }.count
+                        Text("全部 \(results.count)").tag(ResultTab.all)
+                        Text("文字 \(textN)").tag(ResultTab.text)
+                        Text("语义 \(results.count - textN)").tag(ResultTab.semantic)
+                    }
+                    .pickerStyle(.segmented)
+                    .padding(.horizontal)
+                    .padding(.bottom, 2)
+                }
                 HStack(spacing: 10) {
                     if selectionMode {
                         Text("已选 \(selected.count) 项")
@@ -218,6 +243,21 @@ struct SearchView: View {
                             actionsMenu
                         }
                     }
+                }
+                if timeChip != nil || placeChip != nil {
+                    HStack(spacing: 8) {
+                        if let t = timeChip {
+                            Label(t, systemImage: "calendar").font(.caption)
+                                .padding(.horizontal, 8).padding(.vertical, 3)
+                                .background(Color.blue.opacity(0.10), in: Capsule())
+                        }
+                        if let p = placeChip {
+                            Label(p, systemImage: "mappin").font(.caption)
+                                .padding(.horizontal, 8).padding(.vertical, 3)
+                                .background(Color.blue.opacity(0.10), in: Capsule())
+                        }
+                    }
+                    .padding(.horizontal)
                 }
                 if !results.isEmpty && !selectionMode && colorFilter == nil {
                     Text("百分比 = 相对相关度(第一名 100%),非绝对概率")
@@ -358,8 +398,14 @@ struct SearchView: View {
     private var selectedHits: [DisplayHit] { results.filter { selected.contains($0.id) } }
 
     private var visibleResults: [DisplayHit] {
-        guard let cf = colorFilter else { return results }
-        return results.filter { $0.color == cf }
+        var out = results
+        switch resultTab {
+        case .all: break
+        case .text: out = out.filter { textHitIDs.contains($0.id) }
+        case .semantic: out = out.filter { !textHitIDs.contains($0.id) }
+        }
+        guard let cf = colorFilter else { return out }
+        return out.filter { $0.color == cf }
     }
 
     private func colorFor(_ name: String) -> Color {
@@ -636,11 +682,13 @@ struct SearchView: View {
         }
         Task.detached(priority: .userInitiated) { [scope, refining] in
             var hits: [DisplayHit] = []
+            var outcome = SearchOutcome.empty
             var ms = 0
             do {
                 let start = Date()
-                hits = try await app.search.search(q, scope: scope,
-                                                   within: refining ? refineBaseIDs : nil)
+                outcome = try await app.search.search(q, scope: scope,
+                                                      within: refining ? refineBaseIDs : nil)
+                hits = outcome.hits
                 ms = Int(Date().timeIntervalSince(start) * 1000)
                 if refining {
                     // 硬保证:结果内搜索的输出绝不超过基数集合(数学不变量)
@@ -656,6 +704,10 @@ struct SearchView: View {
                 results = hits
                 elapsedMs = ms
                 lastExecutedQuery = q
+                textHitIDs = outcome.textIDs
+                timeChip = outcome.timeLabel
+                placeChip = outcome.placeLabel
+                resultTab = q.hasPrefix("文字:") ? .text : (q.hasPrefix("语义:") ? .semantic : .all)
                 searching = false
                 // 级联收窄:本轮结果自动成为下一轮「结果内」的范围
                 if refining {

@@ -1,5 +1,6 @@
 import Foundation
 import Photos
+import CoreLocation
 
 enum SearchScope: String, CaseIterable, Identifiable {
     case all = "全部"
@@ -101,31 +102,98 @@ final class SearchEngine {
             .filter { !$0.isEmpty }
     }
 
-    // topK 4000 ≈ 全库:SQLite 向量检索本就全表扫描,加大 LIMIT 几乎零成本
+// topK 4000 ≈ 全库:SQLite 向量检索本就全表扫描,加大 LIMIT 几乎零成本
+
+/// 一次搜索的完整产出:全部命中 + 文字命中集合(供 全部/文字/语义 三维度切换)
+/// + 已应用的时间/地点标签(展示用)
+struct SearchOutcome {
+    let hits: [DisplayHit]
+    let textIDs: Set<String>
+    let timeLabel: String?
+    let placeLabel: String?
+    static let empty = SearchOutcome(hits: [], textIDs: [], timeLabel: nil, placeLabel: nil)
+}
+
     func search(_ rawQuery: String, scope: SearchScope, topK: Int = 4000,
-                within: Set<String>? = nil) async throws -> [DisplayHit] {
-        let raw = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !raw.isEmpty else { return [] }
+                within: Set<String>? = nil) async throws -> SearchOutcome {
+        let raw = rawQuery.trimmingCharacters(in: .whitespaces)
+        guard !raw.isEmpty else { return .empty }
         let spec = Self.parseQuery(raw)
-        let query = QueryUnderstanding.core(spec.body)
-        guard !query.isEmpty else { return [] }
+        var query = QueryUnderstanding.core(spec.body)
+        guard !query.isEmpty else { return .empty }
 
         let semanticOnly = spec.semanticOnly
         let siglip = await MainActor.run { models.siglip }
         lastSemanticTopScore = nil
 
-        // 结果内搜索:不在全库重搜再取交集(会受排名截断/重建进度影响),
-        // 而是用现有索引对上一轮照片逐条件核验——文字条件直接查这些照片的
-        // OCR 文字,语义条件查它们的视觉向量,全部条件满足才保留
-        if let within, !within.isEmpty {
-            return try await searchWithin(query: query, spec: spec, semanticOnly: semanticOnly,
-                                          scope: scope, topK: topK, within: within, siglip: siglip)
+        // 自然语言时间/地点:仅普通查询(文字:/语义:/组合语法不参与)。
+        // 时间词命中即剥离;地点「在XX」需地理编码成功才剥离,失败原样保留。
+        var dateRange: QueryDateRange?
+        var placeRegion: CLCircularRegion?
+        var placeLabel: String?
+        if spec.channel == .any, spec.connector == .none, within == nil {
+            let t = TimeQueryParser.parse(query)
+            if let r = t.range {
+                dateRange = r
+                query = t.remaining.trimmingCharacters(in: .whitespaces)
+            }
+            if !query.isEmpty, let cand = PlaceQueryParser.extract(query) {
+                if let region = await PlaceGeocoder.region(for: cand.name) {
+                    placeRegion = region
+                    placeLabel = cand.name
+                    query = cand.remaining.trimmingCharacters(in: .whitespaces)
+                }
+            }
+            if query.isEmpty, dateRange == nil, placeRegion == nil {
+                query = QueryUnderstanding.core(spec.body)   // 时间词没能构成区间,回退原查询
+            }
         }
 
-        // 显式语法(文字:/and:/or:/and 语义: 等)走独立流程;纯「语义:词」走主流程但跳过 OCR
-        if spec.channel == .text || spec.connector != .none {
-            return try await searchScoped(spec: spec, scope: scope, topK: topK, siglip: siglip, within: nil)
+        // 纯时间/地点浏览:无内容词,按拍摄时间倒序列出该时段的照片/视频/文件
+        if query.isEmpty, dateRange != nil || placeRegion != nil {
+            var hits: [SearchHit] = []
+            photo.fetchAllAssets().enumerateObjects { asset, _, _ in
+                guard hits.count < topK else { return }
+                guard Self.assetPasses(asset, dateRange: dateRange, place: placeRegion) else { return }
+                hits.append(SearchHit(kind: asset.mediaType == .video ? .videoFrame : .photo,
+                                      refKey: asset.localIdentifier, frameIndex: 0,
+                                      space: "browse", title: nil, date: asset.creationDate,
+                                      score: 1.0, color: nil))
+            }
+            if let allFiles = try? imports.allFiles() {
+                for f in allFiles where hits.count < topK {
+                    if fileMatchesFilters(f, dateRange: dateRange) {
+                        hits.append(SearchHit(kind: .file, refKey: f.id, frameIndex: 0,
+                                              space: "browse", title: f.name,
+                                              date: f.addedAt, score: 1.0, color: nil))
+                    }
+                }
+            }
+            return SearchOutcome(hits: resolve(hits), textIDs: [],
+                                 timeLabel: dateRange?.label, placeLabel: placeLabel)
         }
+
+        if let within, !within.isEmpty {
+            return SearchOutcome(hits: try await searchWithin(query: query, spec: spec,
+                                   semanticOnly: semanticOnly, scope: scope, topK: topK,
+                                   within: within, siglip: siglip),
+                                 textIDs: [], timeLabel: nil, placeLabel: nil)
+        }
+        if spec.channel == .text || spec.connector != .none {
+            return SearchOutcome(hits: try await searchScoped(spec: spec, scope: scope,
+                                   topK: topK, siglip: siglip, within: nil),
+                                 textIDs: [], timeLabel: nil, placeLabel: nil)
+        }
+        return try await runMainSearch(query: query, spec: spec, semanticOnly: semanticOnly,
+                                       scope: scope, topK: topK, siglip: siglip,
+                                       dateRange: dateRange, placeRegion: placeRegion,
+                                       placeLabel: placeLabel)
+    }
+
+    private func runMainSearch(query: String, spec: QuerySpec, semanticOnly: Bool,
+                               scope: SearchScope, topK: Int, siglip: SigLIPEmbedder?,
+                               dateRange: QueryDateRange?, placeRegion: CLCircularRegion?,
+                               placeLabel: String?) async throws -> SearchOutcome {
         // 多词查询:「2026 电脑屏幕」→ 含数字的词走 OCR 文字匹配,
         // 其余词走视觉/标签;「或」语义:照片满足任一条件(像/含字)即显示
         let terms = Self.splitTerms(query)
@@ -133,8 +201,8 @@ final class SearchEngine {
         let visualTerms = terms.filter { !Self.containsDigit($0) }
         let concept = visualTerms.isEmpty ? query : visualTerms.joined(separator: " ")
 
-        let imageKinds: [ItemKind] = scope == .all || scope == .photo
-            ? [.photo] : (scope == .video ? [.videoFrame] : [])
+        let imageKinds: [ItemKind] = scope == .all ? [.photo, .videoFrame]
+            : (scope == .photo ? [.photo] : (scope == .video ? [.videoFrame] : []))
         // Gemma 语义只负责文件名/文件内容——照片标签的余弦虚高且区分度低
         // (「猫」vs「people, adult」和 vs「cat」差不了几分),会顶掉真命中
         let fileKinds: [ItemKind] = scope == .all || scope == .file ? [.file, .fileChunk] : []
@@ -282,7 +350,10 @@ final class SearchEngine {
                       space: $0.hit.space, title: $0.hit.title, date: $0.hit.date,
                       score: Float($0.score / maxScore), color: $0.hit.color)
         }
-        return resolve(merged)
+        return SearchOutcome(
+            hits: resolve(merged, dateRange: dateRange, place: placeRegion),
+            textIDs: Set(merged.filter { $0.space == "ocr" }.map { "\($0.kind.rawValue)-\($0.refKey)" }),
+            timeLabel: dateRange?.label, placeLabel: placeLabel)
     }
 
     /// 查询词集合:清洗后的原文分词 + 词典英译分词,再做一跳同义扩展(供标签 token 比对)。
@@ -487,7 +558,32 @@ final class SearchEngine {
         return best.values.sorted { $0.score > $1.score }
     }
 
-    private func resolve(_ hits: [SearchHit]) -> [DisplayHit] {
+    private static func assetPasses(_ asset: PHAsset, dateRange: QueryDateRange?,
+                                    place: CLCircularRegion?) -> Bool {
+        if let dateRange {
+            guard let d = asset.creationDate, d >= dateRange.start, d < dateRange.end else { return false }
+        }
+        if let place {
+            guard let loc = asset.location, place.contains(loc.coordinate) else { return false }
+        }
+        return true
+    }
+
+    /// 文件时间过滤:优先文件系统的修改/创建时间,拿不到退回导入时间
+    private func fileMatchesFilters(_ record: ImportedFile, dateRange: QueryDateRange?) -> Bool {
+        guard let dateRange else { return true }
+        if let url = try? imports.resolveURL(record) {
+            defer { url.stopAccessingSecurityScopedResource() }
+            if let v = try? url.resourceValues(forKeys: [.contentModificationDateKey, .creationDateKey]) {
+                let d = v.contentModificationDate ?? v.creationDate ?? record.addedAt
+                return d >= dateRange.start && d < dateRange.end
+            }
+        }
+        return record.addedAt >= dateRange.start && record.addedAt < dateRange.end
+    }
+
+    private func resolve(_ hits: [SearchHit], dateRange: QueryDateRange? = nil,
+                         place: CLCircularRegion? = nil) -> [DisplayHit] {
         let assetIDs = Set(hits.filter {
             $0.kind == .photo || $0.kind == .videoFrame || $0.kind == .photoLabel
         }.map { $0.refKey })
@@ -503,6 +599,7 @@ final class SearchEngine {
             switch hit.kind {
             case .photo, .photoLabel, .userTag, .videoFrame:
                 guard let asset = assets[hit.refKey] else { continue }
+                guard Self.assetPasses(asset, dateRange: dateRange, place: place) else { continue }
                 let name = asset.mediaType == .video ? "视频" : "照片"
                 out.append(DisplayHit(id: "\(hit.kind.rawValue)-\(hit.refKey)",
                                       refKey: hit.refKey,
@@ -514,6 +611,7 @@ final class SearchEngine {
                                       color: hit.color ?? store.colorForRef(hit.refKey)))
             case .file, .fileChunk:
                 guard let file = try? store.file(id: hit.refKey) else { continue }
+                guard fileMatchesFilters(file, dateRange: dateRange) else { continue }
                 out.append(DisplayHit(id: "\(hit.kind.rawValue)-\(hit.refKey)",
                                       refKey: hit.refKey,
                                       target: .file(file),
