@@ -235,7 +235,7 @@ final class SearchEngine {
         // 以 ≥0.60 命中,造成整库截图照灌进结果(「医学出生证明」事故)
         // 显式「语义:」查询门槛放宽到 0.14(用户点名要语义召回)
         if !imageKinds.isEmpty, let siglip {
-            let q = try siglip.embedQuery(QueryUnderstanding.english(for: concept) ?? concept)
+            let q = try siglip.embedQuery(Self.siglipQuery(concept))
             let floor = semanticOnly ? 0.14 : 0.18
             var hits = Self.dedupByRef(try store.search(
                 space: siglip.space, kinds: imageKinds, query: q, limit: topK, minScore: Float(floor)))
@@ -490,11 +490,20 @@ final class SearchEngine {
         return resolve(combine(perTerm, connector: spec.connector))
     }
 
+    /// SigLIP2 官方零样本模板("This is a photo of X.")对短语类查询更友好;
+    /// 词典命中的精选英文描述套模板,未命中(长句/自由文本)保持原文
+    private static func siglipQuery(_ concept: String) -> String {
+        if let en = QueryUnderstanding.english(for: concept) {
+            return "This is a photo of \(en)."
+        }
+        return concept
+    }
+
     /// 单词语义命中(SigLIP 视觉,门槛 0.14 + 0.08 弱信号兜底 + 相对尾部截断)
     private func semanticHits(_ term: String, siglip: SigLIPEmbedder?, topK: Int,
                               within: Set<String>? = nil) -> [SearchHit] {
         guard let siglip else { return [] }
-        guard let q = try? siglip.embedQuery(QueryUnderstanding.english(for: term) ?? term) else { return [] }
+        guard let q = try? siglip.embedQuery(Self.siglipQuery(term)) else { return [] }
         // 结果内核验:分数只在基数集合内算,门槛放宽、相对截断以集合内最佳为基准——
         // 否则全局排名的尾部截断会在取交集前把候选砍光(「行情图 ∩ 语义:电脑屏幕=0」事故:
         // 全库最高分是实拍屏幕,行情截图全被 85% 线砍掉,交集自然为空)

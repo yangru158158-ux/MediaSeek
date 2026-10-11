@@ -172,6 +172,11 @@ enum QueryUnderstanding {
         ("油画", "painting"), ("涂鸦", "graffiti"), ("二维码", "qr code"),
         ("证件", "id card"), ("护照", "passport"), ("门票", "ticket"),
         ("快递单", "shipping label"), ("说明书", "manual"), ("笔记", "notes"),
+        // 旅行/目的地(英文描述短语供 SigLIP 检索;套官方 "This is a photo of X." 模板)
+        ("马尔代夫", "maldives tropical island beach"), ("三亚", "sanya tropical beach"),
+        ("巴厘岛", "bali tropical beach"), ("普吉岛", "phuket tropical beach"),
+        ("泰国", "thailand"), ("日本", "japan"), ("韩国", "korea"),
+        ("夏威夷", "hawaii beach"), ("新加坡", "singapore"), ("欧洲", "europe travel"),
         // 颜色(视觉词典兜底;主通道是颜色筛选器)
         ("蓝色", "blue"), ("红色", "red"), ("绿色", "green"), ("黄色", "yellow"),
         ("黑色", "black"), ("白色", "white"), ("粉色", "pink"), ("紫色", "purple"),
