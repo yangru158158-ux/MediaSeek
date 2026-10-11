@@ -28,6 +28,16 @@ struct DisplayHit: Identifiable {
 
 /// 检索:查询同时嵌入 SigLIP 空间(查图/查视频)与 EmbeddingGemma 空间
 /// (查文件、文本块、照片标签),合并去重后按相似度排序。
+/// 一次搜索的完整产出:全部命中 + 文字命中集合(供 全部/文字/语义 三维度切换)
+/// + 已应用的时间/地点标签(展示用)
+struct SearchOutcome {
+    let hits: [DisplayHit]
+    let textIDs: Set<String>
+    let timeLabel: String?
+    let placeLabel: String?
+    static let empty = SearchOutcome(hits: [], textIDs: [], timeLabel: nil, placeLabel: nil)
+}
+
 final class SearchEngine {
     private let store: VectorStore
     private let models: ModelManager
@@ -103,17 +113,6 @@ final class SearchEngine {
     }
 
 // topK 4000 ≈ 全库:SQLite 向量检索本就全表扫描,加大 LIMIT 几乎零成本
-
-/// 一次搜索的完整产出:全部命中 + 文字命中集合(供 全部/文字/语义 三维度切换)
-/// + 已应用的时间/地点标签(展示用)
-struct SearchOutcome {
-    let hits: [DisplayHit]
-    let textIDs: Set<String>
-    let timeLabel: String?
-    let placeLabel: String?
-    static let empty = SearchOutcome(hits: [], textIDs: [], timeLabel: nil, placeLabel: nil)
-}
-
     func search(_ rawQuery: String, scope: SearchScope, topK: Int = 4000,
                 within: Set<String>? = nil) async throws -> SearchOutcome {
         let raw = rawQuery.trimmingCharacters(in: .whitespaces)
