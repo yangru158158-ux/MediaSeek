@@ -51,7 +51,12 @@ struct SearchView: View {
                 Text("将为选中的 \(selected.count) 个项目添加标签")
             }
             .confirmationDialog("删除 \(selected.count) 个选中项", isPresented: $showDeleteDialog, titleVisibility: .visible) {
-                Button("从系统相册删除(移入最近删除)", role: .destructive) { deleteFromPhotos() }
+                if hasFileSelection {
+                    Button("删除导入文件记录(原文件保留不动)", role: .destructive) { deleteImportedFiles() }
+                }
+                if hasAssetSelection {
+                    Button("从系统相册删除(移入最近删除)", role: .destructive) { deleteFromPhotos() }
+                }
                 Button("仅从索引移除(下次同步会回来)", role: .destructive) { removeFromIndexOnly() }
                 Button("取消", role: .cancel) {}
             } message: {
@@ -504,6 +509,41 @@ struct SearchView: View {
         selected.removeAll()
         selectionMode = false
         app.notify("已从索引移除(下次同步会重新索引)")
+    }
+
+    // MARK: - 导入文件删除(搜索结果里的文件卡片)
+
+    private var selectedFileRecords: [ImportedFile] {
+        selectedHits.compactMap { hit in
+            if case .file(let f) = hit.target { return f }
+            return nil
+        }
+    }
+    private var hasFileSelection: Bool { !selectedFileRecords.isEmpty }
+    private var hasAssetSelection: Bool { selectedHits.contains { hit in
+        if case .asset = hit.target { return true }
+        return false
+    } }
+
+    /// 删除导入文件记录:files 行、全类型向量、OCR 原文一次清净;原文件保留不动
+    private func deleteImportedFiles() {
+        let files = selectedFileRecords
+        guard !files.isEmpty else { return }
+        exporting = true
+        Task {
+            var ok = 0
+            for f in files {
+                do { try app.imports.remove(f); ok += 1 } catch { await MainActor.run { app.fail(error) } }
+            }
+            let ids = Set(files.map(\.id))
+            await MainActor.run {
+                results.removeAll { selected.contains($0.id) || ids.contains($0.refKey) }
+                selected.removeAll()
+                selectionMode = false
+                app.notify("已删除 \(ok) 个文件记录(原文件保留,索引同时清除)")
+            }
+            exporting = false
+        }
     }
 
     private func doRename() {

@@ -13,6 +13,8 @@ struct LibraryView: View {
     @State private var showFolderPicker = false
     @State private var confirmRebuild = false
     @State private var refreshPending = false
+    @State private var filesExpanded = false
+    @State private var previewFile: ImportedFile?
 
     private let columns = [GridItem(.flexible()), GridItem(.flexible())]
 
@@ -44,6 +46,16 @@ struct LibraryView: View {
                                 isPresented: $confirmRebuild, titleVisibility: .visible) {
                 Button("全量重建", role: .destructive) { app.indexing.rebuildAll() }
                 Button("取消", role: .cancel) {}
+            }
+            .sheet(item: $previewFile) { f in
+                NavigationStack {
+                    FilePreviewScreen(record: f)
+                        .toolbar {
+                            ToolbarItem(placement: .topBarTrailing) {
+                                Button("完成") { previewFile = nil }
+                            }
+                        }
+                }
             }
         }
     }
@@ -164,26 +176,62 @@ struct LibraryView: View {
 
     @ViewBuilder
     private var importedSection: some View {
-        Section("已导入文件") {
-            ForEach(importedFiles) { file in
-                HStack(spacing: 10) {
-                    FileThumbView(record: file)
-                        .frame(width: 40, height: 40)
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(file.name).font(.footnote).lineLimit(1)
-                        Text(ByteCountFormatter.string(fromByteCount: file.size, countStyle: .file)
-                             + (file.indexed ? " · 已索引" : " · 待索引"))
-                            .font(.caption2).foregroundStyle(.secondary)
+        Section {
+            if importedFiles.count > 8 {
+                Button {
+                    withAnimation { filesExpanded.toggle() }
+                } label: {
+                    HStack {
+                        Text(filesExpanded ? "收起列表" : "展开全部 \(importedFiles.count) 个文件")
+                            .font(.footnote)
+                        Image(systemName: filesExpanded ? "chevron.up" : "chevron.down")
+                            .font(.caption2)
                     }
                 }
             }
-            .onDelete { indexSet in
-                for i in indexSet {
-                    try? app.imports.remove(importedFiles[i])
+            if filesExpanded || importedFiles.count <= 8 {
+                ForEach(importedFiles) { file in
+                    Button {
+                        previewFile = file
+                    } label: {
+                        HStack(spacing: 10) {
+                            FileThumbView(record: file)
+                                .frame(width: 40, height: 40)
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(file.name).font(.footnote).lineLimit(1)
+                                Text(ByteCountFormatter.string(fromByteCount: file.size, countStyle: .file)
+                                     + (file.indexed ? " · 已索引" : " · 待索引"))
+                                    .font(.caption2).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Image(systemName: "doc.text.magnifyingglass")
+                                .font(.caption).foregroundStyle(.tertiary)
+                        }
+                    }
+                    .buttonStyle(.plain)
                 }
-                refresh()
+                .onDelete { indexSet in
+                    for i in indexSet {
+                        try? app.imports.remove(importedFiles[i])
+                    }
+                    refresh()
+                }
+            } else {
+                Text("列表已收起,点上方展开;左滑删除仍在搜索结果页可用")
+                    .font(.caption).foregroundStyle(.secondary)
             }
+        } header: {
+            Button {
+                withAnimation { filesExpanded.toggle() }
+            } label: {
+                HStack(spacing: 4) {
+                    Text("已导入文件(\(importedFiles.count))")
+                    Image(systemName: filesExpanded ? "chevron.down" : "chevron.right")
+                        .font(.caption2)
+                }
+            }
+            .buttonStyle(.plain)
         }
     }
 

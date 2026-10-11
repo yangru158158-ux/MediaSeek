@@ -170,6 +170,16 @@ struct DetailSheet: View {
             }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
+                if case .file(let record) = hit.target {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button(role: .destructive) {
+                            try? app.imports.remove(record)
+                            dismiss()
+                        } label: {
+                            Image(systemName: "trash")
+                        }
+                    }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("完成") { dismiss() }
                 }
