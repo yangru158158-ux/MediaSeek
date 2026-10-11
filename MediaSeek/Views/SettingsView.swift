@@ -141,7 +141,7 @@ struct SettingsView: View {
                 lines.append("已有帧向量视频数:\(stats.videos)")
                 let opts = PHFetchOptions()
                 opts.predicate = NSPredicate(format: "mediaType = %d", PHAssetMediaType.video.rawValue)
-                let fetch = PHAsset.fetchAssets(with: opts, options: nil)
+                let fetch = PHAsset.fetchAssets(with: .video, options: opts)
                 lines.append("相册视频总数:\(fetch.count)")
                 var assets: [PHAsset] = []
                 fetch.enumerateObjects { a, _, _ in assets.append(a) }
