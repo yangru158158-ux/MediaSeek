@@ -1,4 +1,5 @@
 import Foundation
+import Compression
 import Photos
 import AVFoundation
 import UIKit
@@ -436,7 +437,10 @@ final class IndexingCoordinator: ObservableObject {
                                          space: gemma.space, vector: vec,
                                          title: String(page.text.prefix(60)), date: date)
                     }
-                } else if let text = TextExtractor.extractText(at: url), !text.isEmpty {
+                } else if let text = TextExtractor.extractText(at: url) {
+                    // 原文入 ocr_text(与扫描 PDF 同路径):内容可被 文字: 精确命中。
+                    // 无文字也写 "" 占位:open() 自愈按「无 OCR 行」挑文件,占位防反复重处理
+                    try store.saveOCR(refKey: record.id, text: String(text.prefix(120_000)))
                     for (i, chunk) in TextExtractor.chunks(of: text).enumerated() {
                         let vec = try gemma.embedDocument(chunk)
                         try store.upsert(kind: .fileChunk, refKey: record.id, frameIndex: i,
@@ -507,19 +511,26 @@ enum TextExtractor {
 
     static func extractText(at url: URL) -> String? {
         let ext = url.pathExtension.lowercased()
-        // 大于 2MB 的纯文本不做全文索引,避免病态文件
+        if ext == "xlsx" || ext == "xlsm" {
+            return xlsxText(at: url) ?? ""
+        }
+        // 大于 10MB 的纯文本不抽全文,避免病态文件(用户 3.5MB 交易 CSV 需覆盖)。
+        // 支持的类型一律返回 String(空串而非 nil):调用方写 "" 占位 OCR 行,
+        // open() 的自愈按「无 OCR 行」挑文件,占位防止每个同步反复重处理
         if textExtensions.contains(ext) {
-            guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size < 2_000_000 else { return nil }
-            guard let data = try? Data(contentsOf: url) else { return nil }
+            guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize else { return "" }
+            guard size < 10_000_000 else { return "" }
+            guard let data = try? Data(contentsOf: url) else { return "" }
             if ext == "rtf" {
                 guard let attr = try? NSAttributedString(
                     data: data,
                     options: [.documentType: NSAttributedString.DocumentType.rtf],
-                    documentAttributes: nil) else { return nil }
+                    documentAttributes: nil) else { return "" }
                 return attr.string
             }
             return String(data: data, encoding: .utf8)
                 ?? String(data: data, encoding: .isoLatin1)
+                ?? ""
         }
         if ext == "pdf" {
             guard let doc = PDFDocument(url: url) else { return nil }
@@ -557,6 +568,34 @@ enum TextExtractor {
         return out
     }
 
+    /// xlsx/xlsm(Office Open XML)内容抽取:本质是 ZIP 容器。
+    /// iOS 无公开 zip API,用自实现最小读取器解包,只取 sharedStrings 与
+    /// 各 worksheet;单元格文本按行拼接(数字/日期序列号以原值入文,供编号检索)。
+    static func xlsxText(at url: URL) -> String? {
+        guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size < 20_000_000,
+              let data = try? Data(contentsOf: url),
+              let entries = MiniZip.entries(of: data) else { return nil }
+        var shared: [String] = []
+        for entry in entries where entry.name == "xl/sharedStrings.xml" {
+            guard let xml = MiniZip.entryData(entry, in: data) else { continue }
+            let parser = XMLParser(data: xml)
+            let delegate = XLSXTextParser(mode: .sharedStrings, shared: [])
+            parser.delegate = delegate
+            parser.parse()
+            shared = delegate.shared
+        }
+        var rows: [String] = []
+        for entry in entries where entry.name.hasPrefix("xl/worksheets/sheet") {
+            guard let xml = MiniZip.entryData(entry, in: data) else { continue }
+            let parser = XMLParser(data: xml)
+            let delegate = XLSXTextParser(mode: .sheet, shared: shared)
+            parser.delegate = delegate
+            parser.parse()
+            rows.append(contentsOf: delegate.rows)
+        }
+        return rows.isEmpty ? nil : rows.joined(separator: "\n")
+    }
+
     /// 按段落聚合为 ~500 字块,相邻块重叠 ~80 字
     static func chunks(of text: String, maxChars: Int = 500, overlap: Int = 80) -> [String] {
         var chunks: [String] = []
@@ -574,5 +613,157 @@ enum TextExtractor {
         }
         if !current.isEmpty { chunks.append(current) }
         return chunks
+    }
+}
+
+// MARK: - 最小 ZIP 只读解析器(xlsx 解包用)
+
+/// xlsx 即 ZIP 容器,iOS 又无公开 zip API——自实现只读路径:
+/// 尾部找 EOCD → 中央目录逐条目 → 按本地头偏移取数据。
+/// 只走中央目录(尺寸字段可靠,数据描述符场景天然兼容),zip64/加密不在范围。
+enum MiniZip {
+    struct Entry {
+        let name: String
+        let method: UInt16          // 0=stored 8=deflate
+        let compressedSize: Int
+        let uncompressedSize: Int
+        let headerOffset: Int
+    }
+
+    static func entries(of data: Data) -> [Entry]? {
+        guard data.count >= 22 else { return nil }
+        var eocd = -1
+        let floorBound = max(0, data.count - 65557)   // 注释区最长 65535 + 固定 22
+        var i = data.count - 22
+        while i >= floorBound {
+            if data[i] == 0x50, data[i + 1] == 0x4B, data[i + 2] == 0x05, data[i + 3] == 0x06 {
+                eocd = i
+                break
+            }
+            i -= 1
+        }
+        guard eocd >= 0, eocd + 22 <= data.count else { return nil }
+        let count = u16(data, eocd + 10)
+        var p = u32(data, eocd + 16)
+        var out: [Entry] = []
+        for _ in 0..<count {
+            guard p + 46 <= data.count, u32(data, p) == 0x02014B50 else { break }
+            let nameLen = u16(data, p + 28), extraLen = u16(data, p + 30), commentLen = u16(data, p + 32)
+            guard let nameData = sub(data, p + 46, nameLen),
+                  let name = String(data: nameData, encoding: .utf8) else { break }
+            out.append(Entry(name: name,
+                             method: UInt16(u16(data, p + 10)),
+                             compressedSize: u32(data, p + 20),
+                             uncompressedSize: u32(data, p + 24),
+                             headerOffset: u32(data, p + 42)))
+            p += 46 + nameLen + extraLen + commentLen
+        }
+        return out.isEmpty ? nil : out
+    }
+
+    static func entryData(_ entry: Entry, in data: Data) -> Data? {
+        let p = entry.headerOffset
+        guard p + 30 <= data.count, u32(data, p) == 0x04034B50 else { return nil }
+        let nameLen = u16(data, p + 26), extraLen = u16(data, p + 28)
+        guard let raw = sub(data, p + 30 + nameLen + extraLen, entry.compressedSize) else { return nil }
+        guard entry.method == 8 else { return entry.method == 0 ? raw : nil }
+        return inflate(raw, size: entry.uncompressedSize)
+    }
+
+    private static func sub(_ data: Data, _ offset: Int, _ length: Int) -> Data? {
+        guard length >= 0, offset >= 0, offset + length <= data.count else { return nil }
+        return data.subdata(in: offset..<(offset + length))
+    }
+
+    private static func u16(_ d: Data, _ o: Int) -> Int { Int(d[o]) | Int(d[o + 1]) << 8 }
+    private static func u32(_ d: Data, _ o: Int) -> Int { u16(d, o) | u16(d, o + 2) << 16 }
+
+    /// zip 条目是 raw deflate;Compression 的 COMPRESSION_ZLIB 即 raw deflate,直接对接
+    private static func inflate(_ src: Data, size: Int) -> Data? {
+        guard size > 0 else { return Data() }
+        var dst = Data(count: size)
+        let n = dst.withUnsafeMutableBytes { dp -> Int in
+            src.withUnsafeBytes { sp -> Int in
+                guard let db = dp.baseAddress?.assumingMemoryBound(to: UInt8.self),
+                      let sb = sp.baseAddress?.assumingMemoryBound(to: UInt8.self) else { return -1 }
+                return compression_decode_buffer(db, size, sb, src.count, nil, COMPRESSION_ZLIB)
+            }
+        }
+        guard n >= 0 else { return nil }
+        dst.count = n
+        return dst
+    }
+}
+
+// MARK: - xlsx XML 文本抽取
+
+/// sharedStrings.xml 收集全部 <t>(富文本多段自动拼接);
+/// sheet 收集每行单元格文本。仅这两类 XML 有检索价值。
+final class XLSXTextParser: NSObject, XMLParserDelegate {
+    enum Mode { case sharedStrings, sheet }
+    private let mode: Mode
+    private var shared: [String]
+    private(set) var rows: [String] = []
+
+    private var siBuffer = ""
+    private var lineBuffer = ""
+    private var cellType = ""
+    private var cellValue = ""
+    private var cellText = ""
+    private var collecting: String?
+
+    init(mode: Mode, shared: [String]) {
+        self.mode = mode
+        self.shared = shared
+    }
+
+    func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?,
+                qualifiedName qName: String?, attributes attributeDict: [String: String] = [:]) {
+        switch elementName {
+        case "si": siBuffer = ""
+        case "row": lineBuffer = ""
+        case "c":
+            cellType = attributeDict["t"] ?? ""
+            cellValue = ""
+            cellText = ""
+        case "v", "t": collecting = elementName
+        default: break
+        }
+    }
+
+    func parser(_ parser: XMLParser, foundCharacters string: String) {
+        guard let tag = collecting else { return }
+        switch (mode, tag) {
+        case (.sharedStrings, "t"): siBuffer += string
+        case (.sheet, "v"): cellValue += string
+        case (.sheet, "t"): cellText += string
+        default: break
+        }
+    }
+
+    func parser(_ parser: XMLParser, foundCDATA CDATA: Data) {
+        if let s = String(data: CDATA, encoding: .utf8) { parser(self, foundCharacters: s) }
+    }
+
+    func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
+        collecting = nil
+        switch elementName {
+        case "si":
+            shared.append(siBuffer)
+        case "c":
+            let text: String
+            switch cellType {
+            case "s":
+                let idx = Int(cellValue) ?? -1
+                text = idx >= 0 && idx < shared.count ? shared[idx] : ""
+            case "inlineStr": text = cellText
+            case "b", "e": text = ""          // 布尔/错误值对检索是噪声
+            default: text = cellValue         // 数字/日期序列号/公式结果按原值入文
+            }
+            if !text.isEmpty { lineBuffer += (lineBuffer.isEmpty ? "" : " ") + text }
+        case "row":
+            if !lineBuffer.isEmpty { rows.append(lineBuffer) }
+        default: break
+        }
     }
 }

@@ -120,6 +120,19 @@ final class VectorStore {
         WHERE indexed = 1 AND lower(name || COALESCE(rel_path,'')) LIKE '%.pdf'
           AND id NOT IN (SELECT ref_key FROM ocr_text)
         """)
+        // 自愈:文本/表格文件在「原文入 ocr_text」改造(2MB 上限放宽/XLSX 内容索引)之前
+        // 已按旧逻辑索引,置回待索引补全文;新索引器对无文字文件写 "" 占位,故至多重处理一次
+        try? exec("""
+        UPDATE files SET indexed = 0
+        WHERE indexed = 1 AND (
+            lower(name || COALESCE(rel_path,'')) LIKE '%.xlsx' OR
+            lower(name || COALESCE(rel_path,'')) LIKE '%.xlsm' OR
+            lower(name || COALESCE(rel_path,'')) LIKE '%.csv' OR
+            lower(name || COALESCE(rel_path,'')) LIKE '%.tsv' OR
+            lower(name || COALESCE(rel_path,'')) LIKE '%.txt' OR
+            lower(name || COALESCE(rel_path,'')) LIKE '%.md'
+          ) AND id NOT IN (SELECT ref_key FROM ocr_text)
+        """)
         // 一次性迁移:历史向量未归一化(点积≠余弦,门槛随查询漂移)→ 统一单位化
         if !UserDefaults.standard.bool(forKey: "vec_norm_migrated_1") {
             var updates: [(rowid: Int64, vec: Data)] = []
