@@ -259,10 +259,10 @@ final class SearchEngine {
 
         // 标签精确通道(优先):词典英译+同义词与 Vision 英文标签 token 级比对,零幻觉
         var labelHits: [SearchHit] = []
-        // 标签行都是照片:视频范围(.video)不得参与,否则照片漏进视频结果
-        if imageKinds.contains(.photo) {
-            let tokens = Self.queryTokens(query: concept)
-            if !tokens.isEmpty, let rows = try? store.allPhotoLabels() {
+        let tokens = Self.queryTokens(query: concept)
+        if !tokens.isEmpty {
+            // 照片标签行(视频范围不得参与,否则照片漏进视频结果)
+            if imageKinds.contains(.photo), let rows = try? store.allPhotoLabels() {
                 var scored: [(refKey: String, matches: Int, title: String)] = []
                 for row in rows where among?.contains(row.refKey) ?? true {
                     let labelTokens = Set(row.title.lowercased()
@@ -275,6 +275,23 @@ final class SearchEngine {
                               space: "label", title: $0.title, date: nil,
                               score: Float($0.matches), color: nil)
                 })
+            }
+            // 视频帧标签:视频侧最可靠的召回(帧画面打 Vision 标签,与照片同款)。
+            // SigLIP 图文分数区分度不足(马尔代夫旅行视频 vs 抖音下载视频分不开),
+            // 标签零幻觉;结果卡带标签文本可解释
+            if scope == .all || scope == .video, let rows = try? store.allVideoFrameLabels() {
+                var scored: [(refKey: String, matches: Int, title: String)] = []
+                for row in rows where among?.contains(row.refKey) ?? true {
+                    let labelTokens = Set(row.title.lowercased()
+                        .components(separatedBy: CharacterSet(charactersIn: ", ")))
+                    let m = tokens.intersection(labelTokens).count
+                    if m > 0 { scored.append((row.refKey, m, row.title)) }
+                }
+                labelHits += scored.sorted { $0.matches > $1.matches }.prefix(topK).map {
+                    SearchHit(kind: .videoFrameLabel, refKey: $0.refKey, frameIndex: 0,
+                              space: "label", title: $0.title, date: nil,
+                              score: Float($0.matches), color: nil)
+                }
             }
         }
         if !labelHits.isEmpty { channels.append((1.6, labelHits)) }
@@ -662,7 +679,7 @@ final class SearchEngine {
     private func resolve(_ hits: [SearchHit], dateRange: QueryDateRange? = nil,
                          place: CLCircularRegion? = nil) -> [DisplayHit] {
         let assetIDs = Set(hits.filter {
-            $0.kind == .photo || $0.kind == .videoFrame || $0.kind == .photoLabel
+            $0.kind == .photo || $0.kind == .videoFrame || $0.kind == .photoLabel || $0.kind == .videoFrameLabel
         }.map { $0.refKey })
 
         var assets: [String: PHAsset] = [:]
@@ -674,7 +691,7 @@ final class SearchEngine {
         var out: [DisplayHit] = []
         for hit in hits {
             switch hit.kind {
-            case .photo, .photoLabel, .userTag, .videoFrame:
+            case .photo, .photoLabel, .userTag, .videoFrame, .videoFrameLabel:
                 guard let asset = assets[hit.refKey] else { continue }
                 guard Self.assetPasses(asset, dateRange: dateRange, place: place) else { continue }
                 let name = asset.mediaType == .video ? "视频" : "照片"

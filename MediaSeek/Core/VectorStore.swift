@@ -5,7 +5,7 @@ import Accelerate
 /// 媒体条目类别。photoLabel 是照片的 Vision 标签文本向量(gemma 空间),
 /// 让"一只猫"这类中文查询通过多语言文本模型命中照片。
 enum ItemKind: String, CaseIterable {
-    case photo, photoLabel, userTag, videoFrame, file, fileChunk
+    case photo, photoLabel, userTag, videoFrame, videoFrameLabel, file, fileChunk
 }
 
 struct SearchHit {
@@ -408,6 +408,19 @@ final class VectorStore {
         return out.map { (refKey: $0.0, title: $0.1) }
     } }
 
+    /// 全部视频帧标签行(视频侧的标签精确通道数据源)
+    func allVideoFrameLabels() throws -> [(refKey: String, title: String)] { try serialized {
+        guard let db else { return [] }
+        let stmt = try prepare("SELECT ref_key, title FROM items WHERE kind = 'videoFrameLabel' AND title IS NOT NULL")
+        defer { sqlite3_finalize(stmt) }
+        var out: [(String, String)] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            out.append((String(cString: sqlite3_column_text(stmt, 0)),
+                        String(cString: sqlite3_column_text(stmt, 1))))
+        }
+        return out.map { (refKey: $0.0, title: $0.1) }
+    } }
+
     /// 用户标签子串精确匹配(中文)
     func searchUserTags(query: String) throws -> [String] { try serialized {
         guard let db, !query.isEmpty else { return [] }
@@ -666,10 +679,10 @@ final class VectorStore {
         return (per.count, per)
     } }
 
-    /// 删除某视频的全部帧向量(重新抽帧前调用,防旧帧残留)
+    /// 删除某视频的全部帧向量与帧标签(重新抽帧前调用,防旧行残留)
     func removeFrames(refKey: String) throws { try serialized {
         guard let db else { return }
-        let stmt = try prepare("DELETE FROM items WHERE kind = 'videoFrame' AND ref_key = ?")
+        let stmt = try prepare("DELETE FROM items WHERE kind IN ('videoFrame','videoFrameLabel') AND ref_key = ?")
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, refKey, -1, Self.transient)
         sqlite3_step(stmt)

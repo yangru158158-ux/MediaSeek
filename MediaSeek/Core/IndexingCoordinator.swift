@@ -183,7 +183,7 @@ final class IndexingCoordinator: ObservableObject {
     private func syncPhotoLibrary(forceAll: Bool = false, errors: FirstErrorBox) async throws {
         let fetch = photo.fetchAllAssets()
         // 全量重建:所有照片视为新照片全量覆盖;增量同步:跳过已索引
-        var known = forceAll ? Set<String>() : try store.refKeys(kinds: [.photo, .photoLabel, .userTag, .videoFrame])
+        var known = forceAll ? Set<String>() : try store.refKeys(kinds: [.photo, .photoLabel, .userTag, .videoFrame, .videoFrameLabel])
         // 增量自动补全:已有向量但缺 OCR 原文的照片视为待补(原位覆盖),
         // 跑多少存多少、中断可续,无需全量重建(无字照片有 "" 占位行,不会反复补)
         if !forceAll {
@@ -192,6 +192,14 @@ final class IndexingCoordinator: ObservableObject {
             // (改设置只影响新视频的话,旧视频永远停在旧帧数)
             if let stats = try? store.videoFrameStats(), stats.videos > 0 {
                 for (key, n) in stats.perVideo where n != videoFramesPerVideo {
+                    known.remove(key)
+                }
+            }
+            // 帧标签自愈:有帧向量但缺标签行的视频原位重处理一次
+            // (标签是视频侧唯一可靠召回通道,2026-10-11 马尔代夫抖音噪声实锤后补)
+            if let frameStats = try? store.videoFrameStats(), frameStats.videos > 0,
+               let labelRefs = try? store.refKeys(kinds: [.videoFrameLabel]) {
+                for key in frameStats.perVideo.keys where !labelRefs.contains(key) {
                     known.remove(key)
                 }
             }
@@ -212,7 +220,7 @@ final class IndexingCoordinator: ObservableObject {
                 newVideos.append(asset)
             }
         }
-        try store.removeRefs(kinds: [.photo, .photoLabel, .userTag, .videoFrame], notIn: libIDs)
+        try store.removeRefs(kinds: [.photo, .photoLabel, .userTag, .videoFrame, .videoFrameLabel], notIn: libIDs)
 
         total += newPhotos.count + newVideos.count
         // 视频量级小先处理:几分钟后即可被「视频」范围搜到,不必等全部照片
@@ -327,6 +335,7 @@ final class IndexingCoordinator: ObservableObject {
     private func embedVideo(_ asset: PHAsset, errors: FirstErrorBox) async {
         do {
             guard let clip = models.siglip else { return }
+            let gemma = models.gemma
             let store = self.store
             let photo = self.photo
             let frameCount = videoFramesPerVideo
@@ -340,6 +349,16 @@ final class IndexingCoordinator: ObservableObject {
                     try store.upsert(kind: .videoFrame, refKey: asset.localIdentifier, frameIndex: i,
                                      space: clip.space, vector: vec, title: nil, date: asset.creationDate,
                                      color: PhotoColor.bucket(of: frame))
+                    // 帧标签:视频侧唯一可靠的召回通道(与照片同款 Vision 分类)。
+                    // SigLIP 图文分数在本库区分度不足(马尔代夫 vs 抖音噪声分不开),
+                    // 标签零幻觉:海滩/水上屋帧得 beach/island/water,抖音室内帧得
+                    // people/clothing,词典词不命中即不灌入
+                    if let gemma, let labels = Self.visionLabels(cg: frame) {
+                        let lvec = try gemma.embedDocument("photo tags: \(labels)")
+                        try store.upsert(kind: .videoFrameLabel, refKey: asset.localIdentifier,
+                                         frameIndex: i, space: gemma.space, vector: lvec,
+                                         title: labels, date: asset.creationDate)
+                    }
                 }
             }.value
         } catch is CancellationError {

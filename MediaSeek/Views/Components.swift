@@ -119,7 +119,7 @@ struct HitCell: View {
         switch hit.target {
         case .asset(let asset):
             AssetThumbView(asset: asset)
-                .overlay { hit.kind == .videoFrame ? playIcon : nil }
+                .overlay { hit.kind == .videoFrame || hit.kind == .videoFrameLabel ? playIcon : nil }
         case .file(let record):
             FileThumbView(record: record)
         }
@@ -144,7 +144,7 @@ struct HitCell: View {
     private var badgeText: String {
         switch hit.kind {
         case .photo, .photoLabel: return "照片"
-        case .videoFrame: return "视频"
+        case .videoFrame, .videoFrameLabel: return "视频"
         case .file, .fileChunk: return "文件"
         case .userTag:
             if case .asset(let a) = hit.target { return a.mediaType == .video ? "视频" : "照片" }
