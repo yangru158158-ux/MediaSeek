@@ -237,7 +237,8 @@ final class SearchEngine {
         // 显式「语义:」查询门槛放宽到 0.14(用户点名要语义召回)
         if !imageKinds.isEmpty, let siglip {
             let q = try siglip.embedQuery(Self.siglipQuery(concept))
-            let floor = semanticOnly ? 0.25 : 0.30
+            // 视频帧偏暗/糊,门槛比照片低一档
+            let floor = semanticOnly ? 0.25 : (scope == .video ? 0.22 : 0.30)
             var hits = Self.dedupByRef(try store.search(
                 space: siglip.space, kinds: imageKinds, query: q, limit: topK, minScore: Float(floor)))
             // 弱信号兜底:品牌词/抽象词(「微信」「聊天」)对截图的视觉相似度
@@ -245,7 +246,8 @@ final class SearchEngine {
             // 相似度排序仍然有效,降到 0.08 取相对头部,好过空页
             if hits.isEmpty {
                 hits = Self.dedupByRef(try store.search(
-                    space: siglip.space, kinds: imageKinds, query: q, limit: topK, minScore: 0.18))
+                    space: siglip.space, kinds: imageKinds, query: q, limit: topK,
+                    minScore: Float(scope == .video ? 0.12 : 0.18)))
             }
             // 兜底后仍空 = 全库最高分都不到 0.08,记下最高原始分供空态提示
             if hits.isEmpty {
