@@ -341,7 +341,7 @@ struct SearchOutcome {
         for ch in channels {
             for (rank, hit) in ch.hits.enumerated() { add(hit, weight: ch.weight, rank: rank) }
         }
-        guard !fused.isEmpty else { return [] }
+        guard !fused.isEmpty else { return .empty }
 
         // 显示分 = 相对融合分(第一名 100%)
         let maxScore = fused.values.map { $0.score }.max() ?? 1.0

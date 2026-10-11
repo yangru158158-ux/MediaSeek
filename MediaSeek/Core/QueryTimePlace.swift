@@ -68,26 +68,26 @@ enum TimeQueryParser {
         if let r = attempt("昨天|昨日", { _ in dayShift(-1, "昨天") }) { return r }
         if let r = attempt("今天|今日", { _ in dayShift(0, "今天") }) { return r }
         if let r = attempt("(\\d{4})年(\\d{1,2})月(\\d{1,2})[日号]", { c in
-            (Int(c[0]), Int(c[1]), Int(c[2])).flatMap { dayRange($0, $1, $2, "\(c[0])年\(c[1])月\(c[2])日") }
+            guard let y = Int(c[0]), let m = Int(c[1]), let d = Int(c[2]) else { return nil }
+            return dayRange(y, m, d, "\(y)年\(m)月\(d)日")
         }) { return r }
         if let r = attempt("(\\d{4})年(\\d{1,2})月(份)?", { c in
-            (Int(c[0]), Int(c[1])).flatMap { monthRange($0, $1, "\(c[0])年\(c[1])月") }
+            guard let y = Int(c[0]), let m = Int(c[1]) else { return nil }
+            return monthRange(y, m, "\(y)年\(m)月")
         }) { return r }
         if let r = attempt("(\\d{1,2})月(\\d{1,2})[日号]", { c in
             // 未写年份:取当前年,若在未来则取去年
-            (Int(c[0]), Int(c[1])).flatMap { m, d in
-                if let thisYear = dayRange(thisYear, m, d, "\(thisYear)年\(m)月\(d)日"), thisYear.start <= now {
-                    return thisYear
-                }
-                return dayRange(thisYear - 1, m, d, "\(thisYear - 1)年\(m)月\(d)日")
+            guard let m = Int(c[0]), let d = Int(c[1]) else { return nil }
+            if let r = dayRange(thisYear, m, d, "\(thisYear)年\(m)月\(d)日"), r.start <= now {
+                return r
             }
+            return dayRange(thisYear - 1, m, d, "\(thisYear - 1)年\(m)月\(d)日")
         }) { return r }
         if let r = attempt("(\\d{4})年", { c in Int(c[0]).flatMap { yearRange($0, "\($0)年") } }) { return r }
         if let r = attempt("(\\d{1,2})月(份)?", { c in
-            Int(c[0]).flatMap { m in
-                if let r = monthRange(thisYear, m, "\(thisYear)年\(m)月"), r.start <= now { return r }
-                return monthRange(thisYear - 1, m, "\(thisYear - 1)年\(m)月")
-            }
+            guard let m = Int(c[0]) else { return nil }
+            if let r = monthRange(thisYear, m, "\(thisYear)年\(m)月"), r.start <= now { return r }
+            return monthRange(thisYear - 1, m, "\(thisYear - 1)年\(m)月")
         }) { return r }
         if let r = attempt("上(个)?(星期|礼拜|周)", { _ in
             guard let cur = cal.dateInterval(of: .weekOfYear, for: now) else { return nil }
@@ -124,11 +124,11 @@ enum PlaceQueryParser {
 }
 
 enum PlaceGeocoder {
-    private static let cache = NSCache<NSString, NSValue>()
+    private static let cache = NSCache<NSString, CLCircularRegion>()
 
     /// 地名 → 半径 20km 的圆形区域(带缓存;离线/失败返回 nil,搜索照常降级)
     static func region(for name: String) async -> CLCircularRegion? {
-        if let v = cache.object(forKey: name as NSString) { return v as? CLCircularRegion }
+        if let v = cache.object(forKey: name as NSString) { return v }
         let region: CLCircularRegion? = await withCheckedContinuation { cont in
             let geocoder = CLGeocoder()
             geocoder.geocodeAddressString(name) { placemarks, _ in
@@ -140,7 +140,7 @@ enum PlaceGeocoder {
                 }
             }
         }
-        if let region { cache.setObject(region as NSValue, forKey: name as NSString) }
+        if let region { cache.setObject(region, forKey: name as NSString) }
         return region
     }
 }
