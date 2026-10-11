@@ -280,17 +280,37 @@ final class SearchEngine {
         // 显式「语义:」查询门槛放宽到 0.14(用户点名要语义召回)
         if !imageKinds.isEmpty, let siglip {
             let q = try siglip.embedQuery(Self.siglipQuery(concept))
-            // 视频帧偏暗/糊,门槛比照片低一档
-            let floor = semanticOnly ? 0.25 : (scope == .video ? 0.22 : 0.30)
-            var hits = Self.dedupByRef(try store.search(
-                space: siglip.space, kinds: imageKinds, query: q, limit: topK, minScore: Float(floor)))
-            // 弱信号兜底:品牌词/抽象词(「微信」「聊天」)对截图的视觉相似度
-            // 天然低于常规门槛,一刀切会整词清零(2026-10-10 用户实测三个词全空);
-            // 相似度排序仍然有效,降到 0.08 取相对头部,好过空页
-            if hits.isEmpty {
+            // 照片与视频帧分开走各自的门槛阶梯:分数分布不同,且照片行为已验收冻结
+            var hits: [SearchHit] = []
+            if imageKinds.contains(.photo) {
+                let floor: Float = semanticOnly ? 0.25 : 0.30
                 hits = Self.dedupByRef(try store.search(
-                    space: siglip.space, kinds: imageKinds, query: q, limit: topK,
-                    minScore: Float(scope == .video ? 0.12 : 0.18)))
+                    space: siglip.space, kinds: [.photo], query: q, limit: topK, minScore: floor))
+                // 弱信号兜底:品牌词/抽象词(「微信」「聊天」)对截图的视觉相似度
+                // 天然低于常规门槛,一刀切会整词清零(2026-10-10 用户实测三个词全空)
+                if hits.isEmpty {
+                    hits = Self.dedupByRef(try store.search(
+                        space: siglip.space, kinds: [.photo], query: q, limit: topK, minScore: 0.18))
+                }
+            }
+            if imageKinds.contains(.videoFrame) {
+                let vFloor: Float = semanticOnly ? 0.25 : 0.22
+                var vHits = Self.dedupByRef(try store.search(
+                    space: siglip.space, kinds: [.videoFrame], query: q, limit: topK, minScore: vFloor))
+                if vHits.isEmpty {
+                    vHits = Self.dedupByRef(try store.search(
+                        space: siglip.space, kinds: [.videoFrame], query: q, limit: topK, minScore: 0.12))
+                }
+                if vHits.isEmpty {
+                    // 诊断实锤(2026-10-11):SigLIP2 在本库的真实分布 max 仅 0.07 上下
+                    // (电脑屏幕 照片0.088/帧0.076,马尔代夫 照片0.090/帧0.076),
+                    // 绝对门槛 0.12-0.30 全部悬空;视频帧又没有标签/OCR 兜底,一悬空即全空。
+                    // 改相对标定:0.04 取候选(远高于底噪),尾部由下方 best×0.85 截断兜住
+                    vHits = Self.dedupByRef(try store.search(
+                        space: siglip.space, kinds: [.videoFrame], query: q, limit: topK, minScore: 0.04))
+                }
+                hits.append(contentsOf: vHits)
+                hits = Self.dedupByRef(hits)
             }
             // 兜底后仍空 = 全库最高分都不到 0.08,记下最高原始分供空态提示
             if hits.isEmpty {
