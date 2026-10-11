@@ -23,6 +23,7 @@ struct SearchView: View {
     @State private var batchTagText = ""
     @State private var showTagAlert = false
     @State private var showDeleteDialog = false
+    @State private var showDupScan = false
     @State private var showRenameAlert = false
     @State private var renameText = ""
     @State private var colorFilter: String?
@@ -45,6 +46,9 @@ struct SearchView: View {
             .navigationTitle("智搜")
             .sheet(item: $selectedHit) { hit in
                 DetailSheet(hit: hit)
+            }
+            .sheet(isPresented: $showDupScan) {
+                DuplicateScanView()
             }
             .alert("批量标注", isPresented: $showTagAlert) {
                 TextField("标签内容(如:程小姐)", text: $batchTagText)
@@ -434,6 +438,7 @@ struct SearchView: View {
                 Button { selectionMode = false; selected.removeAll() } label: { Label("完成", systemImage: "checkmark") }
             } else {
                 Button { selectionMode = true; selected.removeAll() } label: { Label("选择", systemImage: "checkmark.circle") }
+                Button { showDupScan = true } label: { Label("查重(重复/雷同照片)…", systemImage: "square.stack.3d.down.right") }
                 Button { exportToAlbum(selectedOnly: false) } label: { Label("结果存入相册", systemImage: "photo.stack") }
                 Button { exportToFiles(selectedOnly: false) } label: { Label("结果导出到文件", systemImage: "folder") }
             }

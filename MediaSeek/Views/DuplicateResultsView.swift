@@ -1,6 +1,93 @@
 import SwiftUI
 import Photos
 
+/// 查重入口(搜索页/资料库共用):模式选择→扫描进度→结果弹层
+struct DuplicateScanView: View {
+    @EnvironmentObject var app: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var mode = "similar"
+    @State private var scanning = false
+    @State private var progress: (done: Int, total: Int)?
+    @State private var groups: [[String]] = []
+    @State private var showResults = false
+    @State private var photoCount = 0
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("查重范围") {
+                    Picker("模式", selection: $mode) {
+                        Text("完全重复").tag("exact")
+                        Text("雷同(相似画面)").tag("similar")
+                    }
+                    .pickerStyle(.segmented)
+                    Text("覆盖已索引的照片(\(photoCount) 张);删除走系统相册「最近删除」,30 天内可恢复。")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+                Section {
+                    Button {
+                        start()
+                    } label: {
+                        if scanning {
+                            HStack { ProgressView(); Text("扫描中…") }
+                        } else {
+                            Label(photoCount < 2 ? "照片不足,先索引照片" : "开始查重",
+                                  systemImage: "square.stack.3d.down.right")
+                        }
+                    }
+                    .disabled(scanning || photoCount < 2)
+                    if scanning, let p = progress, p.total > 0 {
+                        ProgressView(value: Double(p.done) / Double(p.total))
+                        Text("已处理 \(p.done)/\(p.total) 张")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .navigationTitle("照片查重")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(scanning ? "后台继续" : "关闭") { dismiss() }
+                }
+            }
+            .sheet(isPresented: $showResults) {
+                DuplicateResultsView(initialGroups: groups)
+            }
+            .onAppear { photoCount = app.indexing.indexedPhotoCount }
+        }
+    }
+
+    private func start() {
+        guard !scanning else { return }
+        scanning = true
+        progress = (0, 1)
+        let threshold: Float = mode == "exact" ? 0.985 : 0.92
+        let store = app.store
+        Task.detached(priority: .userInitiated) {
+            do {
+                let data = try store.allPhotoVectors()
+                let groups = DuplicateScanner.scan(
+                    keys: data.keys, flat: data.flat, dim: data.dim, threshold: threshold) { done, total in
+                    Task { @MainActor in progress = (done, total) }
+                }
+                let keyGroups = groups.map { $0.map { data.keys[$0] } }.filter { $0.count > 1 }
+                await MainActor.run {
+                    scanning = false
+                    progress = nil
+                    if keyGroups.isEmpty {
+                        app.notify("没有发现重复/雷同照片")
+                    } else {
+                        self.groups = keyGroups
+                        showResults = true
+                    }
+                }
+            } catch {
+                await MainActor.run { scanning = false; app.fail(error) }
+            }
+        }
+    }
+}
+
 /// 查重结果:分组展示雷同照片,默认每组保留第一张、其余勾选,
 /// 批量删除走系统相册「最近删除」(30 天可恢复),同时清除索引。
 struct DuplicateResultsView: View {

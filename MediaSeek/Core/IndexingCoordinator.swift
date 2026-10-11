@@ -175,7 +175,12 @@ final class IndexingCoordinator: ObservableObject {
     private func syncPhotoLibrary(forceAll: Bool = false, errors: FirstErrorBox) async throws {
         let fetch = photo.fetchAllAssets()
         // 全量重建:所有照片视为新照片全量覆盖;增量同步:跳过已索引
-        let known = forceAll ? Set<String>() : try store.refKeys(kinds: [.photo, .photoLabel, .userTag, .videoFrame])
+        var known = forceAll ? Set<String>() : try store.refKeys(kinds: [.photo, .photoLabel, .userTag, .videoFrame])
+        // 增量自动补全:已有向量但缺 OCR 原文的照片视为待补(原位覆盖),
+        // 跑多少存多少、中断可续,无需全量重建(无字照片有 "" 占位行,不会反复补)
+        if !forceAll {
+            for key in try store.photoRefKeysMissingOCR() { known.remove(key) }
+        }
         let recentlyDeleted = Self.recentlyDeletedIDs()
 
         var libIDs = Set<String>()
@@ -285,9 +290,10 @@ final class IndexingCoordinator: ObservableObject {
                              vector: vec, title: nil, date: asset.creationDate, color: colorBucket)
 
             // OCR 文字层:屏幕文字/证件名/编号可被精确检索
-            if let ocr = Self.recognizeText(in: full) {
-                try store.saveOCR(refKey: asset.localIdentifier, text: ocr)
-            }
+            // 无文字也写 "" 占位行:增量同步靠「缺 OCR 行」识别待补照片,
+            // 没有占位的话风景照等无字照片会被每轮反复重处理
+            let ocr = Self.recognizeText(in: full)
+            try store.saveOCR(refKey: asset.localIdentifier, text: ocr ?? "")
 
             guard useLabels, let labels = Self.visionLabels(cg: small), !labels.isEmpty else { return 0 }
             try Task.checkCancellation()
