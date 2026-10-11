@@ -211,7 +211,8 @@ final class SearchEngine {
 
         // 标签精确通道(优先):词典英译+同义词与 Vision 英文标签 token 级比对,零幻觉
         var labelHits: [SearchHit] = []
-        if !imageKinds.isEmpty {
+        // 标签行都是照片:视频范围(.video)不得参与,否则照片漏进视频结果
+        if imageKinds.contains(.photo) {
             let tokens = Self.queryTokens(query: concept)
             if !tokens.isEmpty, let rows = try? store.allPhotoLabels() {
                 var scored: [(refKey: String, matches: Int, title: String)] = []
@@ -257,7 +258,7 @@ final class SearchEngine {
         }
 
         // 用户标签通道:中文子串精确匹配
-        if scope != .file, let tagRefs = try? store.searchUserTags(query: concept), !tagRefs.isEmpty {
+        if imageKinds.contains(.photo), let tagRefs = try? store.searchUserTags(query: concept), !tagRefs.isEmpty {
             channels.append((1.6, tagRefs.map {
                 SearchHit(kind: .photo, refKey: $0, frameIndex: 0,
                           space: "userTag", title: nil, date: nil, score: 1.0, color: nil)
