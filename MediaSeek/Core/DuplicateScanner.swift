@@ -18,7 +18,7 @@ enum DuplicateScanner {
                 c.withUnsafeMutableBufferPointer { cb in
                     // C(1×N) = A(1×dim) × B(dim×N),B 的第 n 列 = 第 n 张照片向量
                     vDSP_mmul(fb.baseAddress! + a * dim, 1,
-                              fb.baseAddress!, vDSP_Length(dim),
+                              fb.baseAddress!, vDSP_Stride(dim),
                               cb.baseAddress!, 1,
                               1, vDSP_Length(n), vDSP_Length(dim))
                 }
