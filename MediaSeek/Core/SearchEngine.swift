@@ -183,7 +183,7 @@ final class SearchEngine {
                     kind: isVideo ? .videoFrame : .photo,
                     title: isVideo ? "视频" : "照片",
                     score: 1.0, date: asset.creationDate,
-                    color: store.colorForRef(asset.localIdentifier)))
+                    color: self.store.colorForRef(asset.localIdentifier)))
             }
             // 地点浏览命中按拍摄时间倒序排前(fetchAllAssets 即此顺序)
             return SearchOutcome(hits: merged, textIDs: main.textIDs,
