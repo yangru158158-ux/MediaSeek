@@ -411,8 +411,12 @@ final class SearchEngine {
         if !semanticOnly, scope == .all || scope == .photo {
             // OCR 命中可能来自导入文件(PDF OCR 原文):按 files 表区分 文件/照片
             let fileIds = (try? store.fileIds()) ?? []
+            let videoRefs = (try? store.refKeys(kinds: [.videoFrame])) ?? []
+            // OCR 命中的 ref 可能是 照片/文件/视频(视频帧 OCR):按库内身份归类
             func ocrKind(_ ref: String) -> ItemKind {
-                (scope == .all && fileIds.contains(ref)) ? .file : .photo
+                if scope == .all, fileIds.contains(ref) { return .file }
+                if videoRefs.contains(ref) { return .videoFrame }
+                return .photo
             }
             var seen = Set<String>()
             var rank = 0
@@ -504,8 +508,12 @@ final class SearchEngine {
         // 结果内模式:只在这些照片的文字索引里查
         if spec.channel == .text {
             let fileIds = (try? store.fileIds()) ?? []
+            let videoRefs = (try? store.refKeys(kinds: [.videoFrame])) ?? []
+            // OCR 命中的 ref 可能是 照片/文件/视频(视频帧 OCR):按库内身份归类
             func ocrKind(_ ref: String) -> ItemKind {
-                (scope == .all && fileIds.contains(ref)) ? .file : .photo
+                if scope == .all, fileIds.contains(ref) { return .file }
+                if videoRefs.contains(ref) { return .videoFrame }
+                return .photo
             }
             var perTerm: [[SearchHit]] = []
             for t in terms {

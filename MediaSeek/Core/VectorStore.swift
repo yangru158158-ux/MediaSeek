@@ -665,6 +665,22 @@ final class VectorStore {
         return out
     } }
 
+    /// 有帧向量但缺 OCR 行的视频(帧 OCR 自愈用)
+    func videoRefKeysMissingOCR() throws -> Set<String> { try serialized {
+        guard let db else { return [] }
+        let stmt = try prepare("""
+        SELECT DISTINCT ref_key FROM items
+        WHERE kind IN ('videoFrame','videoFrameLabel')
+          AND ref_key NOT IN (SELECT ref_key FROM ocr_text)
+        """)
+        defer { sqlite3_finalize(stmt) }
+        var out = Set<String>()
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            out.insert(String(cString: sqlite3_column_text(stmt, 0)))
+        }
+        return out
+    } }
+
     /// 视频帧向量统计:有帧向量的视频数 + 每个视频的帧数(诊断用)
     func videoFrameStats() throws -> (videos: Int, perVideo: [String: Int]) { try serialized {
         guard let db else { return (0, [:]) }

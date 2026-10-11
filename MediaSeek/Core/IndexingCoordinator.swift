@@ -197,6 +197,11 @@ final class IndexingCoordinator: ObservableObject {
                     if let used = cfg[key], used != videoFramesPerVideo { known.remove(key) }
                 }
             }
+            // 帧OCR自愈:有帧向量但缺 OCR 行的视频原位重处理一次
+            // (无文字视频写 "" 占位行,不会循环)
+            if let missing = try? store.videoRefKeysMissingOCR(), !missing.isEmpty {
+                known.subtract(missing)
+            }
             // 帧标签自愈:有帧向量但缺标签行的视频原位重处理一次
             // (标签是视频侧唯一可靠召回通道,2026-10-11 马尔代夫抖音噪声实锤后补)
             if let frameStats = try? store.videoFrameStats(), frameStats.videos > 0,
@@ -349,29 +354,39 @@ final class IndexingCoordinator: ObservableObject {
                 guard let avAsset = await photo.avAsset(for: asset) else { return }
                 // 先清旧帧再采新帧:重索引(如抽帧数变更)后不残留旧帧行
                 try? store.removeFrames(refKey: asset.localIdentifier)
-                let frames = try await FrameSampler.sample(asset: avAsset, count: frameCount)
+                // 2048px 抽帧(帧 OCR 需要照片同级的分辨率),嵌入/标签/颜色用 320 降采样
+                let frames = try await FrameSampler.sample(asset: avAsset, count: frameCount, maxPixel: 2048)
                 var rows = 0
+                var ocrParts: [String] = []
                 for (i, frame) in frames.enumerated() {
                     // 近全黑帧不入索引:黑屏录音类视频没有视觉内容,入库后只会被
                     // 视频相对标定灌进任何搜索结果(2026-10-11 用户实测 water/常住
                     // 混入"只有声音"黑视频)
                     if PhotoColor.isTooDark(frame) { continue }
-                    let vec = try clip.embedImage(frame)
+                    guard let small = Self.downscaled(frame, to: 320) else { continue }
+                    let vec = try clip.embedImage(small)
                     try store.upsert(kind: .videoFrame, refKey: asset.localIdentifier, frameIndex: i,
                                      space: clip.space, vector: vec, title: nil, date: asset.creationDate,
-                                     color: PhotoColor.bucket(of: frame))
+                                     color: PhotoColor.bucket(of: small))
                     rows += 1
                     // 帧标签:视频侧唯一可靠的召回通道(与照片同款 Vision 分类)。
                     // SigLIP 图文分数在本库区分度不足(马尔代夫 vs 抖音噪声分不开),
                     // 标签零幻觉:海滩/水上屋帧得 beach/island/water,抖音室内帧得
                     // people/clothing,词典词不命中即不灌入
-                    if let gemma, let labels = Self.visionLabels(cg: frame) {
+                    if let gemma, let labels = Self.visionLabels(cg: small) {
                         let lvec = try gemma.embedDocument("photo tags: \(labels)")
                         try store.upsert(kind: .videoFrameLabel, refKey: asset.localIdentifier,
                                          frameIndex: i, space: gemma.space, vector: lvec,
                                          title: labels, date: asset.creationDate)
                     }
+                    // 帧OCR(与照片同管线):视频画面里的文字可被 文字: 命中
+                    if let t = Self.recognizeText(in: frame) {
+                        ocrParts.append("【帧\(i)】\(t)")
+                    }
                 }
+                // OCR 原文与照片同表同键;无文字写 "" 占位,防「缺 OCR 行」自愈反复重处理
+                try store.saveOCR(refKey: asset.localIdentifier,
+                                  text: String(ocrParts.joined(separator: "\n").prefix(12_000)))
                 // 记账:≥1 帧入库记下当时的抽帧数(「抽帧数变更」判断的唯一依据,
                 // 直接比行数会因黑帧跳过而无限重跑);采到帧但全黑(0 行)拉黑名单,
                 // 同步直接跳过;抽帧失败(0 帧)不记,下次同步重试
@@ -531,12 +546,12 @@ final class IndexingCoordinator: ObservableObject {
 // MARK: - 视频抽帧
 
 enum FrameSampler {
-    static func sample(asset: AVAsset, count: Int) async throws -> [CGImage] {
+    static func sample(asset: AVAsset, count: Int, maxPixel: CGFloat = 320) async throws -> [CGImage] {
         let duration = try await asset.load(.duration)
         guard duration.seconds > 0, count > 0 else { return [] }
         let gen = AVAssetImageGenerator(asset: asset)
         gen.appliesPreferredTrackTransform = true
-        gen.maximumSize = CGSize(width: 320, height: 320)
+        gen.maximumSize = CGSize(width: maxPixel, height: maxPixel)
         gen.requestedTimeToleranceBefore = CMTime(seconds: 1, preferredTimescale: 600)
         gen.requestedTimeToleranceAfter = CMTime(seconds: 1, preferredTimescale: 600)
 
