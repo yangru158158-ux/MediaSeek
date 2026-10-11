@@ -32,6 +32,31 @@ enum PhotoColor {
         return bestName
     }
 
+    /// 近全黑判定(平均亮度 < 16/255):黑屏录音类视频的抽帧全是这种画面,
+    /// 没有视觉内容,不该入索引(否则会被视频相对标定灌进任何搜索结果)。
+    /// 阈值取保守值:真实夜景画面平均亮度通常 >30,不会被误杀
+    static func isTooDark(_ image: CGImage) -> Bool {
+        meanLuma(of: image) < 16
+    }
+
+    static func meanLuma(of image: CGImage) -> Double {
+        let w = 16, h = 16
+        var pix = [UInt8](repeating: 0, count: w * h * 4)
+        let cs = CGColorSpaceCreateDeviceRGB()
+        guard let ctx = CGContext(data: &pix, width: w, height: h, bitsPerComponent: 8,
+                                  bytesPerRow: w * 4, space: cs,
+                                  bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return 255 }
+        ctx.interpolationQuality = .low
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        var total = 0.0
+        var n = 0.0
+        for i in stride(from: 0, to: pix.count, by: 4) {
+            total += 0.299 * Double(pix[i]) + 0.587 * Double(pix[i + 1]) + 0.114 * Double(pix[i + 2])
+            n += 1
+        }
+        return n > 0 ? total / n : 255
+    }
+
     static func classify(r: Double, g: Double, b: Double) -> String {
         let mx = max(r, g, b), mn = min(r, g, b)
         let v = mx

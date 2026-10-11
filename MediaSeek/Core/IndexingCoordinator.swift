@@ -345,6 +345,11 @@ final class IndexingCoordinator: ObservableObject {
                 try? store.removeFrames(refKey: asset.localIdentifier)
                 let frames = try await FrameSampler.sample(asset: avAsset, count: frameCount)
                 for (i, frame) in frames.enumerated() {
+                    // 近全黑帧不入索引:黑屏录音类视频没有视觉内容,入库后只会被
+                    // 视频相对标定灌进任何搜索结果(2026-10-11 用户实测 water/常住
+                    // 混入"只有声音"黑视频)。全黑视频 0 行 → 不在 known 集,每次
+                    // 同步只重抽帧(无推理),写不进就永远不进视觉/标签结果
+                    if PhotoColor.isTooDark(frame) { continue }
                     let vec = try clip.embedImage(frame)
                     try store.upsert(kind: .videoFrame, refKey: asset.localIdentifier, frameIndex: i,
                                      space: clip.space, vector: vec, title: nil, date: asset.creationDate,
