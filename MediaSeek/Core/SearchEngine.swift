@@ -482,8 +482,21 @@ final class SearchEngine {
             if satisfied.isEmpty { break }
         }
         if !semanticTerms.isEmpty, !satisfied.isEmpty, let siglip {
+            // 标签通道核验:主流程搜「人/人物」主要靠 Vision 标签(比 SigLIP 分得开),
+            // 结果内不查标签的话语义词照样恒空(2026-10-11 福州结果内实测)
+            var labelsByRef: [String: Set<String>] = [:]
+            if let rows = try? store.allPhotoLabels() {
+                for row in rows where satisfied.contains(row.refKey) {
+                    labelsByRef[row.refKey, default: []].formUnion(
+                        row.title.lowercased().components(separatedBy: CharacterSet(charactersIn: ", ")))
+                }
+            }
             for t in semanticTerms where !satisfied.isEmpty {
-                let ok = Set(semanticHits(t, siglip: siglip, topK: topK, within: satisfied).map(\.refKey))
+                var ok = Set(semanticHits(t, siglip: siglip, topK: topK, within: satisfied).map(\.refKey))
+                let tokens = Self.queryTokens(query: t)
+                if !tokens.isEmpty {
+                    ok.formUnion(labelsByRef.filter { !tokens.isDisjoint(with: $0.value) }.map(\.key))
+                }
                 satisfied.formIntersection(ok)
             }
         }
@@ -584,6 +597,14 @@ final class SearchEngine {
                     space: siglip.space, kinds: [.photo], query: q, limit: topK,
                     minScore: 0.10, among: within)) ?? [])
             }
+            if hits.isEmpty {
+                // SigLIP2 本库真实分布 max 0.07-0.09(2026-10-11 诊断实锤),
+                // 0.20/0.10 全悬空 → 结果内语义词恒空;0.04 相对档,
+                // 尾部由下方 best×0.85(以集合内最佳为基准)截断
+                hits = Self.dedupByRef((try? store.search(
+                    space: siglip.space, kinds: [.photo], query: q, limit: topK,
+                    minScore: 0.04, among: within)) ?? [])
+            }
             let best = hits.first?.score ?? 0
             if best > 0 { hits = hits.filter { $0.score >= best * 0.85 } }
             return hits
@@ -593,6 +614,10 @@ final class SearchEngine {
         if hits.isEmpty {
             hits = Self.dedupByRef((try? store.search(
                 space: siglip.space, kinds: [.photo], query: q, limit: topK, minScore: 0.15)) ?? [])
+        }
+        if hits.isEmpty {
+            hits = Self.dedupByRef((try? store.search(
+                space: siglip.space, kinds: [.photo], query: q, limit: topK, minScore: 0.04)) ?? [])
         }
         let best = hits.first?.score ?? 0
         if best > 0 { hits = hits.filter { $0.score >= best * 0.85 } }
