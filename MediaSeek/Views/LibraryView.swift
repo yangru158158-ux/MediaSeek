@@ -15,6 +15,11 @@ struct LibraryView: View {
     @State private var refreshPending = false
     @State private var filesExpanded = false
     @State private var previewFile: ImportedFile?
+    @State private var dupMode = "similar"
+    @State private var dupScanning = false
+    @State private var dupProgress: (done: Int, total: Int)?
+    @State private var dupGroups: [[String]] = []
+    @State private var showDupResults = false
 
     private let columns = [GridItem(.flexible()), GridItem(.flexible())]
 
@@ -24,6 +29,7 @@ struct LibraryView: View {
                 permissionSection
                 statsSection
                 indexingSection
+                dedupSection
                 importSection
                 if !importedFiles.isEmpty {
                     importedSection
@@ -56,6 +62,9 @@ struct LibraryView: View {
                             }
                         }
                 }
+            }
+            .sheet(isPresented: $showDupResults) {
+                DuplicateResultsView(initialGroups: dupGroups)
             }
         }
     }
@@ -151,6 +160,66 @@ struct LibraryView: View {
                     Text("上次同步:\(last.formatted(date: .abbreviated, time: .shortened))")
                         .font(.caption).foregroundStyle(.secondary)
                 }
+            }
+        }
+    }
+
+    // MARK: - 查重
+
+    private var dedupSection: some View {
+        Section("查重") {
+            Picker("模式", selection: $dupMode) {
+                Text("完全重复").tag("exact")
+                Text("雷同(相似画面)").tag("similar")
+            }
+            .pickerStyle(.segmented)
+            Button {
+                startDupScan()
+            } label: {
+                if dupScanning {
+                    HStack { ProgressView(); Text("扫描中…") }
+                } else {
+                    Label(photoCount < 2 ? "开始查重(需先索引照片)" : "开始查重",
+                          systemImage: "square.stack.3d.down.right")
+                }
+            }
+            .disabled(dupScanning || photoCount < 2)
+            if dupScanning, let p = dupProgress, p.total > 0 {
+                ProgressView(value: Double(p.done) / Double(p.total))
+                Text("已处理 \(p.done)/\(p.total) 张")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            Text("基于语义向量找出画面雷同的照片;删除走系统相册「最近删除」,30 天内可恢复。")
+                .font(.caption2).foregroundStyle(.secondary)
+        }
+    }
+
+    private func startDupScan() {
+        guard !dupScanning else { return }
+        dupScanning = true
+        dupProgress = (0, 1)
+        let threshold: Float = dupMode == "exact" ? 0.985 : 0.92
+        let store = app.store
+        Task.detached(priority: .userInitiated) {
+            do {
+                let data = try store.allPhotoVectors()
+                let groups = DuplicateScanner.scan(
+                    keys: data.keys, flat: data.flat, dim: data.dim, threshold: threshold) { done, total in
+                    Task { @MainActor in dupProgress = (done, total) }
+                }
+                let keyGroups = groups.map { $0.map { data.keys[$0] } }.filter { $0.count > 1 }
+                await MainActor.run {
+                    dupScanning = false
+                    dupProgress = nil
+                    if keyGroups.isEmpty {
+                        app.notify("没有发现重复/雷同照片")
+                    } else {
+                        dupGroups = keyGroups
+                        showDupResults = true
+                    }
+                }
+            } catch {
+                await MainActor.run { dupScanning = false; app.fail(error) }
             }
         }
     }

@@ -589,6 +589,27 @@ final class VectorStore {
         return out
     } }
 
+    /// 全部照片的 clip 向量(查重用):keys 与 flat 内的行一一对应
+    func allPhotoVectors() throws -> (keys: [String], flat: [Float], dim: Int) { try serialized {
+        guard let db else { return ([], [], 0) }
+        let stmt = try prepare("""
+        SELECT ref_key, vec, dim FROM items WHERE kind = 'photo' AND space = 'clip' ORDER BY ref_key
+        """)
+        defer { sqlite3_finalize(stmt) }
+        var keys: [String] = []
+        var flat: [Float] = []
+        var dim = 0
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let d = Int(sqlite3_column_int(stmt, 2))
+            guard d > 0, let blob = sqlite3_column_blob(stmt, 1) else { continue }
+            if dim == 0 { dim = d } else if d != dim { continue }
+            keys.append(String(cString: sqlite3_column_text(stmt, 0)))
+            flat.append(contentsOf: Array(UnsafeBufferPointer(
+                start: blob.assumingMemoryBound(to: Float.self), count: d)))
+        }
+        return (keys, flat, dim)
+    } }
+
     func deleteFile(id: String) throws { try serialized {
         let stmt = try prepare("DELETE FROM files WHERE id = ?")
         defer { sqlite3_finalize(stmt) }
