@@ -264,11 +264,18 @@ final class SearchEngine {
             }))
         }
 
-        // 文件语义通道:Gemma 文本嵌入查文件名/内容
+        // 文件语义通道:Gemma 文本嵌入查文件名/内容。
+        // 文本-文本嵌入基线相似度高(无关两段文字也常 ≥0.2),低门槛会让
+        // 月结单之类整批灌入不相干结果(「马尔代夫」事故)——抬高门槛+
+        // 相对截断(≥最高分70%)+限量 60,真提及内容的(0.4+)不受影响
         if !fileKinds.isEmpty, let gemma {
             let q = try gemma.embedQuery(concept)
-            channels.append((1.0, Self.dedupByRef(try store.search(
-                space: gemma.space, kinds: fileKinds, query: q, limit: topK, minScore: 0.12))))
+            var fileHits = Self.dedupByRef(try store.search(
+                space: gemma.space, kinds: fileKinds, query: q, limit: topK, minScore: 0.30))
+            let best = fileHits.first?.score ?? 0
+            if best > 0 { fileHits = fileHits.filter { $0.score >= best * 0.70 } }
+            if fileHits.count > 60 { fileHits = Array(fileHits.prefix(60)) }
+            channels.append((1.0, fileHits))
         }
 
         // Reciprocal Rank Fusion:贡献 = 权重/(60+名次);OCR 通道权重 8,必压语义通道

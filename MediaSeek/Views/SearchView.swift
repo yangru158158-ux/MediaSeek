@@ -23,7 +23,7 @@ struct SearchView: View {
     @State private var refineBaseIDs = Set<String>()  // 拨动「结果内」瞬间锁定的搜索范围(清空输入框/改词不丢)
     @State private var lastRoundCount = 0   // 结果内搜索的上一轮结果数(计数行展示/refine 校验)
     // 结果内收窄历史:每次收窄前压栈,可逐步退回上一轮
-    @State private var refineHistory: [(query: String, results: [DisplayHit], baseIDs: Set<String>, lastCount: Int)] = []
+    @State private var refineHistory: [(query: String, results: [DisplayHit], baseIDs: Set<String>, lastCount: Int, textIDs: Set<String>)] = []
     @State private var lastExecutedQuery = ""
     // 三维度结果切换:全部 / 文字吻合 / 语义吻合(结果集按命中通道归类)
     @State private var resultTab: ResultTab = .all
@@ -589,6 +589,7 @@ struct SearchView: View {
         results = prev.results
         refineBaseIDs = prev.baseIDs
         lastRoundCount = prev.lastCount
+        textHitIDs = prev.textIDs   // 文字命中集合同步恢复,否则返回后文字维度计数错乱
     }
 
     // MARK: - 导入文件删除(搜索结果里的文件卡片)
@@ -677,7 +678,7 @@ struct SearchView: View {
         searchedOnce = true
         if refining {
             // 收窄前把当前轮完整压栈,供「返回」逐步退回
-            refineHistory.append((lastExecutedQuery, results, refineBaseIDs, lastRoundCount))
+            refineHistory.append((lastExecutedQuery, results, refineBaseIDs, lastRoundCount, textHitIDs))
             if refineHistory.count > 20 { refineHistory.removeFirst() }
         }
         Task.detached(priority: .userInitiated) { [scope, refining] in
