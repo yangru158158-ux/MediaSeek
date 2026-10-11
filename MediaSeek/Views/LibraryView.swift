@@ -15,6 +15,9 @@ struct LibraryView: View {
     @State private var refreshPending = false
     @State private var filesExpanded = false
     @State private var previewFile: ImportedFile?
+    @State private var fileSelectionMode = false
+    @State private var selectedFileIDs: Set<String> = []
+    @State private var showFileDeleteDialog = false
     @State private var showDupResults = false
     @State private var showDupScan = false
 
@@ -62,6 +65,12 @@ struct LibraryView: View {
             }
             .sheet(isPresented: $showDupScan) {
                 DuplicateScanView()
+            }
+            .confirmationDialog("删除 \(selectedFileIDs.count) 个导入文件", isPresented: $showFileDeleteDialog,
+                                titleVisibility: .visible) {
+                Button("删除记录(保留原文件)", role: .destructive) { deleteSelectedFiles(deleteOriginal: false) }
+                Button("删除记录+原文件(原文件将被移除)", role: .destructive) { deleteSelectedFiles(deleteOriginal: true) }
+                Button("取消", role: .cancel) {}
             }
         }
     }
@@ -161,6 +170,31 @@ struct LibraryView: View {
         }
     }
 
+    /// 批量删除选中的导入文件:记录+全类型向量+OCR 原文;
+    /// deleteOriginal=true 时连书签指向的实体文件一并移除
+    private func deleteSelectedFiles(deleteOriginal: Bool) {
+        let targets = importedFiles.filter { selectedFileIDs.contains($0.id) }
+        guard !targets.isEmpty else { return }
+        var ok = 0
+        var originals = 0
+        for f in targets {
+            if deleteOriginal, let url = try? app.imports.resolveURL(f) {
+                do {
+                    try FileManager.default.removeItem(at: url)
+                    originals += 1
+                } catch { /* 原文件删不掉(只读/iCloud)则仅删记录 */ }
+                url.stopAccessingSecurityScopedResource()
+            }
+            do { try app.imports.remove(f); ok += 1 } catch { app.fail(error) }
+        }
+        selectedFileIDs.removeAll()
+        fileSelectionMode = false
+        refresh()
+        app.notify(deleteOriginal
+                   ? "已删除 \(ok) 个文件记录(原文件移除 \(originals) 个)"
+                   : "已删除 \(ok) 个文件记录(原文件保留)")
+    }
+
     // MARK: - 查重
 
     private var dedupSection: some View {
@@ -199,24 +233,62 @@ struct LibraryView: View {
     @ViewBuilder
     private var importedSection: some View {
         Section {
-            if importedFiles.count > 8 {
-                Button {
-                    withAnimation { filesExpanded.toggle() }
-                } label: {
-                    HStack {
-                        Text(filesExpanded ? "收起列表" : "展开全部 \(importedFiles.count) 个文件")
+            if importedFiles.count > 8 || fileSelectionMode {
+                HStack {
+                    Button {
+                        withAnimation { filesExpanded.toggle() }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text(filesExpanded ? "收起列表" : "展开全部 \(importedFiles.count) 个文件")
+                                .font(.footnote)
+                            Image(systemName: filesExpanded ? "chevron.up" : "chevron.down")
+                                .font(.caption2)
+                        }
+                    }
+                    Spacer()
+                    if !fileSelectionMode {
+                        Button("选择") { fileSelectionMode = true }
                             .font(.footnote)
-                        Image(systemName: filesExpanded ? "chevron.up" : "chevron.down")
-                            .font(.caption2)
                     }
                 }
+                .buttonStyle(.plain)
             }
             if filesExpanded || importedFiles.count <= 8 {
+                if fileSelectionMode {
+                    HStack {
+                        Button("全选") {
+                            selectedFileIDs = Set(importedFiles.map(\.id))
+                        }
+                        Spacer()
+                        Button("取消选择") {
+                            fileSelectionMode = false
+                            selectedFileIDs.removeAll()
+                        }
+                        Button("删除(\(selectedFileIDs.count))", role: .destructive) {
+                            showFileDeleteDialog = true
+                        }
+                        .disabled(selectedFileIDs.isEmpty)
+                    }
+                    .font(.footnote)
+                }
                 ForEach(importedFiles) { file in
                     Button {
-                        previewFile = file
+                        if fileSelectionMode {
+                            if selectedFileIDs.contains(file.id) {
+                                selectedFileIDs.remove(file.id)
+                            } else {
+                                selectedFileIDs.insert(file.id)
+                            }
+                        } else {
+                            previewFile = file
+                        }
                     } label: {
                         HStack(spacing: 10) {
+                            if fileSelectionMode {
+                                Image(systemName: selectedFileIDs.contains(file.id)
+                                      ? "checkmark.circle.fill" : "circle")
+                                    .foregroundStyle(selectedFileIDs.contains(file.id) ? .blue : .secondary)
+                            }
                             FileThumbView(record: file)
                                 .frame(width: 40, height: 40)
                                 .clipShape(RoundedRectangle(cornerRadius: 6))
@@ -227,8 +299,10 @@ struct LibraryView: View {
                                     .font(.caption2).foregroundStyle(.secondary)
                             }
                             Spacer()
-                            Image(systemName: "doc.text.magnifyingglass")
-                                .font(.caption).foregroundStyle(.tertiary)
+                            if !fileSelectionMode {
+                                Image(systemName: "doc.text.magnifyingglass")
+                                    .font(.caption).foregroundStyle(.tertiary)
+                            }
                         }
                     }
                     .buttonStyle(.plain)
@@ -240,7 +314,7 @@ struct LibraryView: View {
                     refresh()
                 }
             } else {
-                Text("列表已收起,点上方展开;左滑删除仍在搜索结果页可用")
+                Text("列表已收起,点上方展开")
                     .font(.caption).foregroundStyle(.secondary)
             }
         } header: {
