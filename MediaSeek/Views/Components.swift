@@ -160,6 +160,11 @@ struct DetailSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var confirmDelete = false
 
+    private var fileRecord: ImportedFile? {
+        if case .file(let r) = hit.target { return r }
+        return nil
+    }
+
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
@@ -171,7 +176,7 @@ struct DetailSheet: View {
             }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                if case .file(let record) = hit.target {
+                if fileRecord != nil {
                     ToolbarItem(placement: .topBarLeading) {
                         Button(role: .destructive) {
                             confirmDelete = true
@@ -186,15 +191,17 @@ struct DetailSheet: View {
             }
             .confirmationDialog("删除这份导入文件?", isPresented: $confirmDelete, titleVisibility: .visible) {
                 Button("删除记录(保留原文件)", role: .destructive) {
-                    try? app.imports.remove(record)
+                    if let record = fileRecord { try? app.imports.remove(record) }
                     dismiss()
                 }
                 Button("删除记录+原文件(原文件将被移除)", role: .destructive) {
-                    if let url = try? app.imports.resolveURL(record) {
-                        try? FileManager.default.removeItem(at: url)
-                        url.stopAccessingSecurityScopedResource()
+                    if let record = fileRecord {
+                        if let url = try? app.imports.resolveURL(record) {
+                            try? FileManager.default.removeItem(at: url)
+                            url.stopAccessingSecurityScopedResource()
+                        }
+                        try? app.imports.remove(record)
                     }
-                    try? app.imports.remove(record)
                     dismiss()
                 }
                 Button("取消", role: .cancel) {}
