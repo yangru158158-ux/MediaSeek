@@ -208,10 +208,9 @@ struct SearchView: View {
                     }
                     Spacer()
                     if !selectionMode {
-                        // 结果内开关常驻;空结果时禁止打开(锁到空基数会静默退化成全局搜索)
+                        // 结果内开关常驻,纯用户控制:开=只在当前结果集内搜(集合空了就诚实出 0),
+                        // 关=全局搜。恢复路径=「返回」逐级退回保存的历史轮次
                         Button {
-                            // 空结果禁止打开(锁到空基数会静默退化成全局搜索);关闭永远放行
-                            if !refineMode && results.isEmpty { return }
                             refineMode.toggle()
                             // 基数在拨动开关瞬间锁定:之后清空输入框、改词都不丢
                             refineBaseIDs = refineMode ? Set(results.map(\.refKey)) : []
@@ -310,7 +309,7 @@ struct SearchView: View {
     private func emptyStateHint(_ query: String, refining: Bool) -> String {
         let q = query.lowercased()
         if refining {
-            return "结果内搜索无命中:上一轮结果与新条件没有交集\n可点「结果内」关闭后全局重搜,或换个条件"
+            return "结果内搜索无命中:上一轮结果与新条件没有交集\n可点「↩返回」退回上一轮结果换词再搜\n或关闭「结果内」改回全局搜索"
         }
         if q.hasPrefix("语义:") {
             if let top = app.search.lastSemanticTopScore {
@@ -680,8 +679,22 @@ struct SearchView: View {
         let q = query.trimmingCharacters(in: .whitespaces)
         guard !q.isEmpty else { return }
         app.addSearchHistory(q)
-        // 结果内搜索:范围=拨动「结果内」开关瞬间锁定的基数(清空输入框/改词都不丢)
-        let refining = refineMode && !refineBaseIDs.isEmpty
+        // 结果内 = 纯用户语义:开着就只在当前基数集合里搜,所见即所搜。
+        // 基数空(上一轮 0)时继续搜就是 0,绝不静默退化成全局;恢复=「返回」或关开关
+        let refining = refineMode
+        if refining && refineBaseIDs.isEmpty {
+            // 当前结果集是空的:结果内继续搜只会是 0,直接出空页
+            results = []
+            elapsedMs = 0
+            lastExecutedQuery = q
+            textHitIDs = []
+            timeChip = nil
+            placeChip = nil
+            resultTab = .all
+            lastRoundCount = 0
+            searching = false
+            return
+        }
         searching = true
         searchedOnce = true
         if refining {
@@ -718,12 +731,11 @@ struct SearchView: View {
                 placeChip = outcome.placeLabel
                 resultTab = q.hasPrefix("文字:") ? .text : (q.hasPrefix("语义:") ? .semantic : .all)
                 searching = false
-                // 级联收窄:本轮结果自动成为下一轮「结果内」的范围。
-                // 0 结果的轮次不覆盖基数:排查链停在上一个有结果的集合,
-                // 某个词落空(福州里没有「电脑」)不该杀死整条链,换个词继续
+                // 级联收窄:本轮结果(含 0)自动成为下一轮「结果内」的范围,所见即所搜;
+                // 空了之后的恢复=「返回」退回保存的历史轮次,或关「结果内」改全局
                 if refining {
+                    refineBaseIDs = Set(hits.map(\.refKey))
                     lastRoundCount = hits.count
-                    if !hits.isEmpty { refineBaseIDs = Set(hits.map(\.refKey)) }
                 }
             }
         }
