@@ -213,8 +213,9 @@ struct SearchView: View {
                         Button {
                             refineMode.toggle()
                             // 基数在拨动开关瞬间锁定:之后清空输入框、改词都不丢
-                            refineBaseIDs = refineMode ? Set(results.map(\.refKey)) : []
-                            lastRoundCount = refineMode ? results.count : 0
+                            // 锁定所见集(含颜色/维度镜头):所见即所搜
+                            refineBaseIDs = refineMode ? Set(visibleResults.map(\.refKey)) : []
+                            lastRoundCount = refineMode ? visibleResults.count : 0
                             if !refineMode { refineHistory.removeAll() }
                         } label: {
                             Text(refineMode ? "结果内:开" : "结果内")
@@ -279,7 +280,8 @@ struct SearchView: View {
                     .foregroundStyle(.orange)
                     .padding(.horizontal)
             }
-            if !results.isEmpty && !selectionMode {
+            // 文件卡片没有颜色数据,显示颜色条纯属陷阱(点了必 0)
+            if !results.isEmpty && !selectionMode && scope != .file {
                 colorFilterBar
             }
         } else {
@@ -597,6 +599,8 @@ struct SearchView: View {
         refineBaseIDs = prev.baseIDs
         lastRoundCount = prev.lastCount
         textHitIDs = prev.textIDs   // 文字命中集合同步恢复,否则返回后文字维度计数错乱
+        colorFilter = nil           // 返回=完整恢复上一轮画面,不清镜头会继续滤成 0(2026-10-11 用户实测"无法返回")
+        resultTab = .all
     }
 
     // MARK: - 导入文件删除(搜索结果里的文件卡片)
@@ -682,25 +686,31 @@ struct SearchView: View {
         // 结果内 = 纯用户语义:开着就只在当前基数集合里搜,所见即所搜。
         // 基数空(上一轮 0)时继续搜就是 0,绝不静默退化成全局;恢复=「返回」或关开关
         let refining = refineMode
-        if refining && refineBaseIDs.isEmpty {
-            // 当前结果集是空的:结果内继续搜只会是 0,直接出空页
-            results = []
-            elapsedMs = 0
-            lastExecutedQuery = q
-            textHitIDs = []
-            timeChip = nil
-            placeChip = nil
-            resultTab = .all
-            lastRoundCount = 0
-            searching = false
-            return
-        }
         searching = true
         searchedOnce = true
+        // 本轮开始前的可见集(含颜色/维度镜头)——「所见即所搜」的收窄来源
+        let lensHits = visibleResults
+        // 新一轮从干净镜头开始:旧颜色筛选不清除会把无颜色结果(文件卡片)
+        // 静默清成 0,计数有内容无,用户只能杀 App(2026-10-11 hsbc 实测)
+        colorFilter = nil
         if refining {
-            // 收窄前把当前轮完整压栈,供「返回」逐步退回
+            // 压栈保存未筛选的当前轮(返回时完整恢复)
             refineHistory.append((lastExecutedQuery, results, refineBaseIDs, lastRoundCount, textHitIDs))
             if refineHistory.count > 20 { refineHistory.removeFirst() }
+            // 颜色/维度筛过的可见集就是下一轮的搜索范围
+            refineBaseIDs = Set(lensHits.map(\.refKey))
+            if refineBaseIDs.isEmpty {
+                results = []
+                elapsedMs = 0
+                lastExecutedQuery = q
+                textHitIDs = []
+                timeChip = nil
+                placeChip = nil
+                resultTab = .all
+                lastRoundCount = 0
+                searching = false
+                return
+            }
         }
         Task.detached(priority: .userInitiated) { [scope, refining] in
             var hits: [DisplayHit] = []
