@@ -237,7 +237,7 @@ final class SearchEngine {
         // 显式「语义:」查询门槛放宽到 0.14(用户点名要语义召回)
         if !imageKinds.isEmpty, let siglip {
             let q = try siglip.embedQuery(Self.siglipQuery(concept))
-            let floor = semanticOnly ? 0.14 : 0.18
+            let floor = semanticOnly ? 0.25 : 0.30
             var hits = Self.dedupByRef(try store.search(
                 space: siglip.space, kinds: imageKinds, query: q, limit: topK, minScore: Float(floor)))
             // 弱信号兜底:品牌词/抽象词(「微信」「聊天」)对截图的视觉相似度
@@ -245,7 +245,7 @@ final class SearchEngine {
             // 相似度排序仍然有效,降到 0.08 取相对头部,好过空页
             if hits.isEmpty {
                 hits = Self.dedupByRef(try store.search(
-                    space: siglip.space, kinds: imageKinds, query: q, limit: topK, minScore: 0.08))
+                    space: siglip.space, kinds: imageKinds, query: q, limit: topK, minScore: 0.18))
             }
             // 兜底后仍空 = 全库最高分都不到 0.08,记下最高原始分供空态提示
             if hits.isEmpty {
@@ -511,21 +511,21 @@ final class SearchEngine {
         if let within, !within.isEmpty {
             var hits = Self.dedupByRef((try? store.search(
                 space: siglip.space, kinds: [.photo], query: q, limit: topK,
-                minScore: 0.12, among: within)) ?? [])
+                minScore: 0.20, among: within)) ?? [])
             if hits.isEmpty {
                 hits = Self.dedupByRef((try? store.search(
                     space: siglip.space, kinds: [.photo], query: q, limit: topK,
-                    minScore: 0.06, among: within)) ?? [])
+                    minScore: 0.10, among: within)) ?? [])
             }
             let best = hits.first?.score ?? 0
             if best > 0 { hits = hits.filter { $0.score >= best * 0.85 } }
             return hits
         }
         var hits = Self.dedupByRef((try? store.search(
-            space: siglip.space, kinds: [.photo], query: q, limit: topK, minScore: 0.14)) ?? [])
+            space: siglip.space, kinds: [.photo], query: q, limit: topK, minScore: 0.25)) ?? [])
         if hits.isEmpty {
             hits = Self.dedupByRef((try? store.search(
-                space: siglip.space, kinds: [.photo], query: q, limit: topK, minScore: 0.08)) ?? [])
+                space: siglip.space, kinds: [.photo], query: q, limit: topK, minScore: 0.15)) ?? [])
         }
         let best = hits.first?.score ?? 0
         if best > 0 { hits = hits.filter { $0.score >= best * 0.85 } }

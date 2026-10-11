@@ -120,6 +120,39 @@ final class VectorStore {
         WHERE indexed = 1 AND lower(name || COALESCE(rel_path,'')) LIKE '%.pdf'
           AND id NOT IN (SELECT ref_key FROM ocr_text)
         """)
+        // 一次性迁移:历史向量未归一化(点积≠余弦,门槛随查询漂移)→ 统一单位化
+        if !UserDefaults.standard.bool(forKey: "vec_norm_migrated_1") {
+            var updates: [(rowid: Int32, vec: Data)] = []
+            let sel = try prepare("SELECT rowid, vec, dim FROM items")
+            while sqlite3_step(sel) == SQLITE_ROW {
+                let d = Int(sqlite3_column_int(sel, 2))
+                guard d > 0, let blob = sqlite3_column_blob(sel, 1) else { continue }
+                let v = Array(UnsafeBufferPointer(
+                    start: blob.assumingMemoryBound(to: Float.self), count: d))
+                let norm = vDSP.dot(v, v).squareRoot()
+                guard norm > 0.0001, abs(norm - 1) > 0.001 else { continue }
+                var unit = v.map { $0 / norm }
+                updates.append((sqlite3_column_int64(sel, 0),
+                                unit.withUnsafeBytes { Data($0) }))
+            }
+            sqlite3_finalize(sel)
+            if !updates.isEmpty {
+                let upd = try prepare("UPDATE items SET vec = ? WHERE rowid = ?")
+                try exec("BEGIN IMMEDIATE")
+                for u in updates {
+                    u.vec.withUnsafeBytes { raw in
+                        _ = sqlite3_bind_blob(upd, 1, raw.baseAddress, Int32(u.vec.count), Self.transient)
+                    }
+                    sqlite3_bind_int64(upd, 2, u.rowid)
+                    sqlite3_step(upd)
+                    sqlite3_reset(upd)
+                    sqlite3_clear_bindings(upd)
+                }
+                try exec("COMMIT")
+                sqlite3_finalize(upd)
+            }
+            UserDefaults.standard.set(true, forKey: "vec_norm_migrated_1")
+        }
     } }
 
     private func exec(_ sql: String) throws {

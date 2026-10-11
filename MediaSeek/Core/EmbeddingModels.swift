@@ -30,7 +30,8 @@ extension MLModel {
         guard let arr = out.featureValue(for: outputName)?.multiArrayValue else {
             throw MSError("模型输出缺少 \(outputName)")
         }
-        return arr.toFloatArray()
+        // 统一归一化:图/文嵌入单位化后点积即余弦,检索门槛不随输出尺度漂移
+        return VectorMath.normalized(arr.toFloatArray())
     }
 }
 
