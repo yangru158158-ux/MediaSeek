@@ -55,10 +55,11 @@ struct SearchView: View {
             }
             .confirmationDialog("删除 \(selected.count) 个选中项", isPresented: $showDeleteDialog, titleVisibility: .visible) {
                 if hasFileSelection {
-                    Button("删除导入文件记录(原文件保留不动)", role: .destructive) { deleteImportedFiles() }
+                    Button("删除文件记录(保留原文件)", role: .destructive) { deleteImportedFiles(deleteOriginal: false) }
+                    Button("删除文件记录+原文件(原文件将被移除)", role: .destructive) { deleteImportedFiles(deleteOriginal: true) }
                 }
                 if hasAssetSelection {
-                    Button("从系统相册删除(移入最近删除)", role: .destructive) { deleteFromPhotos() }
+                    Button("删除照片(移入最近删除,30 天可恢复)", role: .destructive) { deleteFromPhotos() }
                 }
                 Button("仅从索引移除(下次同步会回来)", role: .destructive) { removeFromIndexOnly() }
                 Button("取消", role: .cancel) {}
@@ -553,22 +554,36 @@ struct SearchView: View {
         return false
     } }
 
-    /// 删除导入文件记录:files 行、全类型向量、OCR 原文一次清净;原文件保留不动
-    private func deleteImportedFiles() {
+    /// 删除导入文件记录:files 行、全类型向量、OCR 原文一次清净;
+    /// deleteOriginal=true 时连原文件(书签指向的实体)一并移除
+    private func deleteImportedFiles(deleteOriginal: Bool) {
         let files = selectedFileRecords
         guard !files.isEmpty else { return }
         exporting = true
         Task {
             var ok = 0
+            var originals = 0
             for f in files {
-                do { try app.imports.remove(f); ok += 1 } catch { await MainActor.run { app.fail(error) } }
+                do {
+                    if deleteOriginal, let url = try? app.imports.resolveURL(f) {
+                        do {
+                            try FileManager.default.removeItem(at: url)
+                            originals += 1
+                        } catch { /* 原文件删不掉(只读/iCloud 未同步)则仅删记录 */ }
+                        url.stopAccessingSecurityScopedResource()
+                    }
+                    try app.imports.remove(f)
+                    ok += 1
+                } catch { await MainActor.run { app.fail(error) } }
             }
             let ids = Set(files.map(\.id))
             await MainActor.run {
                 results.removeAll { selected.contains($0.id) || ids.contains($0.refKey) }
                 selected.removeAll()
                 selectionMode = false
-                app.notify("已删除 \(ok) 个文件记录(原文件保留,索引同时清除)")
+                app.notify(deleteOriginal
+                           ? "已删除 \(ok) 个文件记录(原文件移除 \(originals) 个)"
+                           : "已删除 \(ok) 个文件记录(原文件保留)")
             }
             exporting = false
         }

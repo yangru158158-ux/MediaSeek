@@ -158,6 +158,7 @@ struct DetailSheet: View {
     let hit: DisplayHit
     @EnvironmentObject var app: AppModel
     @Environment(\.dismiss) private var dismiss
+    @State private var confirmDelete = false
 
     var body: some View {
         NavigationStack {
@@ -173,8 +174,7 @@ struct DetailSheet: View {
                 if case .file(let record) = hit.target {
                     ToolbarItem(placement: .topBarLeading) {
                         Button(role: .destructive) {
-                            try? app.imports.remove(record)
-                            dismiss()
+                            confirmDelete = true
                         } label: {
                             Image(systemName: "trash")
                         }
@@ -183,6 +183,21 @@ struct DetailSheet: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button("完成") { dismiss() }
                 }
+            }
+            .confirmationDialog("删除这份导入文件?", isPresented: $confirmDelete, titleVisibility: .visible) {
+                Button("删除记录(保留原文件)", role: .destructive) {
+                    try? app.imports.remove(record)
+                    dismiss()
+                }
+                Button("删除记录+原文件(原文件将被移除)", role: .destructive) {
+                    if let url = try? app.imports.resolveURL(record) {
+                        try? FileManager.default.removeItem(at: url)
+                        url.stopAccessingSecurityScopedResource()
+                    }
+                    try? app.imports.remove(record)
+                    dismiss()
+                }
+                Button("取消", role: .cancel) {}
             }
         }
     }
