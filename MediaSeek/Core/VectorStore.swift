@@ -132,7 +132,7 @@ final class VectorStore {
                 let norm = vDSP.dot(v, v).squareRoot()
                 guard norm > 0.0001, abs(norm - 1) > 0.001 else { continue }
                 var unit = v.map { $0 / norm }
-                updates.append((sqlite3_column_int64(sel, 0),
+                updates.append((Int32(sqlite3_column_int64(sel, 0)),
                                 unit.withUnsafeBytes { Data($0) }))
             }
             sqlite3_finalize(sel)
