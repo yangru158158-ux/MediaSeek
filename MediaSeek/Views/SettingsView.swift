@@ -164,20 +164,25 @@ struct SettingsView: View {
             } catch {
                 lines.append("诊断失败:\(error.localizedDescription)")
             }
-                // 语义探针:同一查询对 视频帧/照片 两类向量的最高分对比
+                // 语义探针 v2:已知强查询做对照,二分「文本塔整体退化」vs「罕见地名嵌入弱」
                 if let siglip = await MainActor.run(body: { app.models.siglip }) {
-                    for probe in [("模板英文", "This is a photo of maldives tropical island beach."),
-                                  ("中文原文", "马尔代夫")] {
+                    let probes = [("电脑屏幕(中文)", "电脑屏幕"),
+                                  ("computer screen(模板)", "This is a photo of a computer screen."),
+                                  ("beach(英文)", "beach"),
+                                  ("maldives(模板)", "This is a photo of maldives tropical island beach."),
+                                  ("马尔代夫(中文)", "马尔代夫")]
+                    for probe in probes {
                         if let q = try? siglip.embedQuery(probe.1) {
-                            let vf = (try? store.search(space: siglip.space, kinds: [.videoFrame],
-                                                        query: q, limit: 3, minScore: -1)) ?? []
                             let ph = (try? store.search(space: siglip.space, kinds: [.photo],
                                                         query: q, limit: 1, minScore: -1)) ?? []
-                            let f = vf.first.map { String(format: "%.3f", $0.score) } ?? "无行"
-                            let p = ph.first.map { String(format: "%.3f", $0.score) } ?? "无行"
-                            lines.append("\(probe.0):视频帧最高 \(f)(候选\(vf.count)) / 照片最高 \(p)")
+                            let vf = (try? store.search(space: siglip.space, kinds: [.videoFrame],
+                                                        query: q, limit: 1, minScore: -1)) ?? []
+                            let p = ph.first.map { String(format: "%.3f", $0.score) } ?? "无"
+                            let f = vf.first.map { String(format: "%.3f", $0.score) } ?? "无"
+                            lines.append("\(probe.0):照片 \(p) / 视频帧 \(f)")
                         }
                     }
+                    lines.append("(电脑屏幕也 <0.15 → 文本塔整体异常;仅马尔代夫低 → 罕见地名嵌入弱)")
                 }
             let out = lines.joined(separator: "\n")
             await MainActor.run {
