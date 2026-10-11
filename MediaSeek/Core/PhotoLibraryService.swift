@@ -24,6 +24,11 @@ final class PhotoLibraryService: ObservableObject {
         PHAsset.fetchAssets(with: fetchOptions())
     }
 
+    /// 相册视频总数(视频索引覆盖度展示用)
+    func totalVideoCount() -> Int {
+        PHAsset.fetchAssets(with: .video, options: nil).count
+    }
+
     /// 指定尺寸取图(会自动处理 iCloud 下载)。maxPixel 建议 320(索引)或屏幕尺寸(查看)
     func image(for asset: PHAsset, maxPixel: CGFloat) async throws -> CGImage? {
         let options = PHImageRequestOptions()

@@ -126,21 +126,23 @@ enum PlaceQueryParser {
 enum PlaceGeocoder {
     private static let cache = NSCache<NSString, CLCircularRegion>()
 
-    /// 地名 → 半径 20km 的圆形区域(带缓存;离线/失败返回 nil,搜索照常降级)
-    static func region(for name: String) async -> CLCircularRegion? {
-        if let v = cache.object(forKey: name as NSString) { return v }
+    /// 地名 → 圆形区域(带缓存;离线/失败返回 nil,搜索照常降级)。
+    /// 「在X」用默认 20km;裸城市名浏览用 50km(城市建成区+郊区一站式覆盖)
+    static func region(for name: String, radius: CLLocationDistance = 20_000) async -> CLCircularRegion? {
+        let cacheKey = "\(name)|\(radius)" as NSString
+        if let v = cache.object(forKey: cacheKey) { return v }
         let region: CLCircularRegion? = await withCheckedContinuation { cont in
             let geocoder = CLGeocoder()
             geocoder.geocodeAddressString(name) { placemarks, _ in
                 if let loc = placemarks?.first?.location {
                     cont.resume(returning: CLCircularRegion(
-                        center: loc.coordinate, radius: 20_000, identifier: name))
+                        center: loc.coordinate, radius: radius, identifier: name))
                 } else {
                     cont.resume(returning: nil)
                 }
             }
         }
-        if let region { cache.setObject(region, forKey: name as NSString) }
+        if let region { cache.setObject(region, forKey: cacheKey) }
         return region
     }
 }

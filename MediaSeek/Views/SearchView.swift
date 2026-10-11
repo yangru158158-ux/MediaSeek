@@ -329,6 +329,12 @@ struct SearchView: View {
                     ContentUnavailableView("没有找到相关内容",
                                            systemImage: "questionmark.folder",
                                            description: Text(emptyStateHint(query, refining: refineMode)))
+                    if scope == .video, let cov = app.indexing.videoCoverageSummary {
+                        Text(cov)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                    }
                     if refineMode {
                         Button {
                             refineMode = false

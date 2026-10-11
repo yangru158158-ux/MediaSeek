@@ -666,6 +666,15 @@ final class VectorStore {
         return (per.count, per)
     } }
 
+    /// 删除某视频的全部帧向量(重新抽帧前调用,防旧帧残留)
+    func removeFrames(refKey: String) throws { try serialized {
+        guard let db else { return }
+        let stmt = try prepare("DELETE FROM items WHERE kind = 'videoFrame' AND ref_key = ?")
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, refKey, -1, Self.transient)
+        sqlite3_step(stmt)
+    } }
+
     /// 全部照片的 clip 向量(查重用):keys 与 flat 内的行一一对应
     func allPhotoVectors() throws -> (keys: [String], flat: [Float], dim: Int) { try serialized {
         guard let db else { return ([], [], 0) }

@@ -47,6 +47,13 @@ final class IndexingCoordinator: ObservableObject {
     /// 已索引照片数(空态提示用)
     var indexedPhotoCount: Int { store.countPhotos() }
 
+    /// 视频索引覆盖度一行摘要(搜索页视频范围空态展示)
+    var videoCoverageSummary: String? {
+        guard photo.isAuthorized, let stats = try? store.videoFrameStats() else { return nil }
+        let total = photo.totalVideoCount()
+        return "视频帧已索引 \(stats.videos) / 相册共 \(total) 部;改抽帧数后同步会自动重索引"
+    }
+
     var chineseLabels: Bool {
         get { UserDefaults.standard.object(forKey: "chineseLabels") as? Bool ?? true }
         set { UserDefaults.standard.set(newValue, forKey: "chineseLabels") }
@@ -181,6 +188,13 @@ final class IndexingCoordinator: ObservableObject {
         // 跑多少存多少、中断可续,无需全量重建(无字照片有 "" 占位行,不会反复补)
         if !forceAll {
             for key in try store.photoRefKeysMissingOCR() { known.remove(key) }
+            // 抽帧数变更:已索引视频的帧行数与设置不符 → 原位重索引
+            // (改设置只影响新视频的话,旧视频永远停在旧帧数)
+            if let stats = try? store.videoFrameStats(), stats.videos > 0 {
+                for (key, n) in stats.perVideo where n != videoFramesPerVideo {
+                    known.remove(key)
+                }
+            }
         }
         let recentlyDeleted = Self.recentlyDeletedIDs()
 
@@ -318,6 +332,8 @@ final class IndexingCoordinator: ObservableObject {
             let frameCount = videoFramesPerVideo
             try await Task.detached(priority: .utility) {
                 guard let avAsset = await photo.avAsset(for: asset) else { return }
+                // 先清旧帧再采新帧:重索引(如抽帧数变更)后不残留旧帧行
+                try? store.removeFrames(refKey: asset.localIdentifier)
                 let frames = try await FrameSampler.sample(asset: avAsset, count: frameCount)
                 for (i, frame) in frames.enumerated() {
                     let vec = try clip.embedImage(frame)

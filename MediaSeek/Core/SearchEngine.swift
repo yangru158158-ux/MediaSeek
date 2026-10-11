@@ -143,9 +143,51 @@ final class SearchEngine {
                     query = cand.remaining.trimmingCharacters(in: .whitespaces)
                 }
             }
+            // 裸地名(整个查询就是「南京」「马尔代夫」):城市名无视觉特征,
+            // 语义通道认不出;挂 GPS 地点过滤,后面与地点浏览(全量拍摄记录)取并集。
+            // 地理编码失败则原地降级为普通内容搜索,不误伤
+            if placeRegion == nil, !query.isEmpty,
+               let p = QueryUnderstanding.barePlace(query),
+               let region = await PlaceGeocoder.region(for: p, radius: 50_000) {
+                placeRegion = region
+                placeLabel = p
+            }
             if query.isEmpty, dateRange == nil, placeRegion == nil {
                 query = QueryUnderstanding.core(spec.body)   // 时间词没能构成区间,回退原查询
             }
+        }
+
+        // 裸地名:GPS 地点浏览(该地拍摄的全部照片/视频,不依赖索引,拍摄时间倒序)
+        // 排前,内容通道命中随后;「文字/语义」维度沿用内容通道结果
+        if let placeRegion, placeLabel != nil, !query.isEmpty,
+           spec.channel == .any, spec.connector == .none, within == nil {
+            let main = try await runMainSearch(query: query, spec: spec, semanticOnly: semanticOnly,
+                                               scope: scope, topK: topK, siglip: siglip,
+                                               dateRange: dateRange, placeRegion: placeRegion,
+                                               placeLabel: placeLabel)
+            var merged = main.hits
+            var seen = Set(merged.map { $0.refKey })
+            photo.fetchAllAssets().enumerateObjects { asset, _, _ in
+                guard merged.count < topK else { return }
+                if scope == .file { return }   // 文件无 GPS,地点浏览只列相册内容
+                if scope == .photo, asset.mediaType != .image { return }
+                if scope == .video, asset.mediaType != .video { return }
+                guard Self.assetPasses(asset, dateRange: dateRange, place: placeRegion) else { return }
+                guard !seen.contains(asset.localIdentifier) else { return }
+                seen.insert(asset.localIdentifier)
+                let isVideo = asset.mediaType == .video
+                merged.append(DisplayHit(
+                    id: "\(isVideo ? ItemKind.videoFrame.rawValue : ItemKind.photo.rawValue)-\(asset.localIdentifier)",
+                    refKey: asset.localIdentifier,
+                    target: .asset(asset),
+                    kind: isVideo ? .videoFrame : .photo,
+                    title: isVideo ? "视频" : "照片",
+                    score: 1.0, date: asset.creationDate,
+                    color: store.colorForRef(asset.localIdentifier)))
+            }
+            // 地点浏览命中按拍摄时间倒序排前(fetchAllAssets 即此顺序)
+            return SearchOutcome(hits: merged, textIDs: main.textIDs,
+                                 timeLabel: dateRange?.label, placeLabel: placeLabel)
         }
 
         // 纯时间/地点浏览:无内容词,按拍摄时间倒序列出该时段的照片/视频/文件
@@ -236,7 +278,7 @@ final class SearchEngine {
         // 以 ≥0.60 命中,造成整库截图照灌进结果(「医学出生证明」事故)
         // 显式「语义:」查询门槛放宽到 0.14(用户点名要语义召回)
         if !imageKinds.isEmpty, let siglip {
-            let q = try siglip.embedQuery(Self.siglipQuery(concept))
+            let q = try Self.siglipQueryVec(concept, siglip: siglip)
             // 视频帧偏暗/糊,门槛比照片低一档
             let floor = semanticOnly ? 0.25 : (scope == .video ? 0.22 : 0.30)
             var hits = Self.dedupByRef(try store.search(
@@ -493,20 +535,34 @@ final class SearchEngine {
         return resolve(combine(perTerm, connector: spec.connector))
     }
 
-    /// SigLIP2 官方零样本模板("This is a photo of X.")对短语类查询更友好;
-    /// 词典命中的精选英文描述套模板,未命中(长句/自由文本)保持原文
-    private static func siglipQuery(_ concept: String) -> String {
+    /// 提示词集成(CLP/SigLIP 通行做法):多个模板各自嵌入 → 平均 → 归一化,
+    /// 比单模板稳检索;官方推荐模板 "This is a photo of X." 必须占一席。
+    /// 词典命中的精选英文描述出 3 个模板;长句/自由文本保持原文+官方模板两路
+    private static func siglipQueryVec(_ concept: String, siglip: SigLIPEmbedder) throws -> [Float] {
+        let variants: [String]
         if let en = QueryUnderstanding.english(for: concept) {
-            return "This is a photo of \(en)."
+            variants = ["This is a photo of \(en).", "a photo of \(en)", en]
+        } else {
+            variants = [concept, "This is a photo of \(concept)."]
         }
-        return concept
+        var vecs: [[Float]] = []
+        for v in variants {
+            if let e = try? siglip.embedQuery(v) { vecs.append(e) }
+        }
+        guard !vecs.isEmpty else { throw MSError("文本嵌入失败") }
+        var mean = [Float](repeating: 0, count: vecs[0].count)
+        for v in vecs {
+            for i in mean.indices where i < v.count { mean[i] += v[i] }
+        }
+        for i in mean.indices { mean[i] /= Float(vecs.count) }
+        return VectorMath.normalized(mean)
     }
 
     /// 单词语义命中(SigLIP 视觉,门槛 0.14 + 0.08 弱信号兜底 + 相对尾部截断)
     private func semanticHits(_ term: String, siglip: SigLIPEmbedder?, topK: Int,
                               within: Set<String>? = nil) -> [SearchHit] {
         guard let siglip else { return [] }
-        guard let q = try? siglip.embedQuery(Self.siglipQuery(term)) else { return [] }
+        guard let q = try? Self.siglipQueryVec(term, siglip: siglip) else { return [] }
         // 结果内核验:分数只在基数集合内算,门槛放宽、相对截断以集合内最佳为基准——
         // 否则全局排名的尾部截断会在取交集前把候选砍光(「行情图 ∩ 语义:电脑屏幕=0」事故:
         // 全库最高分是实拍屏幕,行情截图全被 85% 线砍掉,交集自然为空)
