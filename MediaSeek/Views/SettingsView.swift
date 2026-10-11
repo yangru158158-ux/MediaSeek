@@ -164,8 +164,7 @@ struct SettingsView: View {
             } catch {
                 lines.append("诊断失败:\(error.localizedDescription)")
             }
-            let out = lines.joined(separator: "
-")
+            let out = lines.joined(separator: "\n")
             await MainActor.run {
                 videoDiagText = out
                 videoDiagRunning = false
