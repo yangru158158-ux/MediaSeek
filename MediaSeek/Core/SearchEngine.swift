@@ -331,7 +331,7 @@ final class SearchEngine {
         }
         if !semanticTerms.isEmpty, !satisfied.isEmpty, let siglip {
             for t in semanticTerms where !satisfied.isEmpty {
-                let ok = Set(semanticHits(t, siglip: siglip, topK: topK).map(\.refKey))
+                let ok = Set(semanticHits(t, siglip: siglip, topK: topK, within: satisfied).map(\.refKey))
                 satisfied.formIntersection(ok)
             }
         }
@@ -395,7 +395,8 @@ final class SearchEngine {
                               score: Float(1.0 / Double(rank + 1)), color: nil)
                 })
             } else {
-                var hits = semanticHits(t, siglip: siglip, topK: topK)
+                // 结果内时语义分数限定在基数集合内算(同 searchWithin 的修正)
+                var hits = semanticHits(t, siglip: siglip, topK: topK, within: within)
                 if let within { hits = hits.filter { within.contains($0.refKey) } }
                 perTerm.append(hits)
             }
@@ -404,9 +405,26 @@ final class SearchEngine {
     }
 
     /// 单词语义命中(SigLIP 视觉,门槛 0.14 + 0.08 弱信号兜底 + 相对尾部截断)
-    private func semanticHits(_ term: String, siglip: SigLIPEmbedder?, topK: Int) -> [SearchHit] {
+    private func semanticHits(_ term: String, siglip: SigLIPEmbedder?, topK: Int,
+                              within: Set<String>? = nil) -> [SearchHit] {
         guard let siglip else { return [] }
         guard let q = try? siglip.embedQuery(QueryUnderstanding.english(for: term) ?? term) else { return [] }
+        // 结果内核验:分数只在基数集合内算,门槛放宽、相对截断以集合内最佳为基准——
+        // 否则全局排名的尾部截断会在取交集前把候选砍光(「行情图 ∩ 语义:电脑屏幕=0」事故:
+        // 全库最高分是实拍屏幕,行情截图全被 85% 线砍掉,交集自然为空)
+        if let within, !within.isEmpty {
+            var hits = Self.dedupByRef((try? store.search(
+                space: siglip.space, kinds: [.photo], query: q, limit: topK,
+                minScore: 0.12, among: within)) ?? [])
+            if hits.isEmpty {
+                hits = Self.dedupByRef((try? store.search(
+                    space: siglip.space, kinds: [.photo], query: q, limit: topK,
+                    minScore: 0.06, among: within)) ?? [])
+            }
+            let best = hits.first?.score ?? 0
+            if best > 0 { hits = hits.filter { $0.score >= best * 0.85 } }
+            return hits
+        }
         var hits = Self.dedupByRef((try? store.search(
             space: siglip.space, kinds: [.photo], query: q, limit: topK, minScore: 0.14)) ?? [])
         if hits.isEmpty {

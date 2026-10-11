@@ -272,7 +272,7 @@ final class VectorStore {
 
     /// 余弦检索(向量写入时已归一化,点积即余弦)
     func search(space: String, kinds: [ItemKind], query: [Float],
-                limit: Int, minScore: Float) throws -> [SearchHit] { try serialized {
+                limit: Int, minScore: Float, among: Set<String>? = nil) throws -> [SearchHit] { try serialized {
         guard let db else { return [] }
         let ph = kinds.map { _ in "?" }.joined(separator: ",")
         let stmt = try prepare("""
@@ -289,6 +289,8 @@ final class VectorStore {
         while sqlite3_step(stmt) == SQLITE_ROW {
             let kind = ItemKind(rawValue: String(cString: sqlite3_column_text(stmt, 0))) ?? .file
             let refKey = String(cString: sqlite3_column_text(stmt, 1))
+            // 结果内限定:只对基数集合内的行算分(全表扫描成本不变)
+            if let among, !among.contains(refKey) { continue }
             let frameIndex = Int(sqlite3_column_int(stmt, 2))
             let title = sqlite3_column_type(stmt, 3) == SQLITE_NULL
                 ? nil : String(cString: sqlite3_column_text(stmt, 3))
