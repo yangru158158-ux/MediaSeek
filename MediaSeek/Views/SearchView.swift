@@ -208,8 +208,10 @@ struct SearchView: View {
                     }
                     Spacer()
                     if !selectionMode {
-                        // 结果内开关常驻(零结果时也要能关闭,否则会死循环)
+                        // 结果内开关常驻;空结果时禁止打开(锁到空基数会静默退化成全局搜索)
                         Button {
+                            // 空结果禁止打开(锁到空基数会静默退化成全局搜索);关闭永远放行
+                            if !refineMode && results.isEmpty { return }
                             refineMode.toggle()
                             // 基数在拨动开关瞬间锁定:之后清空输入框、改词都不丢
                             refineBaseIDs = refineMode ? Set(results.map(\.refKey)) : []
@@ -716,10 +718,12 @@ struct SearchView: View {
                 placeChip = outcome.placeLabel
                 resultTab = q.hasPrefix("文字:") ? .text : (q.hasPrefix("语义:") ? .semantic : .all)
                 searching = false
-                // 级联收窄:本轮结果自动成为下一轮「结果内」的范围
+                // 级联收窄:本轮结果自动成为下一轮「结果内」的范围。
+                // 0 结果的轮次不覆盖基数:排查链停在上一个有结果的集合,
+                // 某个词落空(福州里没有「电脑」)不该杀死整条链,换个词继续
                 if refining {
-                    refineBaseIDs = Set(hits.map(\.refKey))
                     lastRoundCount = hits.count
+                    if !hits.isEmpty { refineBaseIDs = Set(hits.map(\.refKey)) }
                 }
             }
         }
