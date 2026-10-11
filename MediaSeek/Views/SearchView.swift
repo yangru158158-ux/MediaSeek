@@ -17,6 +17,9 @@ struct SearchView: View {
     @State private var refineMode = false
     @State private var refineBaseIDs = Set<String>()  // 拨动「结果内」瞬间锁定的搜索范围(清空输入框/改词不丢)
     @State private var lastRoundCount = 0   // 结果内搜索的上一轮结果数(计数行展示/refine 校验)
+    // 结果内收窄历史:每次收窄前压栈,可逐步退回上一轮
+    @State private var refineHistory: [(query: String, results: [DisplayHit], baseIDs: Set<String>, lastCount: Int)] = []
+    @State private var lastExecutedQuery = ""
     @State private var batchTagText = ""
     @State private var showTagAlert = false
     @State private var showDeleteDialog = false
@@ -81,6 +84,7 @@ struct SearchView: View {
                     query = ""
                     results = []
                     searchedOnce = false
+                    refineHistory.removeAll()
                 } label: {
                     Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
                 }
@@ -180,6 +184,7 @@ struct SearchView: View {
                             // 基数在拨动开关瞬间锁定:之后清空输入框、改词都不丢
                             refineBaseIDs = refineMode ? Set(results.map(\.refKey)) : []
                             lastRoundCount = refineMode ? results.count : 0
+                            if !refineMode { refineHistory.removeAll() }
                         } label: {
                             Text(refineMode ? "结果内:开" : "结果内")
                                 .font(.caption)
@@ -188,6 +193,18 @@ struct SearchView: View {
                                             in: Capsule())
                         }
                         .buttonStyle(.plain)
+                        // 收窄历史返回:逐步退回上一轮结果(可连按)
+                        if refineMode && !refineHistory.isEmpty {
+                            Button {
+                                refineBack()
+                            } label: {
+                                Label("返回(\(refineHistory.count))", systemImage: "arrow.uturn.backward")
+                                    .font(.caption)
+                                    .padding(.horizontal, 8).padding(.vertical, 4)
+                                    .background(Color(.systemGray6), in: Capsule())
+                            }
+                            .buttonStyle(.plain)
+                        }
                     }
                     if !results.isEmpty {
                         if exporting {
@@ -511,6 +528,17 @@ struct SearchView: View {
         app.notify("已从索引移除(下次同步会重新索引)")
     }
 
+    /// 结果内搜索退回:弹出一轮历史,恢复上一次的结果/查询词/基数(可连按逐步退回)
+    private func refineBack() {
+        guard let prev = refineHistory.popLast() else { return }
+        searching = false
+        query = prev.query
+        lastExecutedQuery = prev.query
+        results = prev.results
+        refineBaseIDs = prev.baseIDs
+        lastRoundCount = prev.lastCount
+    }
+
     // MARK: - 导入文件删除(搜索结果里的文件卡片)
 
     private var selectedFileRecords: [ImportedFile] {
@@ -581,6 +609,11 @@ struct SearchView: View {
         let refining = refineMode && !refineBaseIDs.isEmpty
         searching = true
         searchedOnce = true
+        if refining {
+            // 收窄前把当前轮完整压栈,供「返回」逐步退回
+            refineHistory.append((lastExecutedQuery, results, refineBaseIDs, lastRoundCount))
+            if refineHistory.count > 20 { refineHistory.removeFirst() }
+        }
         Task.detached(priority: .userInitiated) { [scope, refining] in
             var hits: [DisplayHit] = []
             var ms = 0
@@ -602,6 +635,7 @@ struct SearchView: View {
                 }
                 results = hits
                 elapsedMs = ms
+                lastExecutedQuery = q
                 searching = false
                 // 级联收窄:本轮结果自动成为下一轮「结果内」的范围
                 if refining {
