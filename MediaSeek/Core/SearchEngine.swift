@@ -257,10 +257,12 @@ final class SearchEngine {
         var channels: [(weight: Double, hits: [SearchHit])] = []
         let gemma = await MainActor.run { models.gemma }
 
-        // 标签精确通道(优先):词典英译+同义词与 Vision 英文标签 token 级比对,零幻觉
+        // 标签精确通道(优先):词典英译+同义词与 Vision 英文标签 token 级比对,零幻觉。
+        // 文字: 前缀 = 排他文字通道,标签/视觉/用户标签一概不参与(用户 2026-10-11:
+        // 「结果内搜指定了文字,视频还出现就不对」——111 重构后主管线漏了这层排他)
         var labelHits: [SearchHit] = []
         let tokens = Self.queryTokens(query: concept)
-        if !tokens.isEmpty {
+        if !tokens.isEmpty, spec.channel != .text {
             // 照片标签行(视频范围不得参与,否则照片漏进视频结果)
             if imageKinds.contains(.photo), let rows = try? store.allPhotoLabels() {
                 var scored: [(refKey: String, matches: Int, title: String)] = []
@@ -300,7 +302,8 @@ final class SearchEngine {
         // 不再用语义路由——泛化标签(document/screenshot)会被几乎任何词
         // 以 ≥0.60 命中,造成整库截图照灌进结果(「医学出生证明」事故)
         // 显式「语义:」查询门槛放宽到 0.14(用户点名要语义召回)
-        if !imageKinds.isEmpty, let siglip {
+        // 文字: 前缀排他:视觉通道(照片/视频帧)不参与
+        if !imageKinds.isEmpty, spec.channel != .text, let siglip {
             let q = try siglip.embedQuery(Self.siglipQuery(concept))
             // 照片与视频帧分开走各自的门槛阶梯:分数分布不同,且照片行为已验收冻结
             var hits: [SearchHit] = []
@@ -350,8 +353,8 @@ final class SearchEngine {
             channels.append((1.0, best > 0 ? hits.filter { $0.score >= best * 0.85 } : hits))
         }
 
-        // 用户标签通道:中文子串精确匹配
-        if imageKinds.contains(.photo) {
+        // 用户标签通道:中文子串精确匹配(文字: 排他,不参与)
+        if spec.channel != .text, imageKinds.contains(.photo) {
             let tagRefs = ((try? store.searchUserTags(query: concept)) ?? [])
                 .filter { among?.contains($0) ?? true }
             if !tagRefs.isEmpty {
@@ -362,13 +365,13 @@ final class SearchEngine {
             }
         }
 
-        // 文件语义通道:Gemma 文本嵌入查文件名/内容。
+        // 文件语义通道(文字: 排他,不参与):Gemma 文本嵌入查文件名/内容。
         // 绝对门槛不可靠:嵌入基线高且随查询/语言漂移(「马尔代夫」能把
         // 汇丰结单和 rar 灌进来,0.30/0.50 都拦不住)。改自校准离群检测:
         // 低门槛取候选后,只有「最高分 ≥0.40 且显著高于中位数(+0.10)」
         // 才认为查询真的指向文件,否则整通道静默。
         // 文件标签页(范围=文件)不做离群门槛,保留完整语义浏览。
-        if !fileKinds.isEmpty, let gemma {
+        if !fileKinds.isEmpty, spec.channel != .text, let gemma {
             let q = try gemma.embedQuery(concept)
             var fileHits = Self.dedupByRef(try store.search(
                 space: gemma.space, kinds: fileKinds, query: q, limit: topK,

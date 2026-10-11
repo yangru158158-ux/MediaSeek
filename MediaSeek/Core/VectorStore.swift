@@ -701,6 +701,9 @@ final class VectorStore {
         while sqlite3_step(stmt) == SQLITE_ROW {
             let d = Int(sqlite3_column_int(stmt, 2))
             guard d > 0, let blob = sqlite3_column_blob(stmt, 1) else { continue }
+            // blob 实际字节数必须与 dim 声明一致:截断行会让 UnsafeBufferPointer
+            // 越界读 sqlite 堆内存 → vDSP_mmul SIGSEGV(2026-10-11 查重崩溃实锤)
+            guard sqlite3_column_bytes(stmt, 1) == d * 4 else { continue }
             if dim == 0 { dim = d } else if d != dim { continue }
             keys.append(String(cString: sqlite3_column_text(stmt, 0)))
             flat.append(contentsOf: Array(UnsafeBufferPointer(
