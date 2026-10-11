@@ -216,10 +216,13 @@ final class SearchEngine {
         }
 
         if let within, !within.isEmpty {
-            return SearchOutcome(hits: try await searchWithin(query: query, spec: spec,
-                                   semanticOnly: semanticOnly, scope: scope, topK: topK,
-                                   within: within, siglip: siglip),
-                                 textIDs: [], timeLabel: nil, placeLabel: nil)
+            // 结果内 = 同一条主管线 + 基数集合约束:三维度/排名/标题与第一次搜索
+            // 完全一致(旧 searchWithin 是特设核验流程,通道与主流程不同步,
+            // 反复出病:门槛悬空、漏标签通道,已删)
+            return try await runMainSearch(query: query, spec: spec, semanticOnly: semanticOnly,
+                                           scope: scope, topK: topK, siglip: siglip,
+                                           dateRange: nil, placeRegion: nil, placeLabel: nil,
+                                           among: within)
         }
         if spec.channel == .text || spec.connector != .none {
             return SearchOutcome(hits: try await searchScoped(spec: spec, scope: scope,
@@ -235,7 +238,9 @@ final class SearchEngine {
     private func runMainSearch(query: String, spec: QuerySpec, semanticOnly: Bool,
                                scope: SearchScope, topK: Int, siglip: SigLIPEmbedder?,
                                dateRange: QueryDateRange?, placeRegion: CLCircularRegion?,
-                               placeLabel: String?) async throws -> SearchOutcome {
+                               placeLabel: String?, among: Set<String>? = nil) async throws -> SearchOutcome {
+        // among = 结果内基数(第一次搜索的结果集合):非 nil 时所有通道只在此集合内
+        // 取命中,管线其余部分(通道权重/RRF 排名/三维度切分)与全局搜索完全一致
         // 多词查询:「2026 电脑屏幕」→ 含数字的词走 OCR 文字匹配,
         // 其余词走视觉/标签;「或」语义:照片满足任一条件(像/含字)即显示
         let terms = Self.splitTerms(query)
@@ -259,7 +264,7 @@ final class SearchEngine {
             let tokens = Self.queryTokens(query: concept)
             if !tokens.isEmpty, let rows = try? store.allPhotoLabels() {
                 var scored: [(refKey: String, matches: Int, title: String)] = []
-                for row in rows {
+                for row in rows where among?.contains(row.refKey) ?? true {
                     let labelTokens = Set(row.title.lowercased()
                         .components(separatedBy: CharacterSet(charactersIn: ", ")))
                     let m = tokens.intersection(labelTokens).count
@@ -285,21 +290,25 @@ final class SearchEngine {
             if imageKinds.contains(.photo) {
                 let floor: Float = semanticOnly ? 0.25 : 0.30
                 hits = Self.dedupByRef(try store.search(
-                    space: siglip.space, kinds: [.photo], query: q, limit: topK, minScore: floor))
+                    space: siglip.space, kinds: [.photo], query: q, limit: topK,
+                    minScore: floor, among: among))
                 // 弱信号兜底:品牌词/抽象词(「微信」「聊天」)对截图的视觉相似度
                 // 天然低于常规门槛,一刀切会整词清零(2026-10-10 用户实测三个词全空)
                 if hits.isEmpty {
                     hits = Self.dedupByRef(try store.search(
-                        space: siglip.space, kinds: [.photo], query: q, limit: topK, minScore: 0.18))
+                        space: siglip.space, kinds: [.photo], query: q, limit: topK,
+                        minScore: 0.18, among: among))
                 }
             }
             if imageKinds.contains(.videoFrame) {
                 let vFloor: Float = semanticOnly ? 0.25 : 0.22
                 var vHits = Self.dedupByRef(try store.search(
-                    space: siglip.space, kinds: [.videoFrame], query: q, limit: topK, minScore: vFloor))
+                    space: siglip.space, kinds: [.videoFrame], query: q, limit: topK,
+                    minScore: vFloor, among: among))
                 if vHits.isEmpty {
                     vHits = Self.dedupByRef(try store.search(
-                        space: siglip.space, kinds: [.videoFrame], query: q, limit: topK, minScore: 0.12))
+                        space: siglip.space, kinds: [.videoFrame], query: q, limit: topK,
+                        minScore: 0.12, among: among))
                 }
                 if vHits.isEmpty {
                     // 诊断实锤(2026-10-11):SigLIP2 在本库的真实分布 max 仅 0.07 上下
@@ -307,7 +316,8 @@ final class SearchEngine {
                     // 绝对门槛 0.12-0.30 全部悬空;视频帧又没有标签/OCR 兜底,一悬空即全空。
                     // 改相对标定:0.04 取候选(远高于底噪),尾部由下方 best×0.85 截断兜住
                     vHits = Self.dedupByRef(try store.search(
-                        space: siglip.space, kinds: [.videoFrame], query: q, limit: topK, minScore: 0.04))
+                        space: siglip.space, kinds: [.videoFrame], query: q, limit: topK,
+                        minScore: 0.04, among: among))
                 }
                 hits.append(contentsOf: vHits)
                 hits = Self.dedupByRef(hits)
@@ -315,7 +325,8 @@ final class SearchEngine {
             // 兜底后仍空 = 全库最高分都不到 0.08,记下最高原始分供空态提示
             if hits.isEmpty {
                 lastSemanticTopScore = (try? store.search(
-                    space: siglip.space, kinds: imageKinds, query: q, limit: 1, minScore: -1))?.first?.score
+                    space: siglip.space, kinds: imageKinds, query: q, limit: 1,
+                    minScore: -1, among: among))?.first?.score
             }
             // 相对尾部截断:远弱于头部的长尾(如「人」里混入的屏幕翻拍照)直接砍掉
             let best = hits.first?.score ?? 0
@@ -323,11 +334,15 @@ final class SearchEngine {
         }
 
         // 用户标签通道:中文子串精确匹配
-        if imageKinds.contains(.photo), let tagRefs = try? store.searchUserTags(query: concept), !tagRefs.isEmpty {
-            channels.append((1.6, tagRefs.map {
-                SearchHit(kind: .photo, refKey: $0, frameIndex: 0,
-                          space: "userTag", title: nil, date: nil, score: 1.0, color: nil)
-            }))
+        if imageKinds.contains(.photo) {
+            let tagRefs = ((try? store.searchUserTags(query: concept)) ?? [])
+                .filter { among?.contains($0) ?? true }
+            if !tagRefs.isEmpty {
+                channels.append((1.6, tagRefs.map {
+                    SearchHit(kind: .photo, refKey: $0, frameIndex: 0,
+                              space: "userTag", title: nil, date: nil, score: 1.0, color: nil)
+                }))
+            }
         }
 
         // 文件语义通道:Gemma 文本嵌入查文件名/内容。
@@ -340,8 +355,9 @@ final class SearchEngine {
             let q = try gemma.embedQuery(concept)
             var fileHits = Self.dedupByRef(try store.search(
                 space: gemma.space, kinds: fileKinds, query: q, limit: topK,
-                minScore: scope == .file ? 0.25 : 0.20))
-            if scope != .file, fileHits.count > 1 {
+                minScore: scope == .file ? 0.25 : 0.20, among: among))
+            // 结果内不做离群门槛(基数是用户点名的小集合),只留相对截断
+            if among == nil, scope != .file, fileHits.count > 1 {
                 let scores = fileHits.map(\.score).sorted()
                 let median = scores[scores.count / 2]
                 let best = scores.last ?? 0
@@ -381,7 +397,8 @@ final class SearchEngine {
             var seen = Set<String>()
             var rank = 0
             for t in (textTerms.isEmpty ? [query] : textTerms) where !t.isEmpty {
-                for ref in (try? store.searchOCR(query: t)) ?? [] where !seen.contains(ref.refKey) {
+                for ref in (try? store.searchOCR(query: t)) ?? []
+                where !seen.contains(ref.refKey) && (among?.contains(ref.refKey) ?? true) {
                     seen.insert(ref.refKey)
                     add(SearchHit(kind: ocrKind(ref.refKey), refKey: ref.refKey, frameIndex: 0,
                                   space: "ocr", title: "含「\(t)」:\(Self.ocrSnippet(ref.text, t))",
@@ -402,7 +419,8 @@ final class SearchEngine {
                     }
                     var counts: [String: Int] = [:]
                     for g in grams {
-                        for ref in (try? store.searchOCR(query: g)) ?? [] {
+                        for ref in (try? store.searchOCR(query: g)) ?? []
+                        where among?.contains(ref.refKey) ?? true {
                             counts[ref.refKey, default: 0] += 1
                         }
                     }
@@ -453,64 +471,6 @@ final class SearchEngine {
         return tokens
     }
 
-
-    /// 结果内搜索:对上一轮命中的照片用现有索引逐条件核验。
-    /// 文字条件:直接查这些照片的 OCR 文字;语义条件:视觉命中后限定在这些照片里。
-    /// 全部条件满足才保留——与全库排名、截断、重建进度完全解耦
-    private func searchWithin(query: String, spec: QuerySpec, semanticOnly: Bool,
-                              scope: SearchScope, topK: Int,
-                              within: Set<String>, siglip: SigLIPEmbedder?) async throws -> [DisplayHit] {
-        guard scope == .all || scope == .photo else { return [] }
-        let terms = Self.splitTerms(spec.body)
-        guard !terms.isEmpty else { return [] }
-
-        let textTerms: [String]
-        let semanticTerms: [String]
-        if spec.channel == .text {
-            textTerms = terms; semanticTerms = []
-        } else if spec.channel == .semantic {
-            textTerms = []; semanticTerms = terms
-        } else {
-            textTerms = terms.filter(Self.containsDigit)
-            semanticTerms = terms.filter { !Self.containsDigit($0) }
-        }
-
-        var satisfied = within
-        for t in textTerms where !t.isEmpty {
-            let ok = Set((try? store.searchOCR(query: t, among: Array(satisfied))) ?? [])
-            satisfied.formIntersection(ok)
-            if satisfied.isEmpty { break }
-        }
-        if !semanticTerms.isEmpty, !satisfied.isEmpty, let siglip {
-            // 标签通道核验:主流程搜「人/人物」主要靠 Vision 标签(比 SigLIP 分得开),
-            // 结果内不查标签的话语义词照样恒空(2026-10-11 福州结果内实测)
-            var labelsByRef: [String: Set<String>] = [:]
-            if let rows = try? store.allPhotoLabels() {
-                for row in rows where satisfied.contains(row.refKey) {
-                    labelsByRef[row.refKey, default: []].formUnion(
-                        row.title.lowercased().components(separatedBy: CharacterSet(charactersIn: ", ")))
-                }
-            }
-            for t in semanticTerms where !satisfied.isEmpty {
-                var ok = Set(semanticHits(t, siglip: siglip, topK: topK, within: satisfied).map(\.refKey))
-                let tokens = Self.queryTokens(query: t)
-                if !tokens.isEmpty {
-                    ok.formUnion(labelsByRef.filter { !tokens.isDisjoint(with: $0.value) }.map(\.key))
-                }
-                satisfied.formIntersection(ok)
-            }
-        }
-        guard !satisfied.isEmpty else { return [] }
-
-        let fileIds = (try? store.fileIds()) ?? []
-        let hits = satisfied.sorted().map {
-            SearchHit(kind: (fileIds.contains($0) ? .file : .photo), refKey: $0, frameIndex: 0,
-                      space: "within",
-                      title: "结果内命中(\(semanticTerms.isEmpty ? "文字" : "语义+文字"))",
-                      date: nil, score: 1.0, color: store.colorForRef($0))
-        }
-        return resolve(normalized(hits))
-    }
 
     /// 显式语法流程:通道(文字/语义/自动)× 连接词(and/or)自由组合
     private func searchScoped(spec: QuerySpec, scope: SearchScope,
