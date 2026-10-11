@@ -164,6 +164,21 @@ struct SettingsView: View {
             } catch {
                 lines.append("诊断失败:\(error.localizedDescription)")
             }
+                // 语义探针:同一查询对 视频帧/照片 两类向量的最高分对比
+                if let siglip = await MainActor.run(body: { app.models.siglip }) {
+                    for probe in [("模板英文", "This is a photo of maldives tropical island beach."),
+                                  ("中文原文", "马尔代夫")] {
+                        if let q = try? siglip.embedQuery(probe.1) {
+                            let vf = (try? store.search(space: siglip.space, kinds: [.videoFrame],
+                                                        query: q, limit: 3, minScore: -1)) ?? []
+                            let ph = (try? store.search(space: siglip.space, kinds: [.photo],
+                                                        query: q, limit: 1, minScore: -1)) ?? []
+                            let f = vf.first.map { String(format: "%.3f", $0.score) } ?? "无行"
+                            let p = ph.first.map { String(format: "%.3f", $0.score) } ?? "无行"
+                            lines.append("\(probe.0):视频帧最高 \(f)(候选\(vf.count)) / 照片最高 \(p)")
+                        }
+                    }
+                }
             let out = lines.joined(separator: "\n")
             await MainActor.run {
                 videoDiagText = out
