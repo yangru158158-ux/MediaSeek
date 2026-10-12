@@ -476,6 +476,25 @@ final class VectorStore {
         return out
     } }
 
+    /// 库内标签词典:全部照片/视频帧标签及出现次数(降序)——「图像模型能识别哪些英文词」的精确答案
+    /// 视频按帧计(同一标签出现在 3 帧=3 次),照片每张 1 行
+    func labelVocabCounts() throws -> [(label: String, count: Int)] { try serialized {
+        guard let db, let stmt = try prepare("""
+            SELECT title FROM items
+            WHERE kind IN ('photoLabel','videoFrameLabel') AND title IS NOT NULL
+            """) else { return [] }
+        defer { sqlite3_finalize(stmt) }
+        var counts: [String: Int] = [:]
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            // 每行 title 是该照片/帧的标签串("food, fried_egg, ..."),拆开累计
+            let title = String(cString: sqlite3_column_text(stmt, 0))
+            for label in title.components(separatedBy: ", ") where !label.isEmpty {
+                counts[label, default: 0] += 1
+            }
+        }
+        return counts.sorted { $0.value > $1.value }.map { (label: $0.key, count: $0.value) }
+    } }
+
     /// 某索引对象已记录的主色调(任取一行)
     func colorForRef(_ refKey: String) -> String? { try serialized {
         guard let db, let stmt = try? prepare("SELECT color FROM items WHERE ref_key = ? AND color IS NOT NULL LIMIT 1") else { return nil }

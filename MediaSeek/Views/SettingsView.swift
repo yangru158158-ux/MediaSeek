@@ -10,16 +10,22 @@ struct SettingsView: View {
     @State private var confirmWipe = false
     @State private var videoDiagRunning = false
     @State private var videoDiagText: String?
+    @State private var labelVocab: [(label: String, count: Int)] = []
+    @State private var showLabelVocab = false
 
     var body: some View {
         NavigationStack {
             List {
                 modelSection
                 tuningSection
+                labelVocabSection
                 videoDiagSection
                 aboutSection
             }
             .navigationTitle("设置")
+            .sheet(isPresented: $showLabelVocab) {
+                LabelVocabSheet(items: labelVocab)
+            }
             .fileImporter(isPresented: $showModelPicker,
                           allowedContentTypes: [.zip],
                           allowsMultipleSelection: false) { result in
@@ -115,6 +121,28 @@ struct SettingsView: View {
 
     /// 视频索引诊断:相册视频总数 vs 已有帧向量视频数,
     /// 并列出最旧/最新各 3 个视频的索引状态——定位「视频搜不到」断在哪一环
+    /// 标签词典:库内照片/视频帧实际打上的全部 Vision 英文标签+次数
+    /// ——「图像模型能识别哪些英文词」的精确答案(可被标签通道精确命中的集合)
+    private var labelVocabSection: some View {
+        Section {
+            Button {
+                labelVocab = app.search.labelVocabCounts()
+                showLabelVocab = true
+            } label: {
+                HStack {
+                    Text("标签词典")
+                    Spacer()
+                    Text(labelVocab.isEmpty ? "点按载入" : "\(labelVocab.count) 个标签")
+                        .foregroundColor(.secondary)
+                }
+            }
+        } header: {
+            Text("图像模型词汇")
+        } footer: {
+            Text("列出库里照片/视频实际打上的英文标签。搜这些词(或对应中文,如 woman=女性)会走标签通道精确命中;其余英文词靠语义模型理解,无固定清单。")
+        }
+    }
+
     private var videoDiagSection: some View {
         Section("视频索引诊断") {
             Button {
@@ -238,6 +266,37 @@ struct SettingsView: View {
             LabeledContent("版本", value: "1.0")
             LabeledContent("目标设备", value: "iPhone(iPhone 17 Pro Max 适配)")
             LabeledContent("向量检索", value: "vDSP 余弦相似度")
+        }
+    }
+}
+
+/// 标签词典列表:可搜索筛选,看某个英文词库里有没有、有多少
+struct LabelVocabSheet: View {
+    let items: [(label: String, count: Int)]
+    @State private var filter = ""
+    @Environment(\.dismiss) private var dismiss
+
+    private var filtered: [(label: String, count: Int)] {
+        filter.isEmpty ? items : items.filter { $0.label.localizedCaseInsensitiveContains(filter) }
+    }
+
+    var body: some View {
+        NavigationStack {
+            List(filtered, id: \.label) { item in
+                HStack {
+                    Text(item.label).font(.footnote.monospaced())
+                    Spacer()
+                    Text("\(item.count)").font(.footnote).foregroundColor(.secondary)
+                }
+            }
+            .searchable(text: $filter, prompt: "筛选标签,如 beach / woman / food")
+            .navigationTitle("标签词典 \(items.count) 项")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("完成") { dismiss() }
+                }
+            }
         }
     }
 }

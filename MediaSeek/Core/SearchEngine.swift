@@ -104,6 +104,10 @@ final class SearchEngine {
     func blockedRefs(term: String) -> Set<String> {
         (try? store.blockedRefs(term: term.lowercased().trimmingCharacters(in: .whitespaces))) ?? []
     }
+    /// 库内标签词典(标签,出现次数降序)——标签通道可精确命中的全部英文词
+    func labelVocabCounts() -> [(label: String, count: Int)] {
+        (try? store.labelVocabCounts()) ?? []
+    }
 
     /// OCR 命中片段(标题展示用):截取命中词前后各 12 字
     static func ocrSnippet(_ text: String, _ term: String) -> String {
@@ -395,11 +399,18 @@ final class SearchEngine {
                 space: gemma.space, kinds: fileKinds, query: q, limit: topK,
                 minScore: scope == .file ? 0.25 : 0.20, among: among))
             // 结果内不做离群门槛(基数是用户点名的小集合),只留相对截断
-            if among == nil, scope != .file, fileHits.count > 1 {
-                let scores = fileHits.map(\.score).sorted()
-                let median = scores[scores.count / 2]
-                let best = scores.last ?? 0
-                if best < 0.40 || best - median < 0.10 { fileHits = [] }
+            if among == nil {
+                // 全局:自校准离群检测(基线高且随查询漂移,绝对门槛不可靠)
+                if fileHits.count > 1 {
+                    let scores = fileHits.map(\.score).sorted()
+                    let median = scores[scores.count / 2]
+                    let best = scores.last ?? 0
+                    if best < 0.40 || best - median < 0.10 { fileHits = [] }
+                }
+            } else if let best = fileHits.first?.score, best < 0.40 {
+                // 结果内(2026-10-12 食物实测):此前跳过质量线,CSV/结单灌进食物结果。
+                // Gemma 文本-文本基线高,弱相关全挤在 0.3 档;结果内同样要过 0.40 强线
+                fileHits = []
             }
             let topScore = fileHits.first?.score ?? 0
             if topScore > 0 { fileHits = fileHits.filter { $0.score >= topScore * 0.75 } }

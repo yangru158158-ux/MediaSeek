@@ -102,6 +102,14 @@ enum TimeQueryParser {
         if let r = attempt("今年|本年", { _ in yearRange(thisYear, "今年") }) { return r }
         if let r = attempt("去年", { _ in yearRange(thisYear - 1, "去年") }) { return r }
         if let r = attempt("前年", { _ in yearRange(thisYear - 2, "前年") }) { return r }
+        // 年份区间:「2015年到2026年」=跨年整段(2015-01-01 起,2027-01-01 止)
+        if let r = attempt("(\\d{4})\\s*年?\\s*(?:到|至|~|～|—|–)\\s*(\\d{4})\\s*年?", { c in
+            guard let y1 = Int(c[0]), let y2 = Int(c[1]),
+                  y1 < y2, y1 >= 1950, y2 <= thisYear + 1,
+                  let s = cal.date(from: DateComponents(year: y1, month: 1, day: 1)),
+                  let e = cal.date(from: DateComponents(year: y2 + 1, month: 1, day: 1)) else { return nil }
+            return QueryDateRange(start: s, end: e, label: "\(y1)年到\(y2)年")
+        }) { return r }
         return (nil, text)
     }
 }
