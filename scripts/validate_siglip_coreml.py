@@ -219,7 +219,7 @@ def mode_extract(out_npz: Path):
                 return v / (np.linalg.norm(v) + 1e-12)
 
             def padded_ids_mask(t: str):
-                enc = tok(t, padding="max_length", max_length=64)
+                enc = tok(t, padding="max_length", max_length=64, return_attention_mask=True)
                 return (np.array([enc["input_ids"]], dtype=np.int32),
                         np.array([enc["attention_mask"]], dtype=np.int32))
 

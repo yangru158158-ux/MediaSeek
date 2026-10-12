@@ -2,6 +2,11 @@ name: Export Models
 # 在 GitHub 免费提供的 macOS 机器上运行模型转换
 # (coremltools 完整运行库仅 macOS 可用;Windows 上转换会缺库)
 # 产出:models.zip 工件(含 TextEmbedder + ImageEmbedder),下载后导入 App 即可
+#
+# 双环境分工(2026-10-12 定案):
+#   Gemma 文本嵌入 → transformers 5(EmbeddingGemma2 需要;其 wrapper 自管掩码,不经 masking_utils)
+#   SigLIP 图文   → transformers 4.55(v5 的动态掩码机制含 coremltools 无法转换的标量算子;
+#                    且 SigLIP2 文本塔必须按训练约定 max_length=64 填充导出)
 on:
   workflow_dispatch:
   push:
@@ -24,18 +29,40 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: 安装依赖(官方测试组合)
+      - name: 安装 v5 依赖(官方测试组合)
         run: |
           pip install --upgrade pip
           pip install torch==2.7.0 "transformers>=5.0" "coremltools==9.0" sentencepiece
 
-      - name: 打 coremltools 兼容补丁
+      - name: 打 coremltools 兼容补丁(v5)
         run: python scripts/patch_transformers_for_coreml.py
 
-      - name: 导出模型
+      - name: 导出 Gemma 文本嵌入模型
         run: |
           python scripts/export_models.py \
             --outdir MediaSeek/Resources/Models \
+            --skip-siglip
+
+      - name: 建 v4 对照环境(SigLIP 专用)
+        run: |
+          python -m venv /tmp/v4env
+          /tmp/v4env/bin/pip install --upgrade pip
+          /tmp/v4env/bin/pip install torch==2.7.0 "transformers==4.55.0" "coremltools==9.0" sentencepiece
+
+      - name: 打 coremltools 兼容补丁(v4)
+        run: /tmp/v4env/bin/python scripts/patch_transformers_for_coreml.py
+
+      - name: 导出 SigLIP 图文模型
+        run: |
+          /tmp/v4env/bin/python scripts/export_models.py \
+            --outdir MediaSeek/Resources/Models \
+            --skip-gemma
+
+      - name: 打包 models.zip
+        run: |
+          python scripts/export_models.py \
+            --outdir MediaSeek/Resources/Models \
+            --skip-gemma --skip-siglip \
             --zip models.zip
 
       - name: 上传模型包
