@@ -479,10 +479,11 @@ final class VectorStore {
     /// 库内标签词典:全部照片/视频帧标签及出现次数(降序)——「图像模型能识别哪些英文词」的精确答案
     /// 视频按帧计(同一标签出现在 3 帧=3 次),照片每张 1 行
     func labelVocabCounts() throws -> [(label: String, count: Int)] { try serialized {
-        guard let db, let stmt = try prepare("""
+        guard let db else { return [] }
+        let stmt = try prepare("""
             SELECT title FROM items
             WHERE kind IN ('photoLabel','videoFrameLabel') AND title IS NOT NULL
-            """) else { return [] }
+            """)
         defer { sqlite3_finalize(stmt) }
         var counts: [String: Int] = [:]
         while sqlite3_step(stmt) == SQLITE_ROW {
