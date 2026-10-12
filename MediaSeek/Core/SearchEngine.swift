@@ -140,35 +140,40 @@ final class SearchEngine {
         let siglip = await MainActor.run { models.siglip }
         lastSemanticTopScore = nil
 
-        // 自然语言时间/地点:仅普通查询(文字:/语义:/组合语法不参与)。
-        // 时间词命中即剥离;地点「在XX」需地理编码成功才剥离,失败原样保留。
+        // 自然语言时间/地点:普通查询与结果内都参与(组合语法/前缀语法不参与)。
+        // 时间词命中即剥离——结果内同样生效:从当前基数集里按拍摄/创建时间筛(与第一次搜索同构);
+        // 地点「在XX」仅普通查询(结果内挂地理编码徒增异步与误伤),失败原样保留。
         var dateRange: QueryDateRange?
         var placeRegion: CLCircularRegion?
         var placeLabel: String?
-        if spec.channel == .any, spec.connector == .none, within == nil {
+        if spec.channel == .any, spec.connector == .none {
             let t = TimeQueryParser.parse(query)
             if let r = t.range {
                 dateRange = r
                 query = t.remaining.trimmingCharacters(in: .whitespaces)
             }
-            if !query.isEmpty, let cand = PlaceQueryParser.extract(query) {
-                if let region = await PlaceGeocoder.region(for: cand.name) {
-                    placeRegion = region
-                    placeLabel = cand.name
-                    query = cand.remaining.trimmingCharacters(in: .whitespaces)
+            if within == nil {
+                if !query.isEmpty, let cand = PlaceQueryParser.extract(query) {
+                    if let region = await PlaceGeocoder.region(for: cand.name) {
+                        placeRegion = region
+                        placeLabel = cand.name
+                        query = cand.remaining.trimmingCharacters(in: .whitespaces)
+                    }
                 }
-            }
-            // 裸地名(整个查询就是「南京」「马尔代夫」):城市名无视觉特征,
-            // 语义通道认不出;挂 GPS 地点过滤,后面与地点浏览(全量拍摄记录)取并集。
-            // 地理编码失败则原地降级为普通内容搜索,不误伤
-            if placeRegion == nil, !query.isEmpty,
-               let p = QueryUnderstanding.barePlace(query),
-               let region = await PlaceGeocoder.region(for: p, radius: 50_000) {
-                placeRegion = region
-                placeLabel = p
-            }
-            if query.isEmpty, dateRange == nil, placeRegion == nil {
-                query = QueryUnderstanding.core(spec.body)   // 时间词没能构成区间,回退原查询
+                // 裸地名(整个查询就是「南京」「马尔代夫」):城市名无视觉特征,
+                // 语义通道认不出;挂 GPS 地点过滤,后面与地点浏览(全量拍摄记录)取并集。
+                // 地理编码失败则原地降级为普通内容搜索,不误伤
+                if placeRegion == nil, !query.isEmpty,
+                   let p = QueryUnderstanding.barePlace(query),
+                   let region = await PlaceGeocoder.region(for: p, radius: 50_000) {
+                    placeRegion = region
+                    placeLabel = p
+                }
+                if query.isEmpty, dateRange == nil, placeRegion == nil {
+                    query = QueryUnderstanding.core(spec.body)   // 时间词没能构成区间,回退原查询
+                }
+            } else if query.isEmpty, dateRange == nil {
+                query = QueryUnderstanding.core(spec.body)   // 结果内:没有成区间的时间词,回退原查询
             }
         }
 
@@ -231,12 +236,42 @@ final class SearchEngine {
         }
 
         if let within, !within.isEmpty {
+            // 结果内纯时间词(如「2025年」):基数集合本身按拍摄/创建时间筛+倒序,
+            // 与第一次搜索的纯时间浏览同构,只是范围缩进当前结果集
+            if query.isEmpty, let dateRange {
+                var hits: [SearchHit] = []
+                if scope != .file {
+                    let assets = PHAsset.fetchAssets(withLocalIdentifiers: Array(within), options: nil)
+                    assets.enumerateObjects { asset, _, _ in
+                        if scope == .photo, asset.mediaType != .image { return }
+                        if scope == .video, asset.mediaType != .video { return }
+                        guard Self.assetPasses(asset, dateRange: dateRange, place: nil) else { return }
+                        hits.append(SearchHit(kind: asset.mediaType == .video ? .videoFrame : .photo,
+                                              refKey: asset.localIdentifier, frameIndex: 0,
+                                              space: "browse", title: nil, date: asset.creationDate,
+                                              score: 1.0, color: nil))
+                    }
+                }
+                if scope == .all || scope == .file, let allFiles = try? imports.allFiles() {
+                    for f in allFiles where within.contains(f.id) {
+                        if fileMatchesFilters(f, dateRange: dateRange) {
+                            hits.append(SearchHit(kind: .file, refKey: f.id, frameIndex: 0,
+                                                  space: "browse", title: f.name,
+                                                  date: f.addedAt, score: 1.0, color: nil))
+                        }
+                    }
+                }
+                hits.sort { ($0.date ?? .distantPast) > ($1.date ?? .distantPast) }
+                return SearchOutcome(hits: resolve(hits), textIDs: [],
+                                     timeLabel: dateRange.label, placeLabel: nil)
+            }
             // 结果内 = 同一条主管线 + 基数集合约束:三维度/排名/标题与第一次搜索
             // 完全一致(旧 searchWithin 是特设核验流程,通道与主流程不同步,
-            // 反复出病:门槛悬空、漏标签通道,已删)
+            // 反复出病:门槛悬空、漏标签通道,已删);时间词由 runMainSearch 内部
+            // 按 dateRange 过滤(时间+内容词组合,如「2025年 海滩」)
             return try await runMainSearch(query: query, spec: spec, semanticOnly: semanticOnly,
                                            scope: scope, topK: topK, siglip: siglip,
-                                           dateRange: nil, placeRegion: nil, placeLabel: nil,
+                                           dateRange: dateRange, placeRegion: nil, placeLabel: nil,
                                            among: within)
         }
         if spec.channel == .text || spec.connector != .none {
