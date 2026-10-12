@@ -149,7 +149,6 @@ struct SearchView: View {
         .padding(.horizontal)
     }
 
-    @ViewBuilder
     private var hiddenBlockedCount: Int {
         results.filter { blockedRefs.contains($0.refKey) }.count
     }
@@ -167,6 +166,7 @@ struct SearchView: View {
         .padding(.vertical, 4)
     }
 
+    @ViewBuilder
     private var statusLine: some View {
         if searching {
             ProgressView("正在检索…").padding(.vertical, 6)
