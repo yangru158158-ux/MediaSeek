@@ -56,7 +56,8 @@ jobs:
         run: |
           /tmp/v4env/bin/python scripts/export_models.py \
             --outdir MediaSeek/Resources/Models \
-            --skip-gemma
+            --skip-gemma \
+            --txt-fp32
 
       - name: 打包 models.zip
         run: |

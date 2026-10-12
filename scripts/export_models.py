@@ -58,12 +58,18 @@ def save_meta(out_dir: str, meta: dict):
 def copy_tokenizer(model_id: str, out_dir: str):
     from huggingface_hub import hf_hub_download
     src = hf_hub_download(model_id, "tokenizer.json")
-    shutil.copy(src, os.path.join(out_dir, "tokenizer.json"))
+    dst = os.path.join(out_dir, "tokenizer.json")
+    if os.path.exists(dst):
+        os.remove(dst)  # HF 缓存文件只读,shutil.copy 会把权限带过来,二次导出覆盖时 PermissionError
+    shutil.copy(src, dst)
     # swift-transformers 加载时需要 config.json / tokenizer_config.json
     for name in ("config.json", "tokenizer_config.json"):
         try:
             f = hf_hub_download(model_id, name)
-            shutil.copy(f, os.path.join(out_dir, name))
+            d = os.path.join(out_dir, name)
+            if os.path.exists(d):
+                os.remove(d)
+            shutil.copy(f, d)
         except Exception as e:
             print(f"  警告: {name} 下载失败({e}),App 端会自动补最小配置")
 

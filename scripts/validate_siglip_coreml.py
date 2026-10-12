@@ -267,9 +267,12 @@ def mode_extract(out_npz: Path):
             print(f"  文本塔 CoreML fp32 vs PyTorch 最小一致性 = {wt32:.5f}")
             for name in images:
                 v = ml(img_ml, {"pixel_values": px_official[name].numpy().astype(np.float32)})
-                m_in = max(cos(v, txt_v_pad[t]) for t in TEXTS.get(name, []))
-                m_out = max(cos(v, txt_v_pad[t]) for s in TEXTS.values() for t in s
-                            if t not in TEXTS.get(name, []))
+                def coreml_txt(tquery):
+                    ids, mask = padded_ids_mask(tquery)
+                    return ml(txt_ml32, {"input_ids": ids, "attention_mask": mask})
+                m_in = max(cos(v, coreml_txt(t)) for t in TEXTS.get(name, []))
+                m_out = max(cos(v, coreml_txt(t))
+                            for s in TEXTS.values() for t in s if t not in TEXTS.get(name, []))
                 print(f"    [fp32] {name.ljust(9)} 匹配={m_in:.4f}  交叉max={m_out:.4f}")
 
             # 修正后经 CoreML 的匹配对 vs 交叉对(区分度证据)
