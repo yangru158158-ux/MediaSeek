@@ -140,6 +140,49 @@ def mode_extract(out_npz: Path):
     matched = {n: max(cos(img_v[n], txt_v[t]) for t in TEXTS.get(n, [])) for n in images}
     print("匹配对余弦:", {k: round(v, 4) for k, v in matched.items()})
 
+    # ---- 诊断:分词器/嵌入表/图-图相似度/max_length 填充对照
+    print("\n== 分词器与配置 ==")
+    print("  len(tok)=", len(tok), " pad=", tok.pad_token_id, " bos=", tok.bos_token_id,
+          " eos=", tok.eos_token_id, " padding_side=", getattr(tok, "padding_side", None))
+    sample = tok("This is a photo of a cat.")
+    print("  示例 ids:", sample["input_ids"])
+    print("  text vocab_size=", model.config.text_config.vocab_size,
+          " 嵌入表 shape=", tuple(model.text_model.embeddings.token_embedding.weight.shape))
+    print("  logit_scale=", float(model.logit_scale), " logit_bias=", float(model.logit_bias))
+
+    names = list(images)
+    print("\n== 图-图余弦矩阵(视觉塔健康度:cat-dog 应高于 cat-screen) ==")
+    print("        " + "".join(n.ljust(10) for n in names))
+    for a in names:
+        print(a.ljust(8) + "".join(f"{cos(img_v[a], img_v[b]):<10.4f}" for b in names))
+
+    print("\n== 文 max_length 填充对照(padding='max_length', 训练约定) ==")
+    txt_v_pad = {}
+    with torch.no_grad():
+        for t in all_texts:
+            enc = tok(t, padding="max_length", max_length=64, return_tensors="pt")
+            if transformers.__version__.startswith("4"):
+                f = model.get_text_features(input_ids=enc["input_ids"],
+                                            attention_mask=enc.get("attention_mask"))[0]
+            else:
+                f = model.text_model(input_ids=enc["input_ids"],
+                                     attention_mask=enc.get("attention_mask")).pooler_output[0]
+            txt_v_pad[t] = f.numpy()
+    matched_pad = {n: max(cos(img_v[n], txt_v_pad[t]) for t in TEXTS.get(n, [])) for n in images}
+    print("  匹配对余弦(max_length 填充):", {k: round(v, 4) for k, v in matched_pad.items()})
+
+    # 官方 pipeline 示例(模型卡同款:2 cats 图 × 三候选)
+    try:
+        from transformers import pipeline
+        from transformers.image_utils import load_image
+        clf = pipeline(model=MODEL_ID, task="zero-shot-image-classification")
+        out = clf(load_image("http://images.cocodataset.org/val2017/000000039769.jpg"),
+                  candidate_labels=["2 cats", "a plane", "a remote"])
+        print("\n== 官方 pipeline 示例输出(预期 2 cats 明显最高) ==")
+        print(" ", out)
+    except Exception as e:
+        print("\n官方 pipeline 示例失败:", e)
+
     # v5 额外打官方 logit/sigmoid(logits = scale*cos + bias)
     if not transformers.__version__.startswith("4"):
         with torch.no_grad():
