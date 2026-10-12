@@ -146,7 +146,7 @@ def main():
         with torch.no_grad():
             f = model.get_text_features(**{k: v for k, v in ids.items() if k in ("input_ids", "attention_mask")})
         text_emb_pt[t] = f[0].numpy()
-        text_emb_pt[t + "|NOMASK"] = model.get_text_features(input_ids=ids["input_ids"])[0].numpy()
+        text_emb_pt[t + "|NOMASK"] = model.get_text_features(input_ids=ids["input_ids"])[0].detach().numpy()
 
     # --- 2) PyTorch 参考:官方预处理
     print("\n== PyTorch 参考余弦矩阵(官方预处理,行=图,列=文)==")
