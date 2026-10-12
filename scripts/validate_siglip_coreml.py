@@ -248,8 +248,9 @@ def mode_extract(out_npz: Path):
                 for t in all_texts[:3]:
                     enc = tok(t, padding="max_length", max_length=64, return_attention_mask=True,
                               return_tensors="pt")
-                    f = half_model.get_text_features(input_ids=enc["input_ids"],
-                                                     attention_mask=enc["attention_mask"])[0].float().numpy()
+                    r = half_model.get_text_features(input_ids=enc["input_ids"],
+                                                     attention_mask=enc["attention_mask"])
+                    f = (r.pooler_output if hasattr(r, "pooler_output") else r)[0].float().numpy()
                     ref = txt_v_pad[t] / (np.linalg.norm(txt_v_pad[t]) + 1e-12)
                     wt_half = min(wt_half, cos(f, ref))
                 model.float()
