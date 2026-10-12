@@ -102,13 +102,6 @@ enum TimeQueryParser {
         if let r = attempt("今年|本年", { _ in yearRange(thisYear, "今年") }) { return r }
         if let r = attempt("去年", { _ in yearRange(thisYear - 1, "去年") }) { return r }
         if let r = attempt("前年", { _ in yearRange(thisYear - 2, "前年") }) { return r }
-        // 裸年份:「2024」=2024年整年浏览(放最后,不抢「2024年」「近3个月」等已有模式;
-        // 前后不能紧挨数字防咬到长编号,年长限 1990~明年)
-        if let r = attempt("(?<!\\d)(\\d{4})(?!\\d)", { c in
-            Int(c[0]).flatMap { y in
-                (1990...thisYear + 1).contains(y) ? yearRange(y, "\(y)年") : nil
-            }
-        }) { return r }
         return (nil, text)
     }
 }
