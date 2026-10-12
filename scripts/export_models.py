@@ -157,17 +157,22 @@ def export_siglip(out_root: str, model_id: str, fp16: bool, txt_fp32: bool = Fal
             return torch.nn.functional.normalize(f, dim=-1)
 
     class SiglipText(torch.nn.Module):
-        # SigLIP2 文本池化取序列最后一个位置(训练时按 max_length=64 右填充,锚点在 pad 位),
-        # 变长不填充会把锚点落在 EOS 位=模型没学过的位置→特征垃圾。
-        # 因此文本塔必须定长 64 输入 + attention_mask(填充内部是 pad 查询对真实 token 的注意力池化)。
+        # SigLIP2 文本池化取序列最后一个位置(训练时按 max_length=64 右填充,锚点在 pad 位,
+        # pad 查询对真实 token 做注意力=另一个池化头);变长不填充会把锚点落在 EOS 位=没学过的位置。
+        # 不走 HF masking_utils(v5 的动态掩码闭包含 coremltools 未注册算子;v4 的 argmax 池化对
+        # SigLIP2 是错位),手工构建 4D 加性掩码直通 encoder,语义与官方 _prepare_4d 等价。
         def __init__(self):
             super().__init__()
             self.m = model
 
         def forward(self, input_ids, attention_mask):
-            f = _features_to_tensor(self.m.get_text_features(input_ids=input_ids,
-                                                             attention_mask=attention_mask))
-            return torch.nn.functional.normalize(f, dim=-1)
+            tm = self.m.text_model
+            emb = tm.embeddings(input_ids=input_ids)
+            m4 = (1.0 - attention_mask[:, None, None, :].to(emb.dtype)) * -30000.0
+            out = tm.encoder(inputs_embeds=emb, attention_mask=m4)
+            h = tm.final_layer_norm(out.last_hidden_state)
+            pooled = tm.head(h[:, -1, :])
+            return torch.nn.functional.normalize(pooled, dim=-1)
 
     img_ex = torch.zeros((1, 3, size, size), dtype=torch.float32)
     txt_ex = (torch.ones((1, SIGLIP_MAX_SEQ), dtype=torch.int32),
