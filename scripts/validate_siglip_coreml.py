@@ -195,34 +195,47 @@ def mode_extract(out_npz: Path):
                 print(f"  {name.ljust(9)} 「{TEXTS[name][0][:32]}」 logit={logit:.4f} "
                       f"sigmoid={torch.sigmoid(out.logits_per_image[0][0]).item():.3%}")
 
-    # v4 侧:把「产线导出代码 + coremltools 转换」整条修正链验证掉
-    if transformers.__version__.startswith("4"):
-        import tempfile
-        import coremltools as ct
-        from export_models import export_siglip
-        print("\n== v4 下产线导出代码 CoreML 转换验证 ==")
-        with tempfile.TemporaryDirectory() as tmp:
-            export_siglip(tmp, MODEL_ID, fp16=True)
-            img_ml = ct.models.MLModel(str(Path(tmp) / "ImageEmbedder" / "SiglipImage.mlpackage"))
-            txt_ml = ct.models.MLModel(str(Path(tmp) / "ImageEmbedder" / "SiglipText.mlpackage"))
+    # 产线导出链验证(两版本都跑):新导出代码(文本塔定长 64 双输入)+ coremltools 转换 + 推理一致性
+    import tempfile
+    import coremltools as ct
+    from export_models import export_siglip
+    print(f"\n== 产线导出链验证 @ transformers {transformers.__version__} ==")
+    with tempfile.TemporaryDirectory() as tmp:
+        export_siglip(tmp, MODEL_ID, fp16=True)
+        img_ml = ct.models.MLModel(str(Path(tmp) / "ImageEmbedder" / "SiglipImage.mlpackage"))
+        txt_ml = ct.models.MLModel(str(Path(tmp) / "ImageEmbedder" / "SiglipText.mlpackage"))
 
-            def ml(m, feed):
-                v = m.predict(feed)["embedding"].reshape(-1).astype(np.float32)
-                return v / (np.linalg.norm(v) + 1e-12)
+        def ml(m, feed):
+            v = m.predict(feed)["embedding"].reshape(-1).astype(np.float32)
+            return v / (np.linalg.norm(v) + 1e-12)
 
-            worst = 1.0
-            for name in images:
-                v = ml(img_ml, {"pixel_values": px_official[name].numpy().astype(np.float32)})
-                ref = img_v[name] / (np.linalg.norm(img_v[name]) + 1e-12)
-                worst = min(worst, cos(v, ref))
-            wt = 1.0
-            for t in all_texts[:3]:
-                ids = tok(t)["input_ids"]
-                v = ml(txt_ml, {"input_ids": np.array([ids], dtype=np.int32)})
-                ref = txt_v[t] / (np.linalg.norm(txt_v[t]) + 1e-12)
-                wt = min(wt, cos(v, ref))
-            print(f"  图像塔 CoreML vs PyTorch 最小一致性 = {worst:.5f}")
-            print(f"  文本塔 CoreML vs PyTorch 最小一致性 = {wt:.5f}")
+        def padded_ids_mask(t: str):
+            enc = tok(t, padding="max_length", max_length=64)
+            return (np.array([enc["input_ids"]], dtype=np.int32),
+                    np.array([enc["attention_mask"]], dtype=np.int32))
+
+        worst = 1.0
+        for name in images:
+            v = ml(img_ml, {"pixel_values": px_official[name].numpy().astype(np.float32)})
+            ref = img_v[name] / (np.linalg.norm(img_v[name]) + 1e-12)
+            worst = min(worst, cos(v, ref))
+        wt = 1.0
+        for t in all_texts[:3]:
+            ids, mask = padded_ids_mask(t)
+            v = ml(txt_ml, {"input_ids": ids, "attention_mask": mask})
+            ref = txt_v_pad[t] / (np.linalg.norm(txt_v_pad[t]) + 1e-12)
+            wt = min(wt, cos(v, ref))
+        print(f"  图像塔 CoreML vs PyTorch 最小一致性 = {worst:.5f}")
+        print(f"  文本塔 CoreML vs PyTorch 最小一致性 = {wt:.5f}")
+
+        # 修正后经 CoreML 的匹配对 vs 交叉对(区分度证据)
+        print("  匹配对 vs 交叉对(CoreML,区分度=匹配显著高于交叉):")
+        for name in images:
+            v = ml(img_ml, {"pixel_values": px_official[name].numpy().astype(np.float32)})
+            m_in = max(cos(v, txt_v_pad[t]) for t in TEXTS.get(name, []))
+            m_out = max(cos(v, txt_v_pad[t]) for s in TEXTS.values() for t in s
+                        if t not in TEXTS.get(name, []))
+            print(f"    {name.ljust(9)} 匹配={m_in:.4f}  交叉max={m_out:.4f}")
 
     np.savez(out_npz,
              image_names=np.array(list(img_v.keys())),
@@ -259,10 +272,9 @@ def mode_compare(a_npz: Path, b_npz: Path):
     cross = max(cos(get(A, "img", n), v5_img_first) for n in imgs[1:])
     print(f"\n-- 判读:跨空间图像向量最大互似然 {cross:.4f}")
     if cross > 0.9:
-        print("v4 与 v5 空间基本一致 → 设备上的 0.088 是该模型真实尺度(H3),换 so400m 是正解")
+        print("v4 与 v5 空间一致(已证);真正的修复=文本塔按训练约定 max_length 填充,见 extract 段匹配对对照")
     else:
-        print("v4 与 v5 空间不同 → v5 pooler 丢失了投影层,产线(经 v5 导出)装的是错特征(H1 定罪)")
-        print("→ 修法:export_models.py 改用 v4 空间(装 4.55 重导 SigLIP,或手动补投影矩阵)")
+        print("v4 与 v5 空间不同(意外,需排查)")
 
 
 if __name__ == "__main__":

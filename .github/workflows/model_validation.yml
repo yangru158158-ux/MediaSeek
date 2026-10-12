@@ -20,7 +20,10 @@ jobs:
       - name: 安装 v5 依赖(与产线同版本)
         run: |
           pip install --upgrade pip
-          pip install torch==2.7.0 "transformers>=5.0" sentencepiece pillow
+          pip install torch==2.7.0 "transformers>=5.0" "coremltools==9.0" sentencepiece pillow
+
+      - name: v5 环境打 coremltools 补丁
+        run: python scripts/patch_transformers_for_coreml.py
 
       - name: v5 侧提取特征
         run: python scripts/validate_siglip_coreml.py extract v5.npz

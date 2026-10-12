@@ -25,7 +25,15 @@ extension MLModel {
     /// 运行"单输入单输出 embedding"模型,返回归一化向量
     func runEmbedding(inputName: String, input: MLMultiArray,
                       outputName: String = "embedding") throws -> [Float] {
-        let provider = try MLDictionaryFeatureProvider(dictionary: [inputName: MLFeatureValue(multiArray: input)])
+        try runEmbedding(inputs: [inputName: input], outputName: outputName)
+    }
+
+    /// 运行"多输入单输出 embedding"模型,返回归一化向量
+    func runEmbedding(inputs: [String: MLMultiArray],
+                      outputName: String = "embedding") throws -> [Float] {
+        let provider = try MLDictionaryFeatureProvider(dictionary: inputs.mapValues {
+            MLFeatureValue(multiArray: $0)
+        })
         let out = try prediction(from: provider)
         guard let arr = out.featureValue(for: outputName)?.multiArrayValue else {
             throw MSError("模型输出缺少 \(outputName)")
@@ -62,6 +70,18 @@ final class HFTokenizer {
             ids = Array(ids.prefix(maxLength - 1)) + [ids.last!]
         }
         return ids
+    }
+
+    /// SigLIP 专用:编码后右填充到定长(pad id=0),并生成 attention_mask。
+    /// SigLIP2 训练时文本统一 max_length 填充,池化锚点在末位(pad 位);
+    /// 不填充会把锚点落在 EOS 位=模型没学过的位置,文本嵌入整体退化为噪声。
+    func encodePadded(_ text: String, maxLength: Int) throws -> (ids: [Int], mask: [Int]) {
+        var ids = try encode(text, maxLength: maxLength)
+        let mask = [Int](repeating: 1, count: ids.count)
+        if ids.count < maxLength {
+            ids.append(contentsOf: [Int](repeating: 0, count: maxLength - ids.count))
+        }
+        return (ids, mask + [Int](repeating: 0, count: maxLength - mask.count))
     }
 }
 
@@ -111,6 +131,7 @@ final class SigLIPEmbedder {
     private let imageSize: Int
     private let mean: Float
     private let std: Float
+    private let needsAttentionMask: Bool
 
     init(textModelURL: URL, imageModelURL: URL, tokenizerFolder: URL,
          imageSize: Int = 256, mean: Float = 0.5, std: Float = 0.5) async throws {
@@ -122,9 +143,22 @@ final class SigLIPEmbedder {
         self.imageSize = imageSize
         self.mean = mean
         self.std = std
+        // 新版模型包文本塔要求定长 64 双输入;旧包无 attention_mask 输入则走旧路径
+        self.needsAttentionMask = textModel.modelDescription
+            .inputDescriptionsByName["attention_mask"] != nil
     }
 
     func embedQuery(_ text: String) throws -> [Float] {
+        if needsAttentionMask {
+            let padded = try tokenizer.encodePadded(text, maxLength: HFTokenizer.maxSequenceSiglip)
+            let ids = try MLMultiArray(shape: [1, NSNumber(value: padded.ids.count)], dataType: .int32)
+            let mask = try MLMultiArray(shape: [1, NSNumber(value: padded.mask.count)], dataType: .int32)
+            let pi = ids.dataPointer.assumingMemoryBound(to: Int32.self)
+            let pm = mask.dataPointer.assumingMemoryBound(to: Int32.self)
+            for (i, t) in padded.ids.enumerated() { pi[i] = Int32(t) }
+            for (i, m) in padded.mask.enumerated() { pm[i] = Int32(m) }
+            return try textModel.runEmbedding(inputs: ["input_ids": ids, "attention_mask": mask])
+        }
         let ids = try tokenizer.encode(text, maxLength: HFTokenizer.maxSequenceSiglip)
         let arr = try MLMultiArray(shape: [1, NSNumber(value: ids.count)], dataType: .int32)
         let p = arr.dataPointer.assumingMemoryBound(to: Int32.self)

@@ -41,6 +41,15 @@ GEMMA_MAX_SEQ = 512   # EmbeddingGemma 上下文内截断
 SIGLIP_MAX_SEQ = 64   # SigLIP 文本塔训练序列长度
 
 
+def load_auto(model_id: str):
+    """v5 用 dtype,v4 只认 torch_dtype"""
+    from transformers import AutoModel
+    try:
+        return AutoModel.from_pretrained(model_id, dtype=torch.float32).eval()
+    except TypeError:
+        return AutoModel.from_pretrained(model_id, torch_dtype=torch.float32).eval()
+
+
 def save_meta(out_dir: str, meta: dict):
     with open(os.path.join(out_dir, "meta.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
@@ -62,7 +71,7 @@ def copy_tokenizer(model_id: str, out_dir: str):
 def export_gemma(out_root: str, model_id: str, fp16: bool):
     print(f"== 导出文本模型 {model_id} ==")
     tok = AutoTokenizer.from_pretrained(model_id)
-    model = AutoModel.from_pretrained(model_id, dtype=torch.float32).eval()
+    model = load_auto(model_id)
     # v2 配置结构有变,pad_token_id / hidden_size 逐级回退
     cfg = model.config
     pad_id = getattr(cfg, "pad_token_id", None)
@@ -115,7 +124,7 @@ def export_gemma(out_root: str, model_id: str, fp16: bool):
 def export_siglip(out_root: str, model_id: str, fp16: bool):
     print(f"== 导出图文模型 {model_id} ==")
     tok = AutoTokenizer.from_pretrained(model_id)
-    model = AutoModel.from_pretrained(model_id, dtype=torch.float32).eval()
+    model = load_auto(model_id)
     cfg = model.config.vision_config
     size = int(getattr(cfg, "image_size", 256))
     mean = getattr(cfg, "image_mean", None) or 0.5
@@ -142,18 +151,24 @@ def export_siglip(out_root: str, model_id: str, fp16: bool):
             return torch.nn.functional.normalize(f, dim=-1)
 
     class SiglipText(torch.nn.Module):
+        # SigLIP2 文本池化取序列最后一个位置(训练时按 max_length=64 右填充,锚点在 pad 位),
+        # 变长不填充会把锚点落在 EOS 位=模型没学过的位置→特征垃圾。
+        # 因此文本塔必须定长 64 输入 + attention_mask(填充内部是 pad 查询对真实 token 的注意力池化)。
         def __init__(self):
             super().__init__()
             self.m = model
 
-        def forward(self, input_ids):
-            f = _features_to_tensor(self.m.get_text_features(input_ids=input_ids))
+        def forward(self, input_ids, attention_mask):
+            f = _features_to_tensor(self.m.get_text_features(input_ids=input_ids,
+                                                             attention_mask=attention_mask))
             return torch.nn.functional.normalize(f, dim=-1)
 
     img_ex = torch.zeros((1, 3, size, size), dtype=torch.float32)
+    txt_ex = (torch.ones((1, SIGLIP_MAX_SEQ), dtype=torch.int32),
+              torch.ones((1, SIGLIP_MAX_SEQ), dtype=torch.int32))
     with torch.no_grad():
         traced_img = torch.jit.trace(SiglipImage().eval(), img_ex)
-        traced_txt = torch.jit.trace(SiglipText().eval(), torch.ones((1, 16), dtype=torch.int32))
+        traced_txt = torch.jit.trace(SiglipText().eval(), txt_ex)
 
     common = dict(
         outputs=[ct.TensorType(name="embedding")],
@@ -168,7 +183,10 @@ def export_siglip(out_root: str, model_id: str, fp16: bool):
     )
     txt_ml = ct.convert(
         traced_txt,
-        inputs=[ct.TensorType(name="input_ids", shape=(1, ct.RangeDim(1, SIGLIP_MAX_SEQ)), dtype=np.int32)],
+        inputs=[
+            ct.TensorType(name="input_ids", shape=(1, SIGLIP_MAX_SEQ), dtype=np.int32),
+            ct.TensorType(name="attention_mask", shape=(1, SIGLIP_MAX_SEQ), dtype=np.int32),
+        ],
         **common,
     )
 
