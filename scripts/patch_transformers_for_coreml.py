@@ -62,6 +62,7 @@ patch(
 
 print("已打补丁:", ok or "无")
 print("跳过:", skip or "无")
-if len(ok) + len([s for s in skip if "已打过" in s]) < 2:
-    print("⚠️ 有效补丁不足 2 个,请检查 transformers 版本")
+# v4 环境(仅 SigLIP 导出)只有 coremltools cast 一条有效,v5 全量是 2 条
+if len(ok) + len([s for s in skip if "已打过" in s]) < 1:
+    print("⚠️ 没有任何有效补丁,请检查环境")
     sys.exit(1)

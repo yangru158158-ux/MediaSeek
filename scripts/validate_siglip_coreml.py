@@ -105,7 +105,10 @@ def mode_extract(out_npz: Path):
     from transformers import AutoModel, AutoProcessor, AutoTokenizer
 
     print(f"== extract @ transformers {transformers.__version__} / torch {torch.__version__} ==")
-    model = AutoModel.from_pretrained(MODEL_ID, dtype=torch.float32).eval()
+    try:
+        model = AutoModel.from_pretrained(MODEL_ID, dtype=torch.float32).eval()
+    except TypeError:  # v4 只认 torch_dtype
+        model = AutoModel.from_pretrained(MODEL_ID, torch_dtype=torch.float32).eval()
     processor = AutoProcessor.from_pretrained(MODEL_ID)
     tok = AutoTokenizer.from_pretrained(MODEL_ID)
 
@@ -114,9 +117,11 @@ def mode_extract(out_npz: Path):
     all_texts = sorted({t for ts in TEXTS.values() for t in ts})
 
     img_v, txt_v = {}, {}
+    px_official = {}
     with torch.no_grad():
         for name, img in images.items():
             px = processor(images=img, return_tensors="pt")["pixel_values"]
+            px_official[name] = px
             if transformers.__version__.startswith("4"):
                 f = model.get_image_features(pixel_values=px)[0]
             else:
@@ -146,6 +151,35 @@ def mode_extract(out_npz: Path):
                 logit = float(out.logits_per_image[0][0])
                 print(f"  {name.ljust(9)} 「{TEXTS[name][0][:32]}」 logit={logit:.4f} "
                       f"sigmoid={torch.sigmoid(out.logits_per_image[0][0]).item():.3%}")
+
+    # v4 侧:把「产线导出代码 + coremltools 转换」整条修正链验证掉
+    if transformers.__version__.startswith("4"):
+        import tempfile
+        import coremltools as ct
+        from export_models import export_siglip
+        print("\n== v4 下产线导出代码 CoreML 转换验证 ==")
+        with tempfile.TemporaryDirectory() as tmp:
+            export_siglip(tmp, MODEL_ID, fp16=True)
+            img_ml = ct.models.MLModel(str(Path(tmp) / "ImageEmbedder" / "SiglipImage.mlpackage"))
+            txt_ml = ct.models.MLModel(str(Path(tmp) / "ImageEmbedder" / "SiglipText.mlpackage"))
+
+            def ml(m, feed):
+                v = m.predict(feed)["embedding"].reshape(-1).astype(np.float32)
+                return v / (np.linalg.norm(v) + 1e-12)
+
+            worst = 1.0
+            for name in images:
+                v = ml(img_ml, {"pixel_values": px_official[name].numpy().astype(np.float32)})
+                ref = img_v[name] / (np.linalg.norm(img_v[name]) + 1e-12)
+                worst = min(worst, cos(v, ref))
+            wt = 1.0
+            for t in all_texts[:3]:
+                ids = tok(t)["input_ids"]
+                v = ml(txt_ml, {"input_ids": np.array([ids], dtype=np.int32)})
+                ref = txt_v[t] / (np.linalg.norm(txt_v[t]) + 1e-12)
+                wt = min(wt, cos(v, ref))
+            print(f"  图像塔 CoreML vs PyTorch 最小一致性 = {worst:.5f}")
+            print(f"  文本塔 CoreML vs PyTorch 最小一致性 = {wt:.5f}")
 
     np.savez(out_npz,
              image_names=np.array(list(img_v.keys())),

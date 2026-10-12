@@ -29,9 +29,12 @@ jobs:
         run: |
           python -m venv /tmp/v4env
           /tmp/v4env/bin/pip install --upgrade pip
-          /tmp/v4env/bin/pip install torch==2.7.0 "transformers==4.55.0" sentencepiece pillow
+          /tmp/v4env/bin/pip install torch==2.7.0 "transformers==4.55.0" "coremltools==9.0" sentencepiece pillow
 
-      - name: v4 侧提取特征
+      - name: v4 环境打 coremltools 补丁
+        run: /tmp/v4env/bin/python scripts/patch_transformers_for_coreml.py
+
+      - name: v4 侧提取特征+产线导出链验证
         run: /tmp/v4env/bin/python scripts/validate_siglip_coreml.py extract v4.npz
 
       - name: 对质
