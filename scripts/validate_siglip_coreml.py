@@ -195,54 +195,60 @@ def mode_extract(out_npz: Path):
                 print(f"  {name.ljust(9)} 「{TEXTS[name][0][:32]}」 logit={logit:.4f} "
                       f"sigmoid={torch.sigmoid(out.logits_per_image[0][0]).item():.3%}")
 
-    # 产线导出链验证(两版本都跑):新导出代码(文本塔定长 64 双输入)+ coremltools 转换 + 推理一致性
-    import tempfile
-    import coremltools as ct
-    from export_models import export_siglip
-    print(f"\n== 产线导出链验证 @ transformers {transformers.__version__} ==")
-    with tempfile.TemporaryDirectory() as tmp:
-        export_siglip(tmp, MODEL_ID, fp16=True)
-        img_ml = ct.models.MLModel(str(Path(tmp) / "ImageEmbedder" / "SiglipImage.mlpackage"))
-        txt_ml = ct.models.MLModel(str(Path(tmp) / "ImageEmbedder" / "SiglipText.mlpackage"))
-
-        def ml(m, feed):
-            v = m.predict(feed)["embedding"].reshape(-1).astype(np.float32)
-            return v / (np.linalg.norm(v) + 1e-12)
-
-        def padded_ids_mask(t: str):
-            enc = tok(t, padding="max_length", max_length=64)
-            return (np.array([enc["input_ids"]], dtype=np.int32),
-                    np.array([enc["attention_mask"]], dtype=np.int32))
-
-        worst = 1.0
-        for name in images:
-            v = ml(img_ml, {"pixel_values": px_official[name].numpy().astype(np.float32)})
-            ref = img_v[name] / (np.linalg.norm(img_v[name]) + 1e-12)
-            worst = min(worst, cos(v, ref))
-        wt = 1.0
-        for t in all_texts[:3]:
-            ids, mask = padded_ids_mask(t)
-            v = ml(txt_ml, {"input_ids": ids, "attention_mask": mask})
-            ref = txt_v_pad[t] / (np.linalg.norm(txt_v_pad[t]) + 1e-12)
-            wt = min(wt, cos(v, ref))
-        print(f"  图像塔 CoreML vs PyTorch 最小一致性 = {worst:.5f}")
-        print(f"  文本塔 CoreML vs PyTorch 最小一致性 = {wt:.5f}")
-
-        # 修正后经 CoreML 的匹配对 vs 交叉对(区分度证据)
-        print("  匹配对 vs 交叉对(CoreML,区分度=匹配显著高于交叉):")
-        for name in images:
-            v = ml(img_ml, {"pixel_values": px_official[name].numpy().astype(np.float32)})
-            m_in = max(cos(v, txt_v_pad[t]) for t in TEXTS.get(name, []))
-            m_out = max(cos(v, txt_v_pad[t]) for s in TEXTS.values() for t in s
-                        if t not in TEXTS.get(name, []))
-            print(f"    {name.ljust(9)} 匹配={m_in:.4f}  交叉max={m_out:.4f}")
-
     np.savez(out_npz,
              image_names=np.array(list(img_v.keys())),
              text_names=np.array(list(txt_v.keys())),
              **{f"img_{k}": v for k, v in img_v.items()},
              **{f"txt_{k}": v for k, v in txt_v.items()})
     print(f"已保存 {out_npz}")
+
+    # 产线导出链验证(两版本都跑):新导出代码(文本塔定长 64 双输入)+ coremltools 转换 + 推理一致性
+    # 失败不阻断:v5 masking_utils 补丁若不够,由 v4 分支给出可行路线
+    import tempfile
+    import coremltools as ct
+    from export_models import export_siglip
+    print(f"\n== 产线导出链验证 @ transformers {transformers.__version__} ==")
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            export_siglip(tmp, MODEL_ID, fp16=True)
+            img_ml = ct.models.MLModel(str(Path(tmp) / "ImageEmbedder" / "SiglipImage.mlpackage"))
+            txt_ml = ct.models.MLModel(str(Path(tmp) / "ImageEmbedder" / "SiglipText.mlpackage"))
+
+            def ml(m, feed):
+                v = m.predict(feed)["embedding"].reshape(-1).astype(np.float32)
+                return v / (np.linalg.norm(v) + 1e-12)
+
+            def padded_ids_mask(t: str):
+                enc = tok(t, padding="max_length", max_length=64)
+                return (np.array([enc["input_ids"]], dtype=np.int32),
+                        np.array([enc["attention_mask"]], dtype=np.int32))
+
+            worst = 1.0
+            for name in images:
+                v = ml(img_ml, {"pixel_values": px_official[name].numpy().astype(np.float32)})
+                ref = img_v[name] / (np.linalg.norm(img_v[name]) + 1e-12)
+                worst = min(worst, cos(v, ref))
+            wt = 1.0
+            for t in all_texts[:3]:
+                ids, mask = padded_ids_mask(t)
+                v = ml(txt_ml, {"input_ids": ids, "attention_mask": mask})
+                ref = txt_v_pad[t] / (np.linalg.norm(txt_v_pad[t]) + 1e-12)
+                wt = min(wt, cos(v, ref))
+            print(f"  图像塔 CoreML vs PyTorch 最小一致性 = {worst:.5f}")
+            print(f"  文本塔 CoreML vs PyTorch 最小一致性 = {wt:.5f}")
+
+            # 修正后经 CoreML 的匹配对 vs 交叉对(区分度证据)
+            print("  匹配对 vs 交叉对(CoreML,区分度=匹配显著高于交叉):")
+            for name in images:
+                v = ml(img_ml, {"pixel_values": px_official[name].numpy().astype(np.float32)})
+                m_in = max(cos(v, txt_v_pad[t]) for t in TEXTS.get(name, []))
+                m_out = max(cos(v, txt_v_pad[t]) for s in TEXTS.values() for t in s
+                            if t not in TEXTS.get(name, []))
+                print(f"    {name.ljust(9)} 匹配={m_in:.4f}  交叉max={m_out:.4f}")
+    except Exception as e:
+        import traceback
+        print(f"  ⚠️ 该环境导出链失败: {type(e).__name__}: {e}")
+        traceback.print_exc()
 
 
 def mode_compare(a_npz: Path, b_npz: Path):

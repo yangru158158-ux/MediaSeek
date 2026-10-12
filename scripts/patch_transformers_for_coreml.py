@@ -37,6 +37,21 @@ patch(
     "masking_utils 掩码组合",
 )
 
+# 1b) masking_utils 0 维标量初始化:new_ones/new_zeros 是 coremltools 未注册的算子,
+#     语义等价替换为 torch.ones/zeros(SigLIP 文本塔带 attention_mask 导出时踩中)
+patch(
+    SP / "masking_utils.py",
+    "        result = q_idx.new_ones((), dtype=torch.bool)",
+    "        result = torch.ones((), dtype=torch.bool, device=q_idx.device)  # patched: new_ones->ones",
+    "masking_utils new_ones 标量",
+)
+patch(
+    SP / "masking_utils.py",
+    "        result = q_idx.new_zeros((), dtype=torch.bool)",
+    "        result = torch.zeros((), dtype=torch.bool, device=q_idx.device)  # patched: new_zeros->zeros",
+    "masking_utils new_zeros 标量",
+)
+
 # 2) embedding_gemma2 多模态掩码(纯文本场景恒 False)
 patch(
     SP / "models" / "embedding_gemma2" / "modeling_embedding_gemma2.py",
