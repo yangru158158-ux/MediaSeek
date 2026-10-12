@@ -351,9 +351,13 @@ final class SearchEngine {
                     space: siglip.space, kinds: imageKinds, query: q, limit: 1,
                     minScore: -1, among: among))?.first?.score
             }
-            // 相对尾部截断:远弱于头部的长尾(如「人」里混入的屏幕翻拍照)直接砍掉
+            // 相对尾部截断:远弱于头部的长尾(如「人」里混入的屏幕翻拍照)直接砍掉。
+            // 低置信收紧(真尺度 2026-10-12):整组最佳 <0.13 = 没有真匹配,列表全是
+            // 人像/风景基线噪声(同一张海景人像 马尔代夫0.09/护照0.12/身份证0.12),
+            // 此时尾线收到 best×0.95 只留贴近最佳的一小撮,不灌整屏
             let best = hits.first?.score ?? 0
-            channels.append((1.0, best > 0 ? hits.filter { $0.score >= best * 0.85 } : hits))
+            let tailFactor: Float = best >= 0.13 ? 0.85 : 0.95
+            channels.append((1.0, best > 0 ? hits.filter { $0.score >= best * tailFactor } : hits))
         }
 
         // 用户标签通道:中文子串精确匹配(文字: 排他,不参与)
@@ -611,7 +615,8 @@ final class SearchEngine {
                 space: siglip.space, kinds: [.photo], query: q, limit: topK, minScore: 0.08)) ?? [])
         }
         let best = hits.first?.score ?? 0
-        if best > 0 { hits = hits.filter { $0.score >= best * 0.85 } }
+        // 低置信收紧与主流程同规:最佳 <0.13 = 无真匹配,只留贴近最佳的一小撮
+        if best > 0 { hits = hits.filter { $0.score >= best * (best >= 0.13 ? 0.85 : 0.95) } }
         return hits
     }
 
