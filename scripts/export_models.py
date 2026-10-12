@@ -121,7 +121,7 @@ def export_gemma(out_root: str, model_id: str, fp16: bool):
     print(f"  -> {out_dir}")
 
 
-def export_siglip(out_root: str, model_id: str, fp16: bool):
+def export_siglip(out_root: str, model_id: str, fp16: bool, txt_fp32: bool = False):
     print(f"== 导出图文模型 {model_id} ==")
     tok = AutoTokenizer.from_pretrained(model_id)
     model = load_auto(model_id)
@@ -176,6 +176,9 @@ def export_siglip(out_root: str, model_id: str, fp16: bool):
         minimum_deployment_target=ct.target.iOS17,
         convert_to="mlprogram",
     )
+    # 文本塔可选 fp32:v4 加性掩码的 finfo.min(-3.4e38)在 fp16 溢出,实测 CoreML 一致性掉到 0.72;
+    # 文本塔每查询只跑一次,fp32 体积+110MB 换数值稳定值得(体检 CI 定案用哪档)
+    txt_precision = ct.precision.FLOAT32 if (txt_fp32 or not fp16) else ct.precision.FLOAT16
     img_ml = ct.convert(
         traced_img,
         inputs=[ct.TensorType(name="pixel_values", shape=(1, 3, size, size), dtype=np.float32)],
@@ -187,7 +190,10 @@ def export_siglip(out_root: str, model_id: str, fp16: bool):
             ct.TensorType(name="input_ids", shape=(1, SIGLIP_MAX_SEQ), dtype=np.int32),
             ct.TensorType(name="attention_mask", shape=(1, SIGLIP_MAX_SEQ), dtype=np.int32),
         ],
-        **common,
+        outputs=[ct.TensorType(name="embedding")],
+        compute_precision=txt_precision,
+        minimum_deployment_target=ct.target.iOS17,
+        convert_to="mlprogram",
     )
 
     out_dir = os.path.join(out_root, "ImageEmbedder")
@@ -219,6 +225,8 @@ def main():
     ap.add_argument("--skip-gemma", action="store_true")
     ap.add_argument("--skip-siglip", action="store_true")
     ap.add_argument("--fp32", action="store_true", help="不量化,使用 float32(默认 fp16)")
+    ap.add_argument("--txt-fp32", action="store_true",
+                    help="仅 SigLIP 文本塔用 float32(掩码 fp16 溢出致一致性 0.72 的对策)")
     ap.add_argument("--zip", default=None, help="同时打包为 zip(供 App 内导入)")
     args = ap.parse_args()
 
@@ -227,7 +235,7 @@ def main():
     if not args.skip_gemma:
         export_gemma(args.outdir, args.gemma, fp16)
     if not args.skip_siglip:
-        export_siglip(args.outdir, args.siglip, fp16)
+        export_siglip(args.outdir, args.siglip, fp16, txt_fp32=args.txt_fp32)
     if args.zip:
         make_zip(args.outdir, args.zip)
     print("完成。接下来: xcodegen generate && open MediaSeek.xcodeproj")

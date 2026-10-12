@@ -237,6 +237,41 @@ def mode_extract(out_npz: Path):
             print(f"  图像塔 CoreML vs PyTorch 最小一致性 = {worst:.5f}")
             print(f"  文本塔 CoreML vs PyTorch 最小一致性 = {wt:.5f}")
 
+            # 偏差来源定位:PyTorch 纯 fp16(不经 coremltools)对 fp32 参考的一致性
+            # ——若同样 ~0.7x,是文本塔本身 fp16 敏感(掩码溢出嫌疑),fp32 导出是对策
+            if not transformers.__version__.startswith("4"):
+                pass
+            with torch.no_grad():
+                half_model = model.half()
+                wt_half = 1.0
+                for t in all_texts[:3]:
+                    enc = tok(t, padding="max_length", max_length=64, return_attention_mask=True,
+                              return_tensors="pt")
+                    f = half_model.get_text_features(input_ids=enc["input_ids"],
+                                                     attention_mask=enc["attention_mask"])[0].float().numpy()
+                    ref = txt_v_pad[t] / (np.linalg.norm(txt_v_pad[t]) + 1e-12)
+                    wt_half = min(wt_half, cos(f, ref))
+                model.float()
+                print(f"  PyTorch 纯 fp16 文本塔 vs fp32 参考 一致性 = {wt_half:.5f}(独立于 coremltools)")
+
+            # fp32 文本塔导出对照
+            print("  -- fp32 文本塔导出对照 --")
+            export_siglip(tmp, MODEL_ID, fp16=True, txt_fp32=True)
+            txt_ml32 = ct.models.MLModel(str(Path(tmp) / "ImageEmbedder" / "SiglipText.mlpackage"))
+            wt32 = 1.0
+            for t in all_texts[:3]:
+                ids, mask = padded_ids_mask(t)
+                v = ml(txt_ml32, {"input_ids": ids, "attention_mask": mask})
+                ref = txt_v_pad[t] / (np.linalg.norm(txt_v_pad[t]) + 1e-12)
+                wt32 = min(wt32, cos(v, ref))
+            print(f"  文本塔 CoreML fp32 vs PyTorch 最小一致性 = {wt32:.5f}")
+            for name in images:
+                v = ml(img_ml, {"pixel_values": px_official[name].numpy().astype(np.float32)})
+                m_in = max(cos(v, txt_v_pad[t]) for t in TEXTS.get(name, []))
+                m_out = max(cos(v, txt_v_pad[t]) for s in TEXTS.values() for t in s
+                            if t not in TEXTS.get(name, []))
+                print(f"    [fp32] {name.ljust(9)} 匹配={m_in:.4f}  交叉max={m_out:.4f}")
+
             # 修正后经 CoreML 的匹配对 vs 交叉对(区分度证据)
             print("  匹配对 vs 交叉对(CoreML,区分度=匹配显著高于交叉):")
             for name in images:
