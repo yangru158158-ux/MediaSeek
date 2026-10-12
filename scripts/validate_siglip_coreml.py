@@ -160,7 +160,8 @@ def mode_extract(out_npz: Path):
     txt_v_pad = {}
     with torch.no_grad():
         for t in all_texts:
-            enc = tok(t, padding="max_length", max_length=64, return_tensors="pt")
+            enc = tok(t, padding="max_length", max_length=64, return_attention_mask=True,
+                      return_tensors="pt")
             if transformers.__version__.startswith("4"):
                 f = model.get_text_features(input_ids=enc["input_ids"],
                                             attention_mask=enc.get("attention_mask"))[0]
@@ -265,24 +266,26 @@ def mode_extract(out_npz: Path):
                 ref = txt_v_pad[t] / (np.linalg.norm(txt_v_pad[t]) + 1e-12)
                 wt32 = min(wt32, cos(v, ref))
             print(f"  文本塔 CoreML fp32 vs PyTorch 最小一致性 = {wt32:.5f}")
-            for name in images:
-                v = ml(img_ml, {"pixel_values": px_official[name].numpy().astype(np.float32)})
-                def coreml_txt(tquery):
-                    ids, mask = padded_ids_mask(tquery)
-                    return ml(txt_ml32, {"input_ids": ids, "attention_mask": mask})
-                m_in = max(cos(v, coreml_txt(t)) for t in TEXTS.get(name, []))
-                m_out = max(cos(v, coreml_txt(t))
-                            for s in TEXTS.values() for t in s if t not in TEXTS.get(name, []))
-                print(f"    [fp32] {name.ljust(9)} 匹配={m_in:.4f}  交叉max={m_out:.4f}")
 
-            # 修正后经 CoreML 的匹配对 vs 交叉对(区分度证据)
-            print("  匹配对 vs 交叉对(CoreML,区分度=匹配显著高于交叉):")
-            for name in images:
-                v = ml(img_ml, {"pixel_values": px_official[name].numpy().astype(np.float32)})
-                m_in = max(cos(v, txt_v_pad[t]) for t in TEXTS.get(name, []))
-                m_out = max(cos(v, txt_v_pad[t]) for s in TEXTS.values() for t in s
-                            if t not in TEXTS.get(name, []))
-                print(f"    {name.ljust(9)} 匹配={m_in:.4f}  交叉max={m_out:.4f}")
+            # 端到端区分度(CoreML 图像塔 × CoreML 文本塔,fp16/fp32 各一轮)
+            def sep(txt_model, tag):
+                print(f"  匹配对 vs 交叉对(CoreML 端到端 {tag},区分度=匹配显著高于交叉):")
+                for name in images:
+                    v = ml(img_ml, {"pixel_values": px_official[name].numpy().astype(np.float32)})
+                    def coreml_txt(tquery):
+                        ids, mask = padded_ids_mask(tquery)
+                        return ml(txt_model, {"input_ids": ids, "attention_mask": mask})
+                    m_in = max(cos(v, coreml_txt(t)) for t in TEXTS.get(name, []))
+                    m_out = max(cos(v, coreml_txt(t))
+                                for s in TEXTS.values() for t in s if t not in TEXTS.get(name, []))
+                    print(f"    [{tag}] {name.ljust(9)} 匹配={m_in:.4f}  交叉max={m_out:.4f}")
+
+            sep(txt_ml, "fp16")
+            sep(txt_ml32, "fp32")
+    except Exception as e:
+        import traceback
+        print(f"  ⚠️ 该环境导出链失败: {type(e).__name__}: {e}")
+        traceback.print_exc()
     except Exception as e:
         import traceback
         print(f"  ⚠️ 该环境导出链失败: {type(e).__name__}: {e}")
