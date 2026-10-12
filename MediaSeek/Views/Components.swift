@@ -156,6 +156,9 @@ struct HitCell: View {
 /// 详情页:照片查看 / 视频播放 / 文件 QuickLook
 struct DetailSheet: View {
     let hit: DisplayHit
+    var searchTerm: String = ""
+    var isBlocked: Bool = false
+    var onBlockToggle: ((Bool) -> Void)? = nil
     @EnvironmentObject var app: AppModel
     @Environment(\.dismiss) private var dismiss
     @State private var confirmDelete = false
@@ -182,6 +185,16 @@ struct DetailSheet: View {
                             confirmDelete = true
                         } label: {
                             Image(systemName: "trash")
+                        }
+                    }
+                }
+                if !searchTerm.isEmpty, let onBlockToggle {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button {
+                            onBlockToggle(!isBlocked)
+                        } label: {
+                            Label(isBlocked ? "恢复" : "不相关",
+                                  systemImage: isBlocked ? "eye" : "hand.thumbsdown")
                         }
                     }
                 }

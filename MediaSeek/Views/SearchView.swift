@@ -16,6 +16,9 @@ struct SearchView: View {
     @State private var searchedOnce = false
     @State private var elapsedMs = 0
     @State private var selectedHit: DisplayHit?
+    // 「不相关」黑名单:当前查询词下被标记的结果(隐藏;「显示」可揭示,详情页可恢复)
+    @State private var blockedRefs: Set<String> = []
+    @State private var revealBlocked = false
     @State private var exporting = false
     @State private var selectionMode = false
     @State private var selected = Set<String>()
@@ -51,11 +54,19 @@ struct SearchView: View {
                     modelBanner
                 }
                 statusLine
+                if hiddenBlockedCount > 0 {
+                    blockedBanner
+                }
                 resultGrid
             }
             .navigationTitle("智搜")
             .sheet(item: $selectedHit) { hit in
-                DetailSheet(hit: hit)
+                DetailSheet(hit: hit,
+                            searchTerm: lastExecutedQuery,
+                            isBlocked: blockedRefs.contains(hit.refKey),
+                            onBlockToggle: { blocked in
+                                blocked ? markIrrelevant(hit) : unmarkIrrelevant(hit)
+                            })
             }
             .sheet(isPresented: $showDupScan) {
                 DuplicateScanView()
@@ -139,6 +150,23 @@ struct SearchView: View {
     }
 
     @ViewBuilder
+    private var hiddenBlockedCount: Int {
+        results.filter { blockedRefs.contains($0.refKey) }.count
+    }
+
+    private var blockedBanner: some View {
+        HStack {
+            Text("已隐藏 \(hiddenBlockedCount) 个标记为不相关的结果")
+                .font(.footnote)
+                .foregroundColor(.secondary)
+            Spacer()
+            Button(revealBlocked ? "收起" : "显示") { revealBlocked.toggle() }
+                .font(.footnote.weight(.medium))
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 4)
+    }
+
     private var statusLine: some View {
         if searching {
             ProgressView("正在检索…").padding(.vertical, 6)
@@ -365,11 +393,53 @@ struct SearchView: View {
                             HitCell(hit: hit, selectionMode: selectionMode, isSelected: selected.contains(hit.id))
                         }
                         .buttonStyle(.plain)
+                        .opacity(blockedRefs.contains(hit.refKey) ? 0.35 : 1)
+                        .overlay(alignment: .topLeading) {
+                            if blockedRefs.contains(hit.refKey) {
+                                Text("不相关")
+                                    .font(.caption2.weight(.bold))
+                                    .padding(.horizontal, 6).padding(.vertical, 2)
+                                    .background(.red.opacity(0.85), in: Capsule())
+                                    .foregroundStyle(.white)
+                                    .padding(4)
+                            }
+                        }
+                        .contextMenu {
+                            if !lastExecutedQuery.isEmpty {
+                                Button(role: .destructive) {
+                                    markIrrelevant(hit)
+                                } label: {
+                                    Label("不相关:不再出现在「\(lastExecutedQuery)」", systemImage: "hand.thumbsdown")
+                                }
+                                if blockedRefs.contains(hit.refKey) {
+                                    Button { unmarkIrrelevant(hit) } label: {
+                                        Label("撤销不相关标记", systemImage: "eye")
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 .padding(.horizontal)
             }
         }
+    }
+
+    /// 「不相关」标记:term=当前执行的查询词,库内成对记录,该查询下不再出现
+    private func markIrrelevant(_ hit: DisplayHit) {
+        let term = lastExecutedQuery.trimmingCharacters(in: .whitespaces)
+        guard !term.isEmpty else { return }
+        try? app.search.blockRef(term: term, refKey: hit.refKey)
+        blockedRefs.insert(hit.refKey)
+        app.notify("已标记不相关\n该结果不再出现在「\(lastExecutedQuery)」的搜索中\n(长按结果卡可撤销)")
+    }
+
+    private func unmarkIrrelevant(_ hit: DisplayHit) {
+        let term = lastExecutedQuery.trimmingCharacters(in: .whitespaces)
+        guard !term.isEmpty else { return }
+        try? app.search.unblockRef(term: term, refKey: hit.refKey)
+        blockedRefs.remove(hit.refKey)
+        app.notify("已撤销不相关标记\n该结果重新出现在「\(lastExecutedQuery)」的搜索中")
     }
 
     private func exportToAlbum() {
@@ -413,6 +483,7 @@ struct SearchView: View {
         case .text: out = out.filter { textHitIDs.contains($0.id) }
         case .semantic: out = out.filter { !textHitIDs.contains($0.id) }
         }
+        out = out.filter { !blockedRefs.contains($0.refKey) || revealBlocked }
         guard let cf = colorFilter else { return out }
         return out.filter { $0.color == cf }
     }
@@ -736,6 +807,8 @@ struct SearchView: View {
                 results = hits
                 elapsedMs = ms
                 lastExecutedQuery = q
+                blockedRefs = app.search.blockedRefs(term: q)
+                revealBlocked = false
                 textHitIDs = outcome.textIDs
                 timeChip = outcome.timeLabel
                 placeChip = outcome.placeLabel

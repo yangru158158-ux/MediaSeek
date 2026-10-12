@@ -94,6 +94,17 @@ final class SearchEngine {
         return QuerySpec(connector: connector, channel: channel, body: s)
     }
 
+    /// 「不相关」黑名单:该查询词下被用户标记的结果不再出现(term 归一化为小写去空白)
+    func blockRef(term: String, refKey: String) throws {
+        try store.blockRef(term: term.lowercased().trimmingCharacters(in: .whitespaces), refKey: refKey)
+    }
+    func unblockRef(term: String, refKey: String) throws {
+        try store.unblockRef(term: term.lowercased().trimmingCharacters(in: .whitespaces), refKey: refKey)
+    }
+    func blockedRefs(term: String) -> Set<String> {
+        (try? store.blockedRefs(term: term.lowercased().trimmingCharacters(in: .whitespaces))) ?? []
+    }
+
     /// OCR 命中片段(标题展示用):截取命中词前后各 12 字
     static func ocrSnippet(_ text: String, _ term: String) -> String {
         guard let r = text.range(of: term) else { return String(text.prefix(30)) }
