@@ -262,16 +262,8 @@ final class SearchEngine {
         // 「结果内搜指定了文字,视频还出现就不对」——111 重构后主管线漏了这层排他)
         var labelHits: [SearchHit] = []
         let tokens = Self.queryTokens(query: concept)
-        // 有强分(SigLIP≥0.13,真尺度命中带)的视频 ref:视频入语义结果的唯一资格。
-        // 视频标签的词汇不可靠——绿崖河流也会被 Vision 打上 island/tropical,单 token
-        // 字面相交就把「马尔代夫」灌成抖音古庙(2026-10-12 实测),标签只做通过后的解释文本
-        var videoStrongRefs: Set<String> = []
-        if !tokens.isEmpty, spec.channel != .text, scope == .all || scope == .video, let siglip {
-            let vq = try siglip.embedQuery(Self.siglipQuery(concept))
-            videoStrongRefs = Set(Self.dedupByRef(try store.search(
-                space: siglip.space, kinds: [.videoFrame], query: vq, limit: topK,
-                minScore: 0.13, among: among)).map { $0.refKey })
-        }
+        // 有标签实据的视频 refKey(查询词∩帧标签非空)——视觉通道放行视频帧的唯一证据
+        var videoLabelRefs: Set<String> = []
         if !tokens.isEmpty, spec.channel != .text {
             // 照片标签行(视频范围不得参与,否则照片漏进视频结果)
             if imageKinds.contains(.photo), let rows = try? store.allPhotoLabels() {
@@ -288,16 +280,18 @@ final class SearchEngine {
                               score: Float($0.matches), color: nil)
                 })
             }
-            // 视频帧标签:只给有强分资格的视频做解释文本,自身不放行(见 videoStrongRefs 注释)
+            // 视频帧标签:视频侧最可靠的召回(帧画面打 Vision 标签,与照片同款)。
+            // SigLIP 图文分数区分度不足(马尔代夫旅行视频 vs 抖音下载视频分不开),
+            // 标签零幻觉;结果卡带标签文本可解释
             if scope == .all || scope == .video, let rows = try? store.allVideoFrameLabels() {
                 var scored: [(refKey: String, matches: Int, title: String)] = []
                 for row in rows where among?.contains(row.refKey) ?? true {
-                    guard videoStrongRefs.contains(row.refKey) else { continue }
                     let labelTokens = Set(row.title.lowercased()
                         .components(separatedBy: CharacterSet(charactersIn: ", ")))
                     let m = tokens.intersection(labelTokens).count
                     if m > 0 {
                         scored.append((row.refKey, m, row.title))
+                        videoLabelRefs.insert(row.refKey)
                     }
                 }
                 labelHits += scored.sorted { $0.matches > $1.matches }.prefix(topK).map {
@@ -340,11 +334,14 @@ final class SearchEngine {
                 }
             }
             if imageKinds.contains(.videoFrame) {
-                // 视频帧统一强分门槛(真尺度命中带下沿之上):古庙绿崖 0.11 这类基线噪声
-                // 无论从视觉通道还是标签通道都进不来;通过者的标签文本作标题解释
-                let vHits = Self.dedupByRef(try store.search(
+                // 真尺度校准:纯 SigLIP 的视频帧区分度不足——古庙绿崖 0.11 vs 真海滩 0.13-0.14,
+                // 相对标定尾线必然放进噪声(2026-10-12 马尔代夫实测)。按 113 确立的通道优先级
+                // (标签零幻觉 > OCR > SigLIP 兜底),视频帧入场必须有实据:
+                // 帧标签与查询词有交集,或分数 ≥0.15 的强信号
+                var vHits = Self.dedupByRef(try store.search(
                     space: siglip.space, kinds: [.videoFrame], query: q, limit: topK,
-                    minScore: 0.13, among: among))
+                    minScore: 0.08, among: among))
+                vHits = vHits.filter { videoLabelRefs.contains($0.refKey) || $0.score >= 0.15 }
                 hits.append(contentsOf: vHits)
                 hits = Self.dedupByRef(hits)
             }
