@@ -119,6 +119,7 @@ def dump_fields(tag: str, ret):
 
 
 def main():
+    import torch.nn.functional as F
     from transformers import AutoModel, AutoProcessor, AutoTokenizer
 
     print(f"== 体检目标 {MODEL_ID} ==")
@@ -130,106 +131,107 @@ def main():
     print("测试图:", {k: v.size for k, v in images.items()})
     all_texts = sorted({t for ts in TEXTS.values() for t in ts})
 
-    # ---- 显式投影真值(ground truth)
+    # 模型结构速览(找投影层改名后的位置)
+    print("model 子模块:", [n for n, _ in model.named_children()])
+
+    # ---- 真值:完整 forward 的 image_embeds / text_embeds(联合嵌入空间定义)
     px_official = {}
     img_gt, txt_gt = {}, {}
     with torch.no_grad():
-        ret = model.get_image_features(pixel_values=torch.zeros(1, 3, 256, 256))
-        dump_fields("get_image_features", ret)
-        ret_t = model.get_text_features(input_ids=torch.ones(1, 8, dtype=torch.int64))
-        dump_fields("get_text_features", ret_t)
-
+        probe = model(input_ids=torch.ones(1, 8, dtype=torch.int64))
+        dump_fields("forward(input_ids)", probe)
         for name, img in images.items():
             px = processor(images=img.convert("RGB"), return_tensors="pt")["pixel_values"]
             px_official[name] = px
-            img_gt[name] = model.visual_projection(
-                model.vision_model(pixel_values=px).pooler_output)[0].numpy()
+            img_gt[name] = model(pixel_values=px).image_embeds[0].numpy()
         for t in all_texts:
             enc = tok(t, return_tensors="pt")
-            txt_gt[t] = model.text_projection(
-                model.text_model(input_ids=enc["input_ids"],
-                                 attention_mask=enc.get("attention_mask")).pooler_output)[0].numpy()
+            txt_gt[t] = model(input_ids=enc["input_ids"],
+                              attention_mask=enc.get("attention_mask")).text_embeds[0].numpy()
 
     matched_gt = {n: max(cos(img_gt[n], txt_gt[t]) for t in TEXTS.get(n, [])) for n in images}
 
-    # ---- 真值余弦矩阵
-    print("\n== PyTorch 真值(显式投影)匹配对余弦(官方预处理) ==")
+    # ---- 真值余弦 vs 产线实际抓的 pooler_output(未投影)
+    print("\n== 真值(forward embeds)匹配对余弦 vs 产线 pooler_output 路径 ==")
+    print("  图        真值best   pooler_output(产线现役)")
     for n in images:
-        line = f"  {n.ljust(9)}"
-        for t in TEXTS.get(n, []):
-            line += f" 「{t[:34]}」={cos(img_gt[n], txt_gt[t]):.4f}"
-        print(line)
-
-    # ---- 产线路径转换(与 CI 产线同代码同版本)
-    print("\n== 产线路径转换(trace + coremltools fp16) ==")
-    with tempfile.TemporaryDirectory() as tmp:
-        from export_models import export_siglip, _features_to_tensor
-        export_siglip(tmp, MODEL_ID, fp16=True)
-        import coremltools as ct
-        img_ml = ct.models.MLModel(str(Path(tmp) / "ImageEmbedder" / "SiglipImage.mlpackage"))
-        txt_ml = ct.models.MLModel(str(Path(tmp) / "ImageEmbedder" / "SiglipText.mlpackage"))
-
-        def ml_img(px: torch.Tensor) -> np.ndarray:
-            v = img_ml.predict({"pixel_values": px.numpy().astype(np.float32)})["embedding"].reshape(-1)
-            return v / (np.linalg.norm(v) + 1e-12)
-
-        def ml_txt(ids: list[int]) -> np.ndarray:
-            v = txt_ml.predict({"input_ids": np.array([ids], dtype=np.int32)})["embedding"].reshape(-1)
-            return v / (np.linalg.norm(v) + 1e-12)
-
-        # 每个候选字段的匹配对余弦——找出"哪一个是真嵌入空间"
-        print("\n== 各返回字段 vs 真值/匹配对(以 screen×电脑屏幕、cat×猫 为例) ==")
         with torch.no_grad():
-            pxs = px_official["screen"]
-            fields = {}
-            r = model.get_image_features(pixel_values=pxs)
-            if hasattr(r, "keys"):
-                for k in r.keys():
-                    if torch.is_tensor(r[k]):
-                        fields[k] = r[k][0].numpy()
-            fields["<显式投影真值>"] = img_gt["screen"]
-            t1, t2 = "This is a photo of a computer screen.", "This is a photo of a cat."
-            for k, v in fields.items():
-                print(f"  screen·{k}: 形状={v.shape} cos(真值)={cos(v, img_gt['screen']):.5f} "
-                      f"匹配「{t1[:30]}」={cos(v, txt_gt[t1]):.4f} 交叉「{t2[:22]}」={cos(v, txt_gt[t2]):.4f}")
+            pool = model.vision_model(pixel_values=px_official[n]).pooler_output[0].numpy()
+        print(f"  {n.ljust(9)} {matched_gt[n]:<10.4f} "
+              f"{max(cos(pool, txt_gt[t]) for t in TEXTS.get(n, [])):.4f}")
 
-        # 文本塔:CoreML(产线路径,变长 ids)vs 真值
-        print("\n== 文本塔一致性(CoreML 变长 ids vs 显式投影真值) ==")
+    # ---- 两条 CoreML 路径对质
+    print("\n== CoreML 对质:产线路径(pooler_output) vs 修正路径(forward embeds) ==")
+    with tempfile.TemporaryDirectory() as tmp:
+        import coremltools as ct
+
+        common = dict(
+            outputs=[ct.TensorType(name="embedding")],
+            compute_precision=ct.precision.FLOAT16,
+            minimum_deployment_target=ct.target.iOS17,
+            convert_to="mlprogram",
+        )
+        # 产线路径原样复刻
+        class ProdImage(torch.nn.Module):
+            def __init__(self):
+                super().__init__(); self.m = model
+            def forward(self, pixel_values):
+                return F.normalize(_features_to_tensor(self.m.get_image_features(pixel_values=pixel_values)), dim=-1)
+
+        class FixedImage(torch.nn.Module):
+            def __init__(self):
+                super().__init__(); self.m = model
+            def forward(self, pixel_values):
+                return F.normalize(self.m(pixel_values=pixel_values).image_embeds, dim=-1)
+
+        class FixedText(torch.nn.Module):
+            def __init__(self):
+                super().__init__(); self.m = model
+            def forward(self, input_ids):
+                return F.normalize(self.m(input_ids=input_ids).text_embeds, dim=-1)
+
+        ex = torch.zeros(1, 3, 256, 256)
+        with torch.no_grad():
+            prod_ml = ct.convert(torch.jit.trace(ProdImage().eval(), ex),
+                                 inputs=[ct.TensorType(name="pixel_values", shape=(1, 3, 256, 256), dtype=np.float32)], **common)
+            fixed_img_ml = ct.convert(torch.jit.trace(FixedImage().eval(), ex),
+                                      inputs=[ct.TensorType(name="pixel_values", shape=(1, 3, 256, 256), dtype=np.float32)], **common)
+            fixed_txt_ml = ct.convert(torch.jit.trace(FixedText().eval(), torch.ones(1, 16, dtype=torch.int32)),
+                                      inputs=[ct.TensorType(name="input_ids", shape=(1, ct.RangeDim(1, 64)), dtype=np.int32)], **common)
+
+        def ml(m, feed):
+            v = m.predict(feed)["embedding"].reshape(-1)
+            return v / (np.linalg.norm(v) + 1e-12)
+
+        print("\n== 文本塔一致性(CoreML 修正路径 vs 真值) ==")
         for t in all_texts[:4]:
             ids = tok(t)["input_ids"]
-            v = ml_txt(ids)
-            print(f"  「{t[:36]}」 cos(真值)={cos(v, txt_gt[t]):.5f}")
+            print(f"  「{t[:36]}」 cos(真值)={cos(ml(fixed_txt_ml, {'input_ids': np.array([ids], dtype=np.int32)}), txt_gt[t]):.5f}")
 
-        # 图像塔:CoreML 官方张量 vs 真值;App 式预处理罚分
-        print("\n== 图像塔:CoreML vs 真值(官方张量) + App 式拉伸预处理罚分 ==")
-        worst = 1.0
+        print("\n图".rjust(0) + "\n== 图像塔一致性 + 匹配对尺度 ==")
+        print("  图        产线cos(真值)  修正cos(真值)  修正匹配对best")
+        worst_fixed = 1.0
         for name, img in images.items():
-            v_off = ml_img(px_official[name])
-            consist = cos(v_off, img_gt[name] / np.linalg.norm(img_gt[name]))
-            worst = min(worst, consist)
-            bi = ml_img(app_style_pixel_values(img, 256, Image.BILINEAR))
-            la = ml_img(app_style_pixel_values(img, 256, Image.LANCZOS))
-            m = lambda v: max(cos(v, txt_gt[t]) for t in TEXTS.get(name, []))
-            print(f"  {name.ljust(9)} cos(真值)={consist:.5f}  官方匹配对={m(v_off):.4f}  "
-                  f"拉伸bilinear={m(bi):.4f}  拉伸lanczos={m(la):.4f}")
+            v_prod = ml(prod_ml, {"pixel_values": px_official[name].numpy().astype(np.float32)})
+            v_fix = ml(fixed_img_ml, {"pixel_values": px_official[name].numpy().astype(np.float32)})
+            c_fix = cos(v_fix, img_gt[name] / np.linalg.norm(img_gt[name]))
+            worst_fixed = min(worst_fixed, c_fix)
+            best_fix = max(cos(v_fix, txt_gt[t]) for t in TEXTS.get(name, []))
+            print(f"  {name.ljust(9)} {cos(v_prod, img_gt[name]/np.linalg.norm(img_gt[name])):<14.4f} "
+                  f"{c_fix:<14.5f} {best_fix:.4f}")
 
-        # 产线 CoreML 的绝对尺度表(与设备实测 0.088 对质)
-        print("\n== 产线 CoreML 官方预处理 匹配对绝对分 vs 设备实测(≈0.088) ==")
-        for name in images:
-            v = ml_img(px_official[name])
-            print(f"  {name.ljust(9)} best={max(cos(v, txt_gt[t]) for t in TEXTS.get(name, [])):.4f}")
+        # App 式拉伸预处理罚分(修正路径)
+        print("\n== 修正路径:官方预处理 vs App 式拉伸预处理 匹配对 ==")
+        for name, img in images.items():
+            bi = ml(fixed_img_ml, {"pixel_values": app_style_pixel_values(img, 256, Image.BILINEAR).numpy().astype(np.float32)})
+            m_off = max(cos(ml(fixed_img_ml, {"pixel_values": px_official[name].numpy().astype(np.float32)}), txt_gt[t]) for t in TEXTS.get(name, []))
+            m_bi = max(cos(bi, txt_gt[t]) for t in TEXTS.get(name, []))
+            print(f"  {name.ljust(9)} 官方={m_off:.4f}  拉伸bilinear={m_bi:.4f}")
 
     print("\n== 判读 ==")
     print(f"真值匹配对分布: {dict((k, round(v, 4)) for k, v in matched_gt.items())}")
-    print(f"产线 CoreML 与显式投影真值最小一致性: {worst:.5f}")
-    if worst < 0.98:
-        print("H1 定罪:产线工件装的不是显式投影嵌入(_features_to_tensor 抓错字段),修 export_models.py 后重导模型包,App 端全量重嵌")
-    else:
-        best = max(matched_gt.values())
-        if best >= 0.2:
-            print(f"H2 嫌疑:真值能打 {best:.3f},对比上方『官方匹配对』与『拉伸』两列判断预处理罚分")
-        else:
-            print(f"H3:官方预处理下真值匹配对也只有 {best:.3f} → 模型尺度天然低,相对标定正确,升级看 so400m")
+    print(f"修正路径 CoreML 与真值最小一致性: {worst_fixed:.5f} (≥0.98 即修正方案可上线)")
+    print("产线现役(pooler_output)与真值的余弦见上表——接近 0 即坐实『产线装的是未投影特征』")
     return 0
 
 
