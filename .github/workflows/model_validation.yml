@@ -1,7 +1,6 @@
 name: Model Validation
-# SigLIP2 产线管道体检:PyTorch 官方参考 vs 产线 trace+coremltools 转换
-# 回答三件事:①转换一致性 ②匹配对真实尺度 ③App 式拉伸预处理的罚分
-# 依赖与 export_models.yml 完全一致(同版本,结论才对产线有效)
+# SigLIP2 产线管道体检:transformers 4(投影空间) vs 5(pooler 空间) 同检查点对质
+# 判定设备上 models.zip(v5 导出)装的是不是检查点训练时的真实联合嵌入空间
 on:
   workflow_dispatch:
 
@@ -18,22 +17,31 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: 安装依赖(与产线同版本)
+      - name: 安装 v5 依赖(与产线同版本)
         run: |
           pip install --upgrade pip
-          pip install torch==2.7.0 "transformers>=5.0" "coremltools==9.0" sentencepiece pillow
+          pip install torch==2.7.0 "transformers>=5.0" sentencepiece pillow
 
-      - name: 打 coremltools 兼容补丁
-        run: python scripts/patch_transformers_for_coreml.py
+      - name: v5 侧提取特征
+        run: python scripts/validate_siglip_coreml.py extract v5.npz
 
-      - name: 运行体检
+      - name: 建 v4 对照环境
         run: |
-          python scripts/validate_siglip_coreml.py 2>&1 | tee validation_report.txt
+          python -m venv /tmp/v4env
+          /tmp/v4env/bin/pip install --upgrade pip
+          /tmp/v4env/bin/pip install torch==2.7.0 "transformers==4.55.0" sentencepiece pillow
 
-      - name: 上传体检报告
+      - name: v4 侧提取特征
+        run: /tmp/v4env/bin/python scripts/validate_siglip_coreml.py extract v4.npz
+
+      - name: 对质
+        run: python scripts/validate_siglip_coreml.py compare v4.npz v5.npz
+
+      - name: 上传 npz(留档)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: validation-report
-          path: validation_report.txt
+          name: validate-npz
+          path: "*.npz"
           retention-days: 90
+          if-no-files-found: ignore
