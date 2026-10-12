@@ -262,6 +262,8 @@ final class SearchEngine {
         // 「结果内搜指定了文字,视频还出现就不对」——111 重构后主管线漏了这层排他)
         var labelHits: [SearchHit] = []
         let tokens = Self.queryTokens(query: concept)
+        // 有标签实据的视频 refKey(查询词∩帧标签非空)——视觉通道放行视频帧的唯一证据
+        var videoLabelRefs: Set<String> = []
         if !tokens.isEmpty, spec.channel != .text {
             // 照片标签行(视频范围不得参与,否则照片漏进视频结果)
             if imageKinds.contains(.photo), let rows = try? store.allPhotoLabels() {
@@ -287,7 +289,10 @@ final class SearchEngine {
                     let labelTokens = Set(row.title.lowercased()
                         .components(separatedBy: CharacterSet(charactersIn: ", ")))
                     let m = tokens.intersection(labelTokens).count
-                    if m > 0 { scored.append((row.refKey, m, row.title)) }
+                    if m > 0 {
+                        scored.append((row.refKey, m, row.title))
+                        videoLabelRefs.insert(row.refKey)
+                    }
                 }
                 labelHits += scored.sorted { $0.matches > $1.matches }.prefix(topK).map {
                     SearchHit(kind: .videoFrameLabel, refKey: $0.refKey, frameIndex: 0,
@@ -320,34 +325,23 @@ final class SearchEngine {
                         minScore: 0.18, among: among))
                 }
                 if hits.isEmpty {
-                    // 与视频同款相对标定第三档:SigLIP2 真实分布 max 0.07-0.09(诊断实锤),
-                    // 0.18/0.25 对照片同样悬空——语义: 查询下照片在语义通道整体缺席、
-                    // 只剩视频刷屏(2026-10-12 用户实测 语义:passport/身份证 全是视频)。
-                    // 照片与视频必须同规:0.04 取候选,尾部由下方 best×0.85 截断
+                    // 真尺度第三档(2026-10-12 设备实测:新文本塔下命中带 0.10-0.14、
+                    // 无关带 0.04-0.09,首名=14% 真海滩):0.30/0.18 悬空失效,
+                    // 地板 0.08 取候选(高于无关带上沿、低于命中带下沿),尾部 best×0.85 截断
                     hits = Self.dedupByRef(try store.search(
                         space: siglip.space, kinds: [.photo], query: q, limit: topK,
-                        minScore: 0.04, among: among))
+                        minScore: 0.08, among: among))
                 }
             }
             if imageKinds.contains(.videoFrame) {
-                let vFloor: Float = semanticOnly ? 0.25 : 0.22
+                // 真尺度校准:纯 SigLIP 的视频帧区分度不足——古庙绿崖 0.11 vs 真海滩 0.13-0.14,
+                // 相对标定尾线必然放进噪声(2026-10-12 马尔代夫实测)。按 113 确立的通道优先级
+                // (标签零幻觉 > OCR > SigLIP 兜底),视频帧入场必须有实据:
+                // 帧标签与查询词有交集,或分数 ≥0.15 的强信号
                 var vHits = Self.dedupByRef(try store.search(
                     space: siglip.space, kinds: [.videoFrame], query: q, limit: topK,
-                    minScore: vFloor, among: among))
-                if vHits.isEmpty {
-                    vHits = Self.dedupByRef(try store.search(
-                        space: siglip.space, kinds: [.videoFrame], query: q, limit: topK,
-                        minScore: 0.12, among: among))
-                }
-                if vHits.isEmpty {
-                    // 诊断实锤(2026-10-11):SigLIP2 在本库的真实分布 max 仅 0.07 上下
-                    // (电脑屏幕 照片0.088/帧0.076,马尔代夫 照片0.090/帧0.076),
-                    // 绝对门槛 0.12-0.30 全部悬空;视频帧又没有标签/OCR 兜底,一悬空即全空。
-                    // 改相对标定:0.04 取候选(远高于底噪),尾部由下方 best×0.85 截断兜住
-                    vHits = Self.dedupByRef(try store.search(
-                        space: siglip.space, kinds: [.videoFrame], query: q, limit: topK,
-                        minScore: 0.04, among: among))
-                }
+                    minScore: 0.08, among: among))
+                vHits = vHits.filter { videoLabelRefs.contains($0.refKey) || $0.score >= 0.15 }
                 hits.append(contentsOf: vHits)
                 hits = Self.dedupByRef(hits)
             }
@@ -595,12 +589,11 @@ final class SearchEngine {
                     minScore: 0.10, among: within)) ?? [])
             }
             if hits.isEmpty {
-                // SigLIP2 本库真实分布 max 0.07-0.09(2026-10-11 诊断实锤),
-                // 0.20/0.10 全悬空 → 结果内语义词恒空;0.04 相对档,
-                // 尾部由下方 best×0.85(以集合内最佳为基准)截断
+                // 真尺度第三档:0.20/0.10 在命中带 0.10-0.14 上悬空 → 结果内语义词恒空;
+                // 地板 0.07(结果内比全局 0.08 略宽),尾部由 best×0.85(以集合内最佳为基准)截断
                 hits = Self.dedupByRef((try? store.search(
                     space: siglip.space, kinds: [.photo], query: q, limit: topK,
-                    minScore: 0.04, among: within)) ?? [])
+                    minScore: 0.07, among: within)) ?? [])
             }
             let best = hits.first?.score ?? 0
             if best > 0 { hits = hits.filter { $0.score >= best * 0.85 } }
@@ -613,8 +606,9 @@ final class SearchEngine {
                 space: siglip.space, kinds: [.photo], query: q, limit: topK, minScore: 0.15)) ?? [])
         }
         if hits.isEmpty {
+            // 真尺度地板 0.08(与主流程照片第三档同规)
             hits = Self.dedupByRef((try? store.search(
-                space: siglip.space, kinds: [.photo], query: q, limit: topK, minScore: 0.04)) ?? [])
+                space: siglip.space, kinds: [.photo], query: q, limit: topK, minScore: 0.08)) ?? [])
         }
         let best = hits.first?.score ?? 0
         if best > 0 { hits = hits.filter { $0.score >= best * 0.85 } }
