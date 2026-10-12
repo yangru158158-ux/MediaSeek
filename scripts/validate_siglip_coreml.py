@@ -104,7 +104,7 @@ TEXTS = {
 # ---------------------------------------------------------------- 预处理
 
 def official_pixel_values(processor, img: Image.Image) -> torch.Tensor:
-    out = processor(images=img, return_tensors="pt")
+    out = processor(images=img.convert("RGB"), return_tensors="pt")
     return out["pixel_values"]
 
 
