@@ -319,6 +319,15 @@ final class SearchEngine {
                         space: siglip.space, kinds: [.photo], query: q, limit: topK,
                         minScore: 0.18, among: among))
                 }
+                if hits.isEmpty {
+                    // 与视频同款相对标定第三档:SigLIP2 真实分布 max 0.07-0.09(诊断实锤),
+                    // 0.18/0.25 对照片同样悬空——语义: 查询下照片在语义通道整体缺席、
+                    // 只剩视频刷屏(2026-10-12 用户实测 语义:passport/身份证 全是视频)。
+                    // 照片与视频必须同规:0.04 取候选,尾部由下方 best×0.85 截断
+                    hits = Self.dedupByRef(try store.search(
+                        space: siglip.space, kinds: [.photo], query: q, limit: topK,
+                        minScore: 0.04, among: among))
+                }
             }
             if imageKinds.contains(.videoFrame) {
                 let vFloor: Float = semanticOnly ? 0.25 : 0.22
