@@ -2,18 +2,19 @@ import Accelerate
 
 /// 向量贪心聚类(照片查重/人脸归组共用):全量载入归一化向量,
 /// 每轮取首个存活向量为锚,与全部存活向量做点积(即余弦),≥ threshold 归入同组。
-/// 返回组内为 keys 下标的分组列表。
+/// 返回组内为 (keys 下标, 对锚相似度) 的分组列表(锚自身恒为 1.0)——
+/// 查重 UI 用分数区分「完全相同 0.99+」与「只是相似 0.92 档」。
 enum DuplicateScanner {
     static func scan(keys: [String], flat: [Float], dim: Int, threshold: Float,
-                     progress: (Int, Int) -> Void) -> [[Int]] {
+                     progress: (Int, Int) -> Void) -> [[(index: Int, score: Float)]] {
         let n = keys.count
         guard n > 1, dim > 0, flat.count == n * dim else { return [] }
         var alive = [Bool](repeating: true, count: n)
-        var groups: [[Int]] = []
+        var groups: [[(index: Int, score: Float)]] = []
         var done = 0
         while true {
             guard let a = alive.firstIndex(of: true) else { break }
-            var group: [Int] = []
+            var group: [(index: Int, score: Float)] = []
             flat.withUnsafeBufferPointer { fb in
                 let base = fb.baseAddress!
                 let anchor = base + a * dim
@@ -24,11 +25,12 @@ enum DuplicateScanner {
                     // 逐行点积 FLOPs 相同、性能不变,无矩阵形状/步长敏感性
                     var dot: Float = 0
                     vDSP_dotpr(anchor, 1, base + j * dim, 1, &dot, vDSP_Length(dim))
-                    if j == a || dot >= threshold { group.append(j) }
+                    if j == a { group.append((j, 1)) }
+                    else if dot >= threshold { group.append((j, dot)) }
                 }
             }
             if group.count > 1 { groups.append(group) }
-            for j in group { alive[j] = false }
+            for (j, _) in group { alive[j] = false }
             done += group.count
             progress(done, n)
         }

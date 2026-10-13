@@ -196,7 +196,7 @@ struct PeopleView: View {
                 let idxGroups = DuplicateScanner.scan(
                     keys: data.keys, flat: data.flat, dim: data.dim, threshold: threshold) { done, total in
                     Task { @MainActor in progress = (done, total) }
-                }
+                }.map { $0.map(\.index) }
                 // 脸组 → 照片组(组内同照片多脸去重);按人数降序,封顶 300 组防长列表
                 var photoGroups: [[String]] = []
                 for g in idxGroups {
