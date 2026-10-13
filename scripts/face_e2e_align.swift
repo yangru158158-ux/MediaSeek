@@ -52,6 +52,22 @@ struct FaceE2EAlign {
                 print("SKIP 未检出人脸 \(name)")
                 continue
             }
+            // 诊断:打印 Vision 关键点换算结果(排查真实照片对齐偏差的原始数据)
+            if let lm = big.landmarks {
+                func pt(_ r: VNFaceLandmarkRegion2D?) -> String {
+                    guard let pts = r?.normalizedPoints, !pts.isEmpty else { return "无" }
+                    let sx = pts.map(\.x).reduce(0, +) / Double(pts.count)
+                    let sy = pts.map(\.y).reduce(0, +) / Double(pts.count)
+                    return String(format: "(%.1f, %.1f)px [%d点]", sx * Double(cg.width),
+                                  (1 - sy) * Double(cg.height), pts.count)
+                }
+                let bb = big.boundingBox
+                print("DIAG \(name): 图 \(cg.width)x\(cg.height) 框 " +
+                      String(format: "x[%.3f,%.3f] y[%.3f,%.3f]",
+                             bb.minX, bb.maxX, bb.minY, bb.maxY) +
+                      " 左眼\(pt(lm.leftEye)) 右眼\(pt(lm.rightEye)) " +
+                      "鼻\(pt(lm.nose)) 外唇\(pt(lm.outerLips))")
+            }
             guard let aligned = FaceKit.alignedFace(source: cg, observation: big) else {
                 print("SKIP 对齐失败 \(name)")
                 continue
