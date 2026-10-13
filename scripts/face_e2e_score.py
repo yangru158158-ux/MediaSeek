@@ -47,28 +47,48 @@ def greedy_cluster(mat, threshold):
     return groups
 
 
-def merge_groups(groups, mat, link):
-    """复刻 DuplicateScanner.mergeGroups:任一成员对 ≥link 则并组(并查集)"""
-    g = len(groups)
-    parent = list(range(g))
+def merge_groups(groups, mat, link, floor, rounds=12):
+    """复刻 DuplicateScanner.mergeGroups:平均连接 + 互为最佳 + 组内底线守卫。
 
-    def find(x):
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    for i in range(g):
-        for j in range(i + 1, g):
-            if find(i) == find(j):
+    单连接(任一对够像就并)会链式塌缩——A像B、B像C 就把 A C 串一起,
+    141 用户实测 1047 组→119 组、首组 1900 张、最弱 -6%。三重防护缺一不可。
+    """
+    cur = [list(g) for g in groups]
+    for _ in range(rounds):
+        n = len(cur)
+        if n < 2:
+            break
+        best_peer = [-1] * n
+        best_avg = [-2.0] * n
+        low_pair = {}
+        for i in range(n):
+            for j in range(i + 1, n):
+                sub = mat[np.ix_(cur[i], cur[j])]
+                avg, low = float(sub.mean()), float(sub.min())
+                low_pair[(i, j)] = low
+                if avg > best_avg[i]:
+                    best_avg[i], best_peer[i] = avg, j
+                if avg > best_avg[j]:
+                    best_avg[j], best_peer[j] = avg, i
+        used, nxt, changed = set(), [], False
+        for i in range(n):
+            if i in used:
                 continue
-            if any(mat[a, b] >= link for a in groups[i] for b in groups[j]):
-                ri, rj = find(i), find(j)
-                parent[max(ri, rj)] = min(ri, rj)
-    buckets = defaultdict(list)
-    for i in range(g):
-        buckets[find(i)].extend(groups[i])
-    return sorted((sorted(v) for v in buckets.values()), key=len, reverse=True)
+            j = best_peer[i]
+            if j < 0 or j in used or best_peer[j] != i or best_avg[i] < link:
+                continue
+            if low_pair[(min(i, j), max(i, j))] < floor:
+                continue
+            used.update({i, j})
+            nxt.append(sorted(cur[i] + cur[j]))
+            changed = True
+        for i in range(n):
+            if i not in used:
+                nxt.append(cur[i])
+        cur = nxt
+        if not changed:
+            break
+    return sorted(cur, key=len, reverse=True)
 
 
 ap = argparse.ArgumentParser()
@@ -76,6 +96,7 @@ ap.add_argument("--model", required=True)
 ap.add_argument("--dir", required=True)
 ap.add_argument("--threshold", type=float, default=0.48, help="App 平衡模式入组阈值")
 ap.add_argument("--link", type=float, default=0.42, help="组间合并连接阈值(低于入组)")
+ap.add_argument("--floor", type=float, default=0.23, help="合并后组内最低成员对底线")
 a = ap.parse_args()
 
 files = sorted(glob.glob(os.path.join(a.dir, "aligned_*.png")))
@@ -119,7 +140,7 @@ if cross_pairs:
 
 # 分组验证:贪心聚类 → 组间合并 → 与真值人物划分比对
 raw = greedy_cluster(mat, a.threshold)
-merged = merge_groups(raw, mat, a.link)
+merged = merge_groups(raw, mat, a.link, a.floor)
 
 
 def show(groups):
@@ -127,7 +148,16 @@ def show(groups):
 
 
 print(f"贪心聚类(阈值 {a.threshold}): {show(raw)}")
-print(f"组间合并(连接 {a.link}): {show(merged)}")
+print(f"组间合并(连接 {a.link} 底线 {a.floor}): {show(merged)}")
+
+# 链式塌缩闸门:组内任意成员对不得低于底线(141 实测「最弱 -6%」的组)
+for g in merged:
+    if len(g) < 2:
+        continue
+    sub = mat[np.ix_(g, g)]
+    low = float(sub.min())
+    if low < a.floor:
+        fails.append(f"组内出现极低相似成员对 {low:+.3f} < {a.floor}(链式塌缩):" + show([g]))
 
 truth = defaultdict(list)
 for i, lb in enumerate(labels):

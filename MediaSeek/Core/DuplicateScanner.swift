@@ -37,84 +37,111 @@ enum DuplicateScanner {
         return groups
     }
 
-    /// 组间合并(单连接层次聚类的一轮收敛):贪心聚类「一锚定终身」会把同一人
-    /// 拆成多组——锚若是侧脸/戴口罩照,正脸照够不到阈值就另起一组,且组一旦
-    /// 成形永不复合(140 用户实测同一人分好几组)。本函数按「**任意成员对**
-    /// 相似度 ≥ linkThreshold」把组连通起来:同一人的侧脸组与正脸组只要有
-    /// 一对照片够像就并成一组(单连接,人脸簇天然链式——同人不同角度靠中间
-    /// 角度的照片串起来)。合并后分数相对新组锚(组内最大组的锚)重算。
+    /// 组间合并:贪心聚类「一锚定终身」会把同一人拆成多组(锚若是侧脸/油画,
+    /// 正脸够不到阈值就另起一组,且组一旦成形永不复合)。
     ///
-    /// linkThreshold 应略高于入组阈值:入组是「与锚像」,连接是「两组各有
-    /// 一张互相像」,后者更容易偶然命中,过松会把不同人连成一串。
+    /// **三重防链式塌缩**(141 用户实测单连接版把 1047 组并成 119 组、
+    /// 首组 1900 张、组内最弱 -6% = 组里混进了完全不是一个人的脸):
+    /// ① **平均连接**而非单连接——两组相似度取「跨组成员对的平均」,不是
+    ///    「任意一对够像」;单连接下 A像B、B像C 就把 A C 串起来,一条链能把
+    ///    几百人连成一坨(链式塌缩,人脸库里尤其致命)。
+    /// ② **互为最佳**——每轮只合并「彼此都是对方最相似组」的一对,逐轮收敛;
+    ///    防止一个大组像磁铁一样把所有组吸走。
+    /// ③ **组内底线守卫**——合并后若跨组最低成员对低于 floor 就撤销本次合并,
+    ///    硬性保证组里不会出现互相完全不像的两张脸(-6% 这类不可能再出现)。
+    ///
+    /// - Parameters:
+    ///   - linkThreshold: 两组平均相似度达到该值才考虑合并
+    ///   - floor: 跨组最低成员对的下限,低于则拒绝合并
     static func mergeGroups(_ groups: [[(index: Int, score: Float)]],
-                            flat: [Float], dim: Int, linkThreshold: Float,
+                            flat: [Float], dim: Int, linkThreshold: Float, floor: Float,
+                            maxRounds: Int = 12,
                             progress: (Int, Int) -> Void = { _, _ in }) -> [[(index: Int, score: Float)]] {
-        let g = groups.count
-        guard g > 1, dim > 0 else { return groups }
-        // 并查集:组号连通分量
-        var parent = Array(0..<g)
-        func find(_ x: Int) -> Int {
-            var r = x
-            while parent[r] != r { parent[r] = parent[parent[r]]; r = parent[r] }
-            return r
+        guard groups.count > 1, dim > 0 else { return groups }
+
+        // 代表样本:锚 + 组内最低分几张(边缘角度正是与其他组的连接点)。
+        // 平均/最低都在代表样本上算,成本按代表数平方封顶
+        let maxReps = 5
+        func representatives(of group: [(index: Int, score: Float)]) -> [Int] {
+            let anchor = group[0].index
+            let weakest = group.sorted { $0.score < $1.score }
+                .prefix(maxReps - 1)
+                .map(\.index)
+                .filter { $0 != anchor }
+            return [anchor] + weakest
         }
-        func union(_ a: Int, _ b: Int) {
-            let ra = find(a), rb = find(b)
-            if ra != rb { parent[max(ra, rb)] = min(ra, rb) }
-        }
-        // 每组取代表样本(锚 + 组内分数最低的若干张:最低分样本是该组的「边缘
-        // 角度」,正是与其他组连接的桥梁);全对全比较成本按代表数平方,
-        // 代表数封顶保证大库可用
-        let maxReps = 6
-        let reps: [[Int]] = groups.map { grp in
-            let sorted = grp.sorted { $0.score < $1.score }
-            var picked = [grp[0].index]                 // 锚
-            for m in sorted.prefix(maxReps - 1) where m.index != grp[0].index {
-                picked.append(m.index)
-            }
-            return picked
-        }
+
+        var current: [[Int]] = groups.map(representatives)
+        var members: [[(index: Int, score: Float)]] = groups
+
         flat.withUnsafeBufferPointer { fb in
             guard let base = fb.baseAddress else { return }
-            for i in 0..<g {
-                progress(i, g)
-                for j in (i + 1)..<g where find(i) != find(j) {
-                    var linked = false
-                    for ri in reps[i] {
-                        for rj in reps[j] {
-                            var dot: Float = 0
-                            vDSP_dotpr(base + ri * dim, 1, base + rj * dim, 1, &dot, vDSP_Length(dim))
-                            if dot >= linkThreshold { linked = true; break }
+            func dot(_ a: Int, _ b: Int) -> Float {
+                var d: Float = 0
+                vDSP_dotpr(base + a * dim, 1, base + b * dim, 1, &d, vDSP_Length(dim))
+                return d
+            }
+
+            for round in 0..<maxRounds {
+                progress(round, maxRounds)
+                let n = current.count
+                if n < 2 { break }
+
+                var bestPeer = [Int](repeating: -1, count: n)
+                var bestAvg = [Float](repeating: -2, count: n)
+                var lowPair = [[Int: Float]](repeating: [:], count: n)
+                for i in 0..<n {
+                    for j in (i + 1)..<n {
+                        var sum: Float = 0, low: Float = 1
+                        var count = 0
+                        for a in current[i] {
+                            for b in current[j] {
+                                let d = dot(a, b)
+                                sum += d
+                                low = min(low, d)
+                                count += 1
+                            }
                         }
-                        if linked { break }
-                    }
-                    if linked { union(i, j) }
-                }
-            }
-        }        // 按连通分量汇总成员,去重后以「成员最多的原组的锚」为新锚重算分数
-        var buckets: [Int: [Int]] = [:]          // 根 → 原组号
-        for i in 0..<g { buckets[find(i), default: []].append(i) }
-        var out: [[(index: Int, score: Float)]] = []
-        flat.withUnsafeBufferPointer { fb in
-            guard let base = fb.baseAddress else { return }
-            for (_, members) in buckets {
-                let anchorGroup = members.max { groups[$0].count < groups[$1].count } ?? members[0]
-                let anchor = groups[anchorGroup][0].index
-                var seen = Set<Int>()
-                var merged: [(index: Int, score: Float)] = []
-                for m in members {
-                    for e in groups[m] where seen.insert(e.index).inserted {
-                        if e.index == anchor { continue }
-                        var dot: Float = 0
-                        vDSP_dotpr(base + anchor * dim, 1, base + e.index * dim, 1,
-                                   &dot, vDSP_Length(dim))
-                        merged.append((e.index, dot))
+                        let avg = count > 0 ? sum / Float(count) : -1
+                        lowPair[i][j] = low
+                        if avg > bestAvg[i] { bestAvg[i] = avg; bestPeer[i] = j }
+                        if avg > bestAvg[j] { bestAvg[j] = avg; bestPeer[j] = i }
                     }
                 }
-                merged.sort { $0.score > $1.score }
-                out.append([(anchor, 1)] + merged)
+
+                var used = Set<Int>()
+                var nextCurrent: [[Int]] = []
+                var nextMembers: [[(index: Int, score: Float)]] = []
+                var changed = false
+                for i in 0..<n where !used.contains(i) {
+                    let j = bestPeer[i]
+                    guard j >= 0, !used.contains(j), bestPeer[j] == i,
+                          bestAvg[i] >= linkThreshold,
+                          (lowPair[min(i, j)][max(i, j)] ?? -1) >= floor else { continue }
+                    used.insert(i); used.insert(j)
+                    changed = true
+                    // 新组锚 = 成员多的那组的锚;全员分数相对新锚重算
+                    let bigger = members[i].count >= members[j].count ? i : j
+                    let anchor = members[bigger][0].index
+                    var seen: Set<Int> = [anchor]
+                    var merged: [(index: Int, score: Float)] = []
+                    for e in members[i] + members[j] where seen.insert(e.index).inserted {
+                        merged.append((e.index, dot(anchor, e.index)))
+                    }
+                    merged.sort { $0.score > $1.score }
+                    let combined = [(index: anchor, score: Float(1))] + merged
+                    nextMembers.append(combined)
+                    nextCurrent.append(representatives(combined))
+                }
+                for i in 0..<n where !used.contains(i) {
+                    nextCurrent.append(current[i])
+                    nextMembers.append(members[i])
+                }
+                current = nextCurrent
+                members = nextMembers
+                if !changed { break }
             }
         }
-        return out.sorted { $0.count > $1.count }
+        return members.sorted { $0.count > $1.count }
     }
 }

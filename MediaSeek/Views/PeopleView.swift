@@ -27,11 +27,13 @@ struct PeopleView: View {
     // 自成一组(140 用户实测同一人分好几组)。阈值扫描 0.50 及以下全部正确,
     // 取 0.48 留 3 倍于跨人上限的余量
     private let thresholds: [String: Float] = ["exact": 0.60, "balanced": 0.48, "loose": 0.38]
-    /// 组间合并的连接阈值 = 入组阈值 − 0.06。**必须低于入组阈值**:入组要求
-    /// 「与锚够像」,而组与组之间只有边缘样本(侧脸/油画/旧照)可连,门槛反而
-    /// 要更低才接得上;设得更高等于合并永不触发(CI 实测 0.58/0.64 救不回
-    /// trump 油画组,0.58/0.50 立刻正确)
+    /// 组间合并的连接阈值 = 入组阈值 − 0.06(两组**平均**相似度达标才合并)。
+    /// 必须低于入组阈值:入组要求「与锚够像」,组间只有边缘样本(侧脸/油画/
+    /// 旧照)可连,门槛更低才接得上
     private func linkThreshold(_ t: Float) -> Float { max(t - 0.06, 0.30) }
+    /// 合并后组内最低成员对的底线:低于它就拒绝合并。141 单连接版出现
+    /// 「最弱 -6%」的组(完全不是一个人被链式串进来),本守卫从算法上杜绝
+    private func floorThreshold(_ t: Float) -> Float { max(t - 0.25, 0.12) }
 
     var body: some View {
         NavigationStack {
@@ -226,6 +228,7 @@ struct PeopleView: View {
         progress = (0, 1)
         let threshold = thresholds[mode] ?? 0.38
         let link = linkThreshold(threshold)
+        let floor = floorThreshold(threshold)
         let store = app.store
         Task.detached(priority: .userInitiated) {
             do {
@@ -234,13 +237,12 @@ struct PeopleView: View {
                     keys: data.keys, flat: data.flat, dim: data.dim, threshold: threshold) { done, total in
                     Task { @MainActor in progress = (done, total) }
                 }
-                // 组间合并:贪心聚类「一锚定终身」会把同一人按角度/遮挡拆成多组
-                // (140 用户实测);按「两组各有一张互相像」连通,同人的侧脸组与
-                // 正脸组靠中间角度照片串起来。连接阈值低于入组阈值——组间只有
-                // 边缘样本可连,门槛更低才接得上(见 linkThreshold 注释)
+                // 组间合并:贪心聚类「一锚定终身」会把同一人按角度/遮挡拆成多组。
+                // 平均连接+互为最佳+组内底线三重防链式塌缩——单连接版曾把
+                // 1047 组并成 119 组、首组 1900 张、最弱 -6%(141 用户实测)
                 let scored = DuplicateScanner.mergeGroups(
                     raw, flat: data.flat, dim: data.dim,
-                    linkThreshold: link) { done, total in
+                    linkThreshold: link, floor: floor) { done, total in
                     Task { @MainActor in progress = (done, max(total, 1)) }
                 }
                 // 脸组 → 照片组(组内同照片多脸去重,保留与锚相似度);按人数降序,封顶 300 组防长列表
