@@ -58,10 +58,10 @@ enum FaceKit {
     private static let eyeMid = CGPoint(x: 55.9132, y: 60.4012)
     private static let eyeDistance: CGFloat = 35.2372
 
-    /// 检测人脸(带关键点)。VNGenerateFaceLandmarksRequest 自带检测步,
+    /// 检测人脸(带关键点)。VNDetectFaceLandmarksRequest 自带检测步,
     /// 结果同时含外接框与五官区域;一张合照最多取 maxFaces 张脸,防群照拖垮索引
     static func detect(cg: CGImage, maxFaces: Int = 8) -> [VNFaceObservation] {
-        let request = VNGenerateFaceLandmarksRequest()
+        let request = VNDetectFaceLandmarksRequest()
         let handler = VNImageRequestHandler(cgImage: cg, options: [:])
         do {
             try handler.perform([request])
