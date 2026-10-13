@@ -352,8 +352,7 @@ struct FolderPicker: UIViewControllerRepresentable {
     let url: URL
 
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-        let picker = UIDocumentPickerViewController(forOpeningContentAt: url, asCopy: false)
-        return picker
+        UIDocumentPickerViewController(forOpeningContentAt: url)
     }
 
     func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {}
