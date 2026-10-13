@@ -253,9 +253,9 @@ struct DuplicateResultsView: View {
                     selected.subtract(ids)
                     deleting = false
                     app.notify("已删除 \(ids.count) 张,最近删除保留 30 天")
-                    // 删除完成立即退出结果页:是否继续处理其他组由用户重新进入决定,
-                    // 避免停留时误触另一组的删除(用户 2026-10-13 要求)
-                    dismiss()
+                    // 删除后留在结果页:可继续处理/删除另外一组,退出由用户点「关闭」决定;
+                    // 删除中按钮已禁用防连触(用户 2026-10-13 澄清期望)
+                    if groups.isEmpty { dismiss() }
                 }
             } catch {
                 await MainActor.run { deleting = false; app.fail(error) }
