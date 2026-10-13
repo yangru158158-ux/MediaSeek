@@ -167,7 +167,6 @@ struct DetailSheet: View {
     @State private var placeText: String?
     @State private var fileInfoLines: [(String, String)] = []
     @State private var folderURL: URL?
-    @State private var showFolderPicker = false
 
     private var fileRecord: ImportedFile? {
         if case .file(let r) = hit.target { return r }
@@ -246,11 +245,6 @@ struct DetailSheet: View {
                 }
                 Button("取消", role: .cancel) {}
             }
-            .sheet(isPresented: $showFolderPicker) {
-                if let folderURL {
-                    FolderPicker(url: folderURL)
-                }
-            }
             .onAppear { loadInfo() }
         }
     }
@@ -282,9 +276,13 @@ struct DetailSheet: View {
                 Text("\(pair.0):\(pair.1)")
             }
             Button {
-                showFolderPicker = true
+                if let folderURL {
+                    // iOS 无公开 API 定位到任意文件夹;退而求其次:拷贝完整路径 + 跳「文件」App 手动定位
+                    UIPasteboard.general.string = folderURL.path
+                    UIApplication.shared.open(URL(string: "shareddocuments://") ?? URL(string: "file://")!)
+                }
             } label: {
-                Label("打开所在文件夹", systemImage: "folder")
+                Label("拷贝路径,打开「文件」App", systemImage: "folder")
                     .font(.footnote.weight(.medium))
             }
         }
@@ -347,16 +345,6 @@ struct DetailSheet: View {
     }
 }
 
-/// 在「文件」App 中打开指定文件夹(定位到导入来源目录)
-struct FolderPicker: UIViewControllerRepresentable {
-    let url: URL
-
-    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-        UIDocumentPickerViewController(forMovingContentAt: url)
-    }
-
-    func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {}
-}
 
 struct FullImageViewer: View {
     let asset: PHAsset
