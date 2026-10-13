@@ -58,13 +58,13 @@ jobs:
           /tmp/face_e2e_align "$RUNNER_TEMP/aligned" "$RUNNER_TEMP"/*_[0-9].jpg "$RUNNER_TEMP"/*_[0-9].png
 
       - name: r50 打分 + 聚类/合并断言
-        # 阈值与 App 平衡模式一致(入组 0.48 / 质心连接 0.30 / 吸收 0.27 / 剔除 0.18)。
+        # 阈值与 App 平衡模式一致(入组 0.48 / 质心连接 入组−0.06 / 剔除 0.18,与 143 同;合影组合分组是 App 展示层,不在本断言范围)。
         # 质心连接:照片多的人全并拢;剔除线:模糊/误检脸清出大组
         run: |
           python scripts/face_e2e_score.py \
             --model "$RUNNER_TEMP/face/w600k_r50.onnx" \
             --dir "$RUNNER_TEMP/aligned" \
-            --threshold 0.48 --link 0.30 --absorb 0.27 --expel 0.18
+            --threshold 0.48 --link 0.42 --expel 0.18
 
       - name: 上传对齐图(人工目检用)
         if: always()

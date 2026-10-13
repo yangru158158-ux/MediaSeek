@@ -11,12 +11,11 @@ struct PeopleView: View {
     @State private var mode = "balanced"
     @State private var scanning = false
     @State private var progress: (done: Int, total: Int)?
-    @State private var clusters: [[String]] = []     // 每组 = 去重后的照片 refKey
-    @State private var clusterScores: [[Float]] = [] // 与 clusters 对齐:成员与组锚的相似度(锚=1)
+    @State private var clusters: [[String]] = []     // 每组 = 组合相同的照片 refKey
+    @State private var clusterScores: [[Float]] = [] // 与 clusters 对齐:照片与所属人物簇锚的相似度
+    @State private var groupPeople: [Int] = []       // 与 clusters 对齐:组内人物数(1=单人,2+=合影)
     @State private var groupNames: [String] = []     // 组的现有名字(成员标签众数,未命名时空),与 clusters 对齐
     @State private var assets: [String: PHAsset] = [:]
-    @State private var selection = Set<Int>()
-    @State private var mergeMode = false
     @State private var faceTotal = 0
     @State private var singletonCount = 0
     @State private var totalGroups = 0
@@ -27,11 +26,10 @@ struct PeopleView: View {
     // 自成一组(140 用户实测同一人分好几组)。阈值扫描 0.50 及以下全部正确,
     // 取 0.48 留 3 倍于跨人上限的余量
     private let thresholds: [String: Float] = ["exact": 0.60, "balanced": 0.48, "loose": 0.38]
-    /// 组间合并的连接阈值 = 入组阈值 − 0.18(下限 0.26)。真实数据同人最低
-    /// 0.48/跨人最高 0.16,中间 0.2~0.45 是空带——连接放在空带下段,跨人
-    /// 不可能串组(模糊桥由末端剔除兜底),同人的跨年代子组全能并拢
-    /// (143 用户实测同一人散在 1/2/3 张小组里,0.42 的连接过高是主因)
-    private func linkThreshold(_ t: Float) -> Float { max(t - 0.18, 0.26) }
+    /// 组间合并的连接阈值 = 入组阈值 − 0.06(143 用户实测效果不错,维持);
+    /// 质心=全组「平均脸」:同人的各子组质心都逼近本人均值,照片特别多的人
+    /// (如近 2000 张)靠它全并成一组;个别模糊/误检脸被平均掉,拦不住合并
+    private func linkThreshold(_ t: Float) -> Float { max(t - 0.06, 0.30) }
     /// 垃圾剔除线:合并完成后与组锚相似低于它的成员移出组(成为单例)。
     /// 真实数据同人最低 0.48(油画×照片),0.18 远在其下,不会误剔真人;
     /// 模糊/误检脸(141 的「最弱 -6%」)由此清出大组
@@ -62,13 +60,6 @@ struct PeopleView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("关闭") { dismiss() }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    if !clusters.isEmpty, !scanning {
-                        Button(mergeMode ? "合并所选(\(selection.count))" : "合并") { toggleMerge() }
-                            .font(.footnote)
-                            .disabled(mergeMode && selection.count < 2)
-                    }
                 }
             }
         }
@@ -107,7 +98,7 @@ struct PeopleView: View {
                 }
             }
             .disabled(scanning || faceTotal < 2 || app.models.state(for: .face) != .ready)
-            Text("同一人的照片归为一组;给组命名后,搜索名字即可找到全部照片。")
+            Text("照片按「里面是哪些人」归组:单人照归本人组,同一对/组人的合影另成一组;命名后搜索名字即可命中。")
                 .font(.caption2).foregroundStyle(.secondary)
         }
     }
@@ -116,47 +107,34 @@ struct PeopleView: View {
 
     private var resultsSection: some View {
         Section {
-            if mergeMode {
-                HStack {
-                    Button("全选") { selection = Set(clusters.indices) }.font(.footnote)
-                    Spacer()
-                    Button("取消") { mergeMode = false; selection.removeAll() }.font(.footnote)
-                }
-                .buttonStyle(.plain)
-            }
             ForEach(clusters.indices, id: \.self) { i in
                 row(i)
             }
         } header: {
             Text(totalGroups > clusters.count
                  ? "人物 \(totalGroups) 组(显示最大 \(clusters.count) 组)"
-                 : "人物 \(clusters.count) 组")
+                 : "人物 \(totalGroups) 组")
         } footer: {
             Text(singletonCount > 0
-                 ? "另有 \(singletonCount) 张脸未成组(单人单照);同人被拆成多组时,用「合并」归拢。" : "")
+                 ? "另有 \(singletonCount) 张脸未成组(单人单照)。单人照在前、合影按人数分档在后;给组合影命名(如「我和妈妈」)后,搜索名字即可命中。" : "单人照在前、合影按人数分档在后;给组合影命名后,搜索名字即可命中。")
         }
     }
 
     private func row(_ i: Int) -> some View {
         let refs = clusters[i]
         let named = groupNames.indices.contains(i) && !groupNames[i].isEmpty
-        let title = named ? groupNames[i] : "未命名"
-        // 组内最弱相似度:链式聚类的最弱连接,低=组可疑。排除锚(=1)而不是
-        // 按位置 dropFirst——合并后锚所在照片可能被同照片多脸去重挤掉,
-        // 按位置丢会把真正的最低分当成锚丢掉
+        let title = named ? groupNames[i] : (peopleCount(i) > 1 ? "\(peopleCount(i)) 人合影" : "未命名")
+        // 组内最弱相似度:该组照片与所属人物簇锚的最低相似,低=组可疑。
+        // 排除锚(=1)而不是按位置 dropFirst——锚可能不在显示位
         let weakest = clusterScores.indices.contains(i)
             ? clusterScores[i].filter { $0 < 0.999 }.min() : nil
         return NavigationLink {
             ClusterDetailView(refs: refs,
                               existingName: named ? groupNames[i] : "",
+                              peopleCount: peopleCount(i),
                               scores: clusterScores.indices.contains(i) ? clusterScores[i] : [])
         } label: {
             HStack(spacing: 12) {
-                if mergeMode {
-                    Image(systemName: selection.contains(i) ? "checkmark.circle.fill" : "circle")
-                        .foregroundStyle(selection.contains(i) ? .blue : .secondary)
-                        .onTapGesture { togglePick(i) }
-                }
                 Group {
                     if let a = assets[refs.first ?? ""] {
                         AssetThumbView(asset: a, pixel: 160)
@@ -171,7 +149,7 @@ struct PeopleView: View {
                         .font(.subheadline)
                         .fontWeight(named ? .semibold : .regular)
                         .foregroundStyle(named ? .primary : .secondary)
-                    Text("\(refs.count) 张照片\(weakest.map { String(format: " · 最弱 %.0f%%", $0 * 100) } ?? "")")
+                    Text("\(refs.count) 张照片\(peopleCount(i) > 1 ? " · \(peopleCount(i)) 人" : "")\(weakest.map { String(format: " · 最弱 %.0f%%", $0 * 100) } ?? "")")
                         .font(.caption2).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -180,37 +158,8 @@ struct PeopleView: View {
         }
     }
 
-    private func togglePick(_ i: Int) {
-        if selection.contains(i) { selection.remove(i) } else { selection.insert(i) }
-    }
-
-    private func toggleMerge() {
-        if !mergeMode {
-            mergeMode = true
-            selection.removeAll()
-        } else if selection.count >= 2 {
-            var merged: [String] = []
-            var mergedSc: [Float] = []
-            var seen = Set<String>()
-            for i in selection.sorted() {
-                guard clusters.indices.contains(i) else { continue }
-                let sc = clusterScores.indices.contains(i) ? clusterScores[i] : []
-                for (k, r) in clusters[i].enumerated() where seen.insert(r).inserted {
-                    merged.append(r)
-                    mergedSc.append(sc.indices.contains(k) ? sc[k] : 0)
-                }
-            }
-            let keep = clusters.indices.filter { !selection.contains($0) }
-            let keepNames = keep.map { groupNames.indices.contains($0) ? groupNames[$0] : "" }
-            let keepScores = keep.map { clusterScores.indices.contains($0) ? clusterScores[$0] : [] }
-            clusters = [merged] + keep.map { clusters[$0] }
-            clusterScores = [mergedSc] + keepScores
-            groupNames = [""] + keepNames
-            totalGroups -= selection.count - 1
-            selection.removeAll()
-            mergeMode = false
-            app.notify("已合并为 1 组(\(merged.count) 张照片)")
-        }
+    private func peopleCount(_ i: Int) -> Int {
+        groupPeople.indices.contains(i) ? max(groupPeople[i], 1) : 1
     }
 
     // MARK: - 扫描
@@ -238,44 +187,43 @@ struct PeopleView: View {
                     keys: data.keys, flat: data.flat, dim: data.dim, threshold: threshold) { done, total in
                     Task { @MainActor in progress = (done, total) }
                 }
-                // 组间合并(v4):组质心连接(跨年代子组全并拢)+ 离群照片吸收
-                // (单例并入质心最像的组)+ 垃圾剔除(模糊/误检脸清出大组)
-                let groupedIdx = Set(raw.flatMap { $0.map(\.index) })
-                let singletons = (0..<data.keys.count).filter { !groupedIdx.contains($0) }
+                // 组间合并:贪心聚类「一锚定终身」会把同一人按角度/遮挡拆成多组。
+                // 组质心连接(照片多的人全并拢)+垃圾剔除(模糊/误检脸清出大组)
                 let scored = DuplicateScanner.mergeGroups(
                     raw, flat: data.flat, dim: data.dim,
-                    linkThreshold: link, expelFloor: expelFloor,
-                    singletons: singletons) { done, total in
+                    linkThreshold: link, expelFloor: expelFloor) { done, total in
                     Task { @MainActor in progress = (done, max(total, 1)) }
                 }
-                // 脸组 → 照片组(组内同照片多脸去重,保留与锚相似度);按人数降序,封顶 300 组防长列表
-                var photoGroups: [[String]] = []
-                var groupScores: [[Float]] = []
-                for g in scored {
-                    var refs: [String] = []
-                    var scs: [Float] = []
-                    var seen = Set<String>()
-                    for m in g where seen.insert(data.refs[m.index]).inserted {
-                        refs.append(data.refs[m.index])
-                        scs.append(m.score)
+                // 组合分组(用户 2026-10-13 提议,143 人物聚类已准):每张照片按
+                // 「包含哪些人物簇」归组——只含 A 的照片归 A 组,含 A+B 的合影归
+                // 「A×B」组,以此类推。合影不再混进单人组:两人合影里另一个人
+                // 不是本人时,这张照片进的是「A×B」组而非 A 的组
+                var photoClusters: [String: Set<Int>] = [:]
+                var photoBestScore: [String: Float] = [:]   // 照片在各簇中的最高分(角标用)
+                for (ci, g) in scored.enumerated() {
+                    for m in g {
+                        let r = data.refs[m.index]
+                        photoClusters[r, default: []].insert(ci)
+                        if m.score > (photoBestScore[r] ?? -1) { photoBestScore[r] = m.score }
                     }
-                    // 同照片多脸去重后只剩 1 张的不算组(显示层无意义)
-                    if refs.count > 1 { photoGroups.append(refs); groupScores.append(scs) }
                 }
-                // ⚠️ 照片组与分数必须一起排序:140 只排了 photoGroups,
-                // groupScores 原序不动 → 组行/角标显示的是另一组的分数
-                // (用户实测几乎每组都「最弱 0%」,因为错位取到了别组的空位)
-                let order = photoGroups.indices.sorted { photoGroups[$0].count > photoGroups[$1].count }
-                photoGroups = order.map { photoGroups[$0] }
-                groupScores = order.map { groupScores[$0] }
+                var compo: [Set<Int>: (refs: [String], scores: [Float])] = [:]
+                for (ref, cs) in photoClusters {
+                    compo[cs, default: ([], [])].refs.append(ref)
+                    compo[cs]!.scores.append(photoBestScore[ref] ?? 1)
+                }
+                // 排序:单人组在前,多人在后;同档按张数降序;封顶 300 组防长列表
+                let order = compo.keys.sorted { a, b in
+                    if a.count != b.count { return a.count < b.count }
+                    return compo[a]!.refs.count > compo[b]!.refs.count
+                }
+                let shown = order.prefix(300)
                 let groupedFaces = scored.reduce(0) { $0 + $1.count }
                 let singles = data.refs.count - groupedFaces
-                let totalGroups = photoGroups.count
-                let shown = Array(photoGroups.prefix(300))
-                let shownScores = Array(groupScores.prefix(300))
+                let totalGroups = compo.count
 
                 // 照片资产与组名(组名 = 成员已有用户标签的众数,二次扫描自动带名)
-                let shownRefs = shown.flatMap { $0 }
+                let shownRefs = shown.flatMap { compo[$0]!.refs }
                 var fetched: [String: PHAsset] = [:]
                 let fetch = PHAsset.fetchAssets(withLocalIdentifiers: shownRefs, options: nil)
                 fetch.enumerateObjects { a, _, _ in fetched[a.localIdentifier] = a }
@@ -284,18 +232,18 @@ struct PeopleView: View {
                 var outClusters: [[String]] = []
                 var outScores: [[Float]] = []
                 var outNames: [String] = []
-                for (gi, g) in shown.enumerated() {
+                var outPeople: [Int] = []
+                for key in shown {
+                    let entry = compo[key]!
                     // 资产已不在相册的成员剔除(分数按下标同步)
-                    let aliveIdx = g.indices.filter { fetched[g[$0]] != nil }
+                    let aliveIdx = entry.refs.indices.filter { fetched[entry.refs[$0]] != nil }
                     guard !aliveIdx.isEmpty else { continue }
-                    outClusters.append(aliveIdx.map { g[$0] })
-                    let sc = shownScores.indices.contains(gi)
-                        ? aliveIdx.map { shownScores[gi].indices.contains($0) ? shownScores[gi][$0] : 0 }
-                        : aliveIdx.map { _ in 0 }
-                    outScores.append(sc)
+                    outClusters.append(aliveIdx.map { entry.refs[$0] })
+                    outScores.append(aliveIdx.map { entry.scores[$0] })
                     var counts: [String: Int] = [:]
-                    for r in aliveIdx.map({ g[$0] }) { for t in tagMap[r] ?? [] { counts[t, default: 0] += 1 } }
+                    for r in aliveIdx.map({ entry.refs[$0] }) { for t in tagMap[r] ?? [] { counts[t, default: 0] += 1 } }
                     outNames.append(counts.max { $0.value < $1.value }?.key ?? "")
+                    outPeople.append(key.count)
                 }
 
                 await MainActor.run {
@@ -304,6 +252,7 @@ struct PeopleView: View {
                     clusters = outClusters
                     clusterScores = outScores
                     groupNames = outNames
+                    groupPeople = outPeople
                     assets = fetched
                     singletonCount = singles
                     self.totalGroups = totalGroups
@@ -322,7 +271,8 @@ struct PeopleView: View {
 /// 组详情:成员照片网格 + 命名(写用户标签,搜索人名即命中)
 struct ClusterDetailView: View {
     let refs: [String]
-    var scores: [Float] = []   // 成员与组锚的相似度(锚=1);角标展示,低于 ~50% 的可疑
+    var scores: [Float] = []   // 照片与所属人物簇锚的相似度(锚=1);角标展示,低于 ~50% 的可疑
+    var peopleCount = 1        // 组合人物数(1=单人,2+=合影)
     @EnvironmentObject var app: AppModel
 
     @State private var assets: [String: PHAsset] = [:]
@@ -336,8 +286,9 @@ struct ClusterDetailView: View {
                            GridItem(.flexible(), spacing: 6),
                            GridItem(.flexible(), spacing: 6)]
 
-    init(refs: [String], existingName: String, scores: [Float] = []) {
+    init(refs: [String], existingName: String, peopleCount: Int = 1, scores: [Float] = []) {
         self.refs = refs
+        self.peopleCount = peopleCount
         self.scores = scores
         _currentName = State(initialValue: existingName)
     }
@@ -383,7 +334,9 @@ struct ClusterDetailView: View {
             }
             .padding(12)
         }
-        .navigationTitle(currentName.isEmpty ? "人物 \(refs.count) 张" : currentName)
+        .navigationTitle(currentName.isEmpty
+                         ? (peopleCount > 1 ? "合影 \(refs.count) 张" : "人物 \(refs.count) 张")
+                         : currentName)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
