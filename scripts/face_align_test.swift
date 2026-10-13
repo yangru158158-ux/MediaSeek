@@ -79,7 +79,7 @@ struct FaceAlignTest {
             return ctx.makeImage()!
         }
 
-        // 读回 112×112 对齐图的 RGBA(row0=显示顶行,与 FaceEmbedder.embed 同款翻转)
+        // 读回 112×112 对齐图的 RGBA(row0=显示顶行;identity draw 即不翻,CI 校准)
         func rgba(_ img: CGImage) -> [UInt8] {
             let side = 112
             var buf = [UInt8](repeating: 0, count: side * side * 4)
@@ -87,8 +87,6 @@ struct FaceAlignTest {
                                 bitsPerComponent: 8, bytesPerRow: side * 4,
                                 space: CGColorSpaceCreateDeviceRGB(),
                                 bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
-            ctx.translateBy(x: 0, y: CGFloat(side))
-            ctx.scaleBy(x: 1, y: -1)
             ctx.draw(img, in: CGRect(x: 0, y: 0, width: side, height: side))
             return buf
         }

@@ -35,8 +35,6 @@ final class FaceEmbedder {
             throw MSError("人脸图上下文创建失败")
         }
         ctx.interpolationQuality = .high
-        ctx.translateBy(x: 0, y: CGFloat(side))
-        ctx.scaleBy(x: 1, y: -1)
         ctx.draw(aligned, in: CGRect(x: 0, y: 0, width: side, height: side))
         let plane = side * side
         var out = [Float](repeating: 0, count: plane * 3)
@@ -126,7 +124,9 @@ enum FaceKit {
                        y: (1 - sumY / CGFloat(pts.count)) * CGFloat(imageSize.height))
     }
 
-    /// 源图解码为 RGBA 缓冲(行主序 = 顶行起、y 向下,与采样坐标一致)
+    /// 源图解码为 RGBA 缓冲(行主序 = 顶行起、y 向下,与采样坐标一致)。
+    /// 实测(CI 几何测试校准):纯 CGBitmapContext 里 draw 在 identity CTM 下
+    /// 本就不翻转(翻转坑在 UIKit 交互场景),再加纠偏翻转反而上下颠倒
     private static func rgbaBuffer(of image: CGImage) -> (Int, Int, [UInt8])? {
         let w = image.width, h = image.height
         var buf = [UInt8](repeating: 0, count: w * h * 4)
@@ -135,8 +135,6 @@ enum FaceKit {
                                   space: CGColorSpaceCreateDeviceRGB(),
                                   bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
         ctx.interpolationQuality = .medium
-        ctx.translateBy(x: 0, y: CGFloat(h))
-        ctx.scaleBy(x: 1, y: -1)
         ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
         return (w, h, buf)
     }
