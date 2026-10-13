@@ -5,12 +5,36 @@
 // ④ 不同图案对齐后不塌缩(132 bug 下两条曲线都是全黑、差=0)
 import Foundation
 import CoreGraphics
+import CoreML
+import Accelerate
 
-// FaceKit.swift 引用的错误类型(VectorStore.swift 不参与本测试编译)
+// FaceKit.swift 引用的错误类型与 MLModel 扩展(定义在 App 工程的
+// VectorStore.swift / EmbeddingModels.swift,后者依赖 SPM 包不便同编)
 struct MSError: LocalizedError {
     let message: String
     init(_ message: String) { self.message = message }
     var errorDescription: String? { message }
+}
+
+extension MLModel {
+    func runEmbedding(inputs: [String: MLMultiArray], outputName: String) throws -> [Float] {
+        let provider = try MLDictionaryFeatureProvider(dictionary: inputs.mapValues {
+            MLFeatureValue(multiArray: $0)
+        })
+        let out = try prediction(from: provider)
+        guard let arr = out.featureValue(for: outputName)?.multiArrayValue else {
+            throw MSError("模型输出缺少 \(outputName)")
+        }
+        let v = arr.toFloatArrayTest()
+        let n = max((vDSP.dot(v, v) as Float).squareRoot(), 1e-8)
+        return v.map { $0 / n }
+    }
+}
+
+extension MLMultiArray {
+    func toFloatArrayTest() -> [Float] {
+        (0..<count).map { Float(self[$0].doubleValue) }
+    }
 }
 
 @main
