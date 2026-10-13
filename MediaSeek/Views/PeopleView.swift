@@ -203,6 +203,15 @@ struct PeopleView: View {
 
     private func start() {
         guard !scanning else { return }
+        // 守卫:人脸模型换了但脸数据还没按新模型重嵌——此时聚类的是旧模型向量,
+        // 新旧嵌入空间不通用,聚出来的必然混人。重建中(库被清空重嵌)不拦,
+        // 聚的是已完成部分的新向量
+        let want = UserDefaults.standard.integer(forKey: "faceModelSize")
+        let indexed = UserDefaults.standard.integer(forKey: "faceIndexedSize")
+        if want > 0, want != indexed, app.store.faceStats().faces > 0 {
+            app.notify("人脸模型已更换,旧数据还没重建完:回资料库等「同步」跑完再归组(约 30-60 分钟,可中断可续)")
+            return
+        }
         scanning = true
         progress = (0, 1)
         let threshold = thresholds[mode] ?? 0.45

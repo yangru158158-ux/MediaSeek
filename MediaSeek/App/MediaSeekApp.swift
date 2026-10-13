@@ -44,6 +44,15 @@ final class AppModel: ObservableObject {
         models.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &bag)
         indexing.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &bag)
         imports.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &bag)
+
+        // 人脸模型指纹变化(导入/在线升级)→ 立即增量同步:同步开始时自动清空
+        // 旧模型脸向量并走人脸补全重嵌。此前只在 App 启动时自动同步,导入完
+        // 不重启就没人触发,用户拿着旧向量去归组只能看到混人
+        NotificationCenter.default.publisher(for: .faceModelChanged)
+            .sink { [weak self] _ in
+                Task { @MainActor in self?.indexing.startAutoSyncIfAuthorized() }
+            }
+            .store(in: &bag)
     }
 
     func fail(_ error: Error) {

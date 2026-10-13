@@ -1,0 +1,66 @@
+name: Face E2E
+# 真实照片端到端:下载真人照片 → Vision 检测 → FaceKit 对齐(App 同源码)
+# → r50 onnxruntime 打分,断言同人分高/跨人分低。合成图几何测试
+# (face_test.yml)只验证眼位落位,真实照片上的质量由本工作流把关;
+# 对齐图上传工件供人工目检。触发:FaceKit/工具/工作流变更。
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "MediaSeek/Core/FaceKit.swift"
+      - "scripts/face_e2e_align.swift"
+      - "scripts/face_e2e_score.py"
+      - ".github/workflows/face_e2e.yml"
+
+jobs:
+  e2e:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装打分依赖
+        run: pip install onnxruntime numpy pillow
+
+      - name: 下载测试照片(维基共享资源固定直链,p1/p2 同人不同照、p3 另一人)
+        run: |
+          cd "$RUNNER_TEMP"
+          curl -fL --retry 3 -A "Mozilla/5.0 (MediaSeek-CI)" -o p1.jpg \
+            "https://upload.wikimedia.org/wikipedia/commons/8/8d/President_Barack_Obama.jpg"
+          curl -fL --retry 3 -A "Mozilla/5.0 (MediaSeek-CI)" -o p2.jpg \
+            "https://upload.wikimedia.org/wikipedia/commons/e/e9/Official_portrait_of_Barack_Obama.jpg"
+          curl -fL --retry 3 -A "Mozilla/5.0 (MediaSeek-CI)" -o p3.jpg \
+            "https://upload.wikimedia.org/wikipedia/commons/5/56/Donald_Trump_official_portrait.jpg"
+
+      - name: 下载人脸模型(与在线更新源同源 r50)
+        run: |
+          curl -sL -o "$RUNNER_TEMP/buffalo_l.zip" \
+            https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip
+          unzip -o -j "$RUNNER_TEMP/buffalo_l.zip" w600k_r50.onnx -d "$RUNNER_TEMP/face"
+
+      - name: 编译并运行对齐(Vision + FaceKit,与 App 同源码)
+        run: |
+          swiftc -O MediaSeek/Core/FaceKit.swift scripts/face_e2e_align.swift -o /tmp/face_e2e_align
+          /tmp/face_e2e_align "$RUNNER_TEMP/aligned" \
+            "$RUNNER_TEMP/p1.jpg" "$RUNNER_TEMP/p2.jpg" "$RUNNER_TEMP/p3.jpg"
+
+      - name: r50 打分并断言
+        run: |
+          python scripts/face_e2e_score.py \
+            --model "$RUNNER_TEMP/face/w600k_r50.onnx" \
+            --dir "$RUNNER_TEMP/aligned"
+
+      - name: 上传对齐图(人工目检用)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aligned-faces
+          path: ${{ runner.temp }}/aligned/
+          retention-days: 30

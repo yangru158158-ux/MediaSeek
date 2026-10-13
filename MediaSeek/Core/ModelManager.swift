@@ -6,6 +6,14 @@ enum ModelState: Equatable {
     case missing, loading, ready, failed(String)
 }
 
+extension Notification.Name {
+    /// 人脸模型指纹变化(导入/升级后):旧脸向量不可用,应触发增量同步重建。
+    /// 导入不走 App 重启,自动同步只在启动时跑——不广播的话用户导入 r50 后
+    /// 直接去人物归组,聚类的还是旧模型向量(2026-10-13 用户实测「装了 r50
+    /// 还是混人」:指纹链路本身是通的,缺的就是导入后的这次触发)
+    static let faceModelChanged = Notification.Name("faceModelChanged")
+}
+
 enum ModelSlot: String {
     case text = "TextEmbedder"
     case image = "ImageEmbedder"
@@ -173,9 +181,17 @@ final class ModelManager: ObservableObject {
                                             outputName: meta.output ?? "embedding")
                     setState(.ready, for: slot)
                     // 记录人脸模型指纹;IndexingCoordinator 同步前与库内已嵌指纹比对,
-                    // 不一致即清空旧向量重嵌(如 mbf→r50 在线升级,旧嵌入空间不通用)
-                    if let size = meta.model_size {
-                        UserDefaults.standard.set(size, forKey: "faceModelSize")
+                    // 不一致即清空旧向量重嵌(如 mbf→r50 在线升级,旧嵌入空间不通用)。
+                    // 优先 meta.model_size(ONNX 字节数,导出脚本写入);
+                    // 旧包缺该字段时退回用已编译模型目录总字节数当指纹(权重占绝对
+                    // 大头、同设备上稳定)——已导入旧包的设备升级 App 后,
+                    // 无需重新导入也能识别「模型已换」并触发人脸数据重建。
+                    // 指纹有变化才广播:同步侧清空重嵌,导入完即刻生效不用重启
+                    let prevFingerprint = UserDefaults.standard.integer(forKey: "faceModelSize")
+                    let fingerprint = meta.model_size ?? Self.directoryBytes(modelURL)
+                    if fingerprint > 0, fingerprint != prevFingerprint {
+                        UserDefaults.standard.set(fingerprint, forKey: "faceModelSize")
+                        NotificationCenter.default.post(name: .faceModelChanged, object: nil)
                     }
                 default:
                     setState(.failed("未知模型类型 \(meta.type)"), for: slot)
@@ -241,5 +257,17 @@ final class ModelManager: ObservableObject {
             try? await Task.sleep(nanoseconds: 500_000_000)
         }
         return true
+    }
+
+    /// 目录递归总字节数(旧模型包无 model_size 时的指纹兜底)
+    nonisolated private static func directoryBytes(_ url: URL) -> Int {
+        guard let en = FileManager.default.enumerator(
+            at: url, includingPropertiesForKeys: [.fileSizeKey],
+            options: [.skipsHiddenFiles]) else { return 0 }
+        var total = 0
+        for case let f as URL in en {
+            total += (try? f.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        }
+        return total
     }
 }
