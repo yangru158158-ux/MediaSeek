@@ -27,10 +27,11 @@ struct PeopleView: View {
     // 自成一组(140 用户实测同一人分好几组)。阈值扫描 0.50 及以下全部正确,
     // 取 0.48 留 3 倍于跨人上限的余量
     private let thresholds: [String: Float] = ["exact": 0.60, "balanced": 0.48, "loose": 0.38]
-    /// 组间合并的连接阈值 = 入组阈值 − 0.06(两组**质心**相似度达标才合并)。
-    /// 质心=全组「平均脸」:同人的各子组质心都逼近本人均值,照片特别多的人
-    /// (如近 2000 张)靠它全并成一组;个别模糊/误检脸被平均掉,拦不住合并
-    private func linkThreshold(_ t: Float) -> Float { max(t - 0.06, 0.30) }
+    /// 组间合并的连接阈值 = 入组阈值 − 0.18(下限 0.26)。真实数据同人最低
+    /// 0.48/跨人最高 0.16,中间 0.2~0.45 是空带——连接放在空带下段,跨人
+    /// 不可能串组(模糊桥由末端剔除兜底),同人的跨年代子组全能并拢
+    /// (143 用户实测同一人散在 1/2/3 张小组里,0.42 的连接过高是主因)
+    private func linkThreshold(_ t: Float) -> Float { max(t - 0.18, 0.26) }
     /// 垃圾剔除线:合并完成后与组锚相似低于它的成员移出组(成为单例)。
     /// 真实数据同人最低 0.48(油画×照片),0.18 远在其下,不会误剔真人;
     /// 模糊/误检脸(141 的「最弱 -6%」)由此清出大组
@@ -237,11 +238,14 @@ struct PeopleView: View {
                     keys: data.keys, flat: data.flat, dim: data.dim, threshold: threshold) { done, total in
                     Task { @MainActor in progress = (done, total) }
                 }
-                // 组间合并:贪心聚类「一锚定终身」会把同一人按角度/遮挡拆成多组。
-                // 组质心连接(照片多的人全并拢)+垃圾剔除(模糊/误检脸清出大组)
+                // 组间合并(v4):组质心连接(跨年代子组全并拢)+ 离群照片吸收
+                // (单例并入质心最像的组)+ 垃圾剔除(模糊/误检脸清出大组)
+                let groupedIdx = Set(raw.flatMap { $0.map(\.index) })
+                let singletons = (0..<data.keys.count).filter { !groupedIdx.contains($0) }
                 let scored = DuplicateScanner.mergeGroups(
                     raw, flat: data.flat, dim: data.dim,
-                    linkThreshold: link, expelFloor: expelFloor) { done, total in
+                    linkThreshold: link, expelFloor: expelFloor,
+                    singletons: singletons) { done, total in
                     Task { @MainActor in progress = (done, max(total, 1)) }
                 }
                 // 脸组 → 照片组(组内同照片多脸去重,保留与锚相似度);按人数降序,封顶 300 组防长列表
@@ -255,7 +259,8 @@ struct PeopleView: View {
                         refs.append(data.refs[m.index])
                         scs.append(m.score)
                     }
-                    if !refs.isEmpty { photoGroups.append(refs); groupScores.append(scs) }
+                    // 同照片多脸去重后只剩 1 张的不算组(显示层无意义)
+                    if refs.count > 1 { photoGroups.append(refs); groupScores.append(scs) }
                 }
                 // ⚠️ 照片组与分数必须一起排序:140 只排了 photoGroups,
                 // groupScores 原序不动 → 组行/角标显示的是另一组的分数

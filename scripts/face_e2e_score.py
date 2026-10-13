@@ -47,16 +47,17 @@ def greedy_cluster(mat, threshold):
     return groups
 
 
-def merge_groups(groups, mat, link, expel, rounds=15):
-    """复刻 DuplicateScanner.mergeGroups(v3):组质心连接 + 垃圾剔除。
+def merge_groups(groups, mat, link, expel, absorb=None, rounds=25):
+    """复刻 DuplicateScanner.mergeGroups(v4):组质心连接 + 离群吸收 + 垃圾剔除。
 
-    质心=全组向量均值:同人各子组质心逼近本人均值(照片多的人全并拢),
-    模糊/误检脸被平均掉拦不住合并;合并后与组锚 < expel 的成员剔除。
-    - 141 单连接版:模糊脸桥把不同人串通(校准模拟实测 79% 纯度巨组)
-    - 142 平均连接版:代表样本挑最低分,大组正确合并被卡死(同人又拆散)
-    相似度矩阵上用「跨组成员对的均值」近似质心余弦(紧簇内两者高度一致)。
+    v3 只合并贪心组,离群照片(够不到任何锚)永远单例;v4 让单例并入质心
+    最像的组。真实数据同人最低 0.48/跨人最高 0.16,中间 0.2~0.45 空带——
+    连接/吸收阈值放空带下段,跨人不可能串组,模糊桥由末端剔除兜底。
     """
-    cur = [list(g) for g in groups]
+    if absorb is None:
+        absorb = link - 0.03
+    cur = [list(g) for g in groups if len(g) > 1]
+    sng = [g[0] for g in groups if len(g) == 1]
     for _ in range(rounds):
         n = len(cur)
         if n < 2:
@@ -80,6 +81,12 @@ def merge_groups(groups, mat, link, expel, rounds=15):
             if i not in used:
                 nxt.append(cur[i])
         cur = nxt
+    # 离群吸收:单例并入质心(均值相似度近似)最像的组;单例间不互并
+    for s in sng:
+        sims = [float(mat[s, g].mean()) for g in cur]
+        gi = int(np.argmax(sims)) if sims else -1
+        if gi >= 0 and sims[gi] >= absorb:
+            cur[gi].append(s)
     out = []
     for g in cur:
         a = g[0]
@@ -93,7 +100,8 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--model", required=True)
 ap.add_argument("--dir", required=True)
 ap.add_argument("--threshold", type=float, default=0.48, help="App 平衡模式入组阈值")
-ap.add_argument("--link", type=float, default=0.42, help="组间质心连接阈值(低于入组)")
+ap.add_argument("--link", type=float, default=0.30, help="组间质心连接阈值(空带下段)")
+ap.add_argument("--absorb", type=float, default=0.27, help="离群照片吸收线")
 ap.add_argument("--expel", type=float, default=0.18, help="垃圾剔除线:与组锚相似低于则移出组")
 a = ap.parse_args()
 
@@ -136,7 +144,7 @@ if cross_pairs:
         fails.append(f"跨人相似度过高 {hi:.3f}:真实照片上区分度不足")
 
 raw = greedy_cluster(mat, a.threshold)
-merged = merge_groups(raw, mat, a.link, a.expel)
+merged = merge_groups(raw, mat, a.link, a.expel, a.absorb)
 
 
 def show(groups):

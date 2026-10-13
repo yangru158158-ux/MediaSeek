@@ -50,7 +50,12 @@ enum DuplicateScanner {
     ///    平均被最难看的样本拖低,大组正确合并全被卡死)。
     /// ② 每轮按质心相似度**降序**贪心合并(最像的先并),逐轮收敛——不设
     ///    「互为最佳」限制,大人物的十几个子组就是靠连续合并聚拢的。
-    /// ③ **垃圾剔除**——合并完成后,与组锚相似 < expelFloor 的成员移出组
+    /// ③ **离群照片吸收(143 用户实测同一人散在 1/2/3 张的小组里)**——
+    ///    贪心聚类里够不到任何锚的照片一直是"单例",从没资格参与合并;
+    ///    v4 让单例并入质心最像的组(≥absorbThreshold)。真实数据同人最低
+    ///    0.48/跨人最高 0.16,中间 0.2~0.45 是空带——连接/吸收阈值放在
+    ///    空带下段,跨人不可能串组,同人的跨年代子组与离群照全能并拢。
+    /// ④ **垃圾剔除**——合并完成后,与组锚相似 < expelFloor 的成员移出组
     ///    (成为单例):模糊/误检脸混进大组拉低「最弱」显示(141 的 -6%),
     ///    该剔的是它们,而不是拦整个合并。
     ///
@@ -59,7 +64,8 @@ enum DuplicateScanner {
     ///   - expelFloor: 成员对组锚的相似度下限,低于则剔除
     static func mergeGroups(_ groups: [[(index: Int, score: Float)]],
                             flat: [Float], dim: Int, linkThreshold: Float, expelFloor: Float,
-                            maxRounds: Int = 15,
+                            singletons: [Int] = [], absorbThreshold: Float? = nil,
+                            maxRounds: Int = 25,
                             progress: (Int, Int) -> Void = { _, _ in }) -> [[(index: Int, score: Float)]] {
         guard groups.count > 1, dim > 0 else { return groups }
 
@@ -132,6 +138,34 @@ enum DuplicateScanner {
                 memberIdx = nextIdx
                 anchors = nextAnchors
                 sums = nextSums
+            }
+
+            // 离群照片吸收:单例并入质心最像的组。
+            // 单例与单例之间不合并——模糊脸互相抱团成"混合桥"的通道就是它
+            if !singletons.isEmpty {
+                let absorb = absorbThreshold ?? (linkThreshold - 0.03)
+                var norms = sums.map { s -> Float in
+                    var ss: Float = 0
+                    vDSP_dotpr(s, 1, s, 1, &ss, vDSP_Length(dim))
+                    return max(ss.squareRoot(), 1e-8)
+                }
+                for s in singletons {
+                    var bestG = -1
+                    var bestSim: Float = -2
+                    for g in 0..<memberIdx.count {
+                        var d: Float = 0
+                        vDSP_dotpr(sums[g], 1, base + s * dim, 1, &d, vDSP_Length(dim))
+                        let sim = d / norms[g]
+                        if sim > bestSim { bestSim = sim; bestG = g }
+                    }
+                    if bestG >= 0, bestSim >= absorb {
+                        memberIdx[bestG].append(s)
+                        for d in 0..<dim { sums[bestG][d] += flat[s * dim + d] }
+                        var ss: Float = 0
+                        vDSP_dotpr(sums[bestG], 1, sums[bestG], 1, &ss, vDSP_Length(dim))
+                        norms[bestG] = max(ss.squareRoot(), 1e-8)
+                    }
+                }
             }
 
             // 垃圾剔除 + 按锚重算分数
