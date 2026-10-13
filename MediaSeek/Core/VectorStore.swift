@@ -75,6 +75,14 @@ final class VectorStore {
         // 人脸处理记账:该照片已按当前人脸模型做过检测/嵌入(含 0 脸照片)。
         // 没有它,无脸照片(截图/风景)会因「缺 face 行」被每轮同步反复重处理
         try exec("CREATE TABLE IF NOT EXISTS face_done(ref_key TEXT PRIMARY KEY)")
+        // 一次性迁移:132 版人脸对齐几何错误(变换顺序反+y 轴未翻转),全部对齐图
+        // 是黑图、人脸嵌入彼此相同(36 张脸归一组实锤)——清空脸向量与记账,
+        // 下一次同步自动全量重嵌(走修复后的对齐)
+        if !UserDefaults.standard.bool(forKey: "face_align_v2") {
+            try? exec("DELETE FROM items WHERE kind = 'face'")
+            try? exec("DELETE FROM face_done")
+            UserDefaults.standard.set(true, forKey: "face_align_v2")
+        }
         // 「不相关」黑名单:term=归一化查询词,ref=被标记的结果(该查询下不再出现)
         try exec("CREATE TABLE IF NOT EXISTS query_block(term TEXT NOT NULL, ref_key TEXT NOT NULL, created_at REAL NOT NULL, UNIQUE(term, ref_key))")
         try exec("CREATE TABLE IF NOT EXISTS label_vocab(label TEXT PRIMARY KEY, vec BLOB)")

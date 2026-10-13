@@ -1,0 +1,26 @@
+name: Face Align Test
+# 人脸对齐几何测试:132 版对齐变换顺序写反+y 轴未翻转,所有对齐输出黑图、
+# 全部人脸嵌入相同(36 张脸归一组)。此测试在 macOS runner 上直接编译
+# FaceKit.swift + face_align_test.swift 运行,防止几何回归。
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "MediaSeek/Core/FaceKit.swift"
+      - "scripts/face_align_test.swift"
+      - ".github/workflows/face_test.yml"
+
+jobs:
+  test:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 编译并运行几何测试
+        run: |
+          swiftc -O MediaSeek/Core/FaceKit.swift scripts/face_align_test.swift \
+            -o /tmp/facetest -framework CoreML -framework Vision
+          /tmp/facetest
