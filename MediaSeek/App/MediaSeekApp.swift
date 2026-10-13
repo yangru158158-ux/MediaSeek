@@ -99,6 +99,25 @@ final class AppModel: ObservableObject {
                          vector: vec, title: trimmed, date: Date())
     }
 
+    /// 批量给一组照片挂同一标签:同名标签向量相同,只嵌一次;
+    /// 查重一次批量读,写行逐张。此前人物归组命名逐张调 addUserTag,
+    /// 每张跑一次 Gemma 推理,命名两千张要几十分钟(146 用户实测
+    /// 「一直在命名中」);批量后秒级
+    func addUserTag(_ tag: String, toRefs refs: [String]) async throws {
+        guard let gemma = models.gemma else { throw MSError("文本模型未就绪") }
+        let trimmed = tag.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !refs.isEmpty else { return }
+        let vec = try await Task.detached(priority: .userInitiated) {
+            try gemma.embedDocument("person: \(trimmed)")
+        }.value
+        let existing = store.userTagsForRefs(refs)
+        for ref in refs where !(existing[ref]?.contains(trimmed) ?? false) {
+            let slot = store.nextUserTagSlot(refKey: ref)
+            try store.upsert(kind: .userTag, refKey: ref, frameIndex: slot, space: gemma.space,
+                             vector: vec, title: trimmed, date: Date())
+        }
+    }
+
     func bootstrap() async {
         do {
             try store.open()

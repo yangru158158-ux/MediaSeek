@@ -624,11 +624,14 @@ struct SearchView: View {
         showTagAlert = false
         exporting = true
         Task {
-            var ok = 0
-            for ref in refs {
-                do { try await app.addUserTag(refKey: ref, tag: tag); ok += 1 } catch { await MainActor.run { app.fail(error) } }
+            do {
+                // 批量通道:向量只嵌一次(此前逐张推理,几百张要几分钟)
+                try await app.addUserTag(tag, toRefs: refs)
+                await MainActor.run { app.notify("已为 \(refs.count) 个项目添加标签「\(tag)」") }
+            } catch {
+                await MainActor.run { app.fail(error) }
             }
-            await MainActor.run { app.notify("已为 \(ok) 个项目添加标签「\(tag)」"); exporting = false }
+            exporting = false
         }
     }
 
