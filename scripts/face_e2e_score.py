@@ -3,11 +3,11 @@
 
 对齐图 → onnxruntime w600k_r50 推理 → 余弦矩阵 → 复刻 App 的两段算法:
   ① 贪心聚类(DuplicateScanner.scan):首个存活样本为锚,≥threshold 入组
-  ② 组间合并(DuplicateScanner.mergeGroups):两组任一成员对 ≥linkThreshold 则并组
-断言三件:
-  同人最低分 ≥ SAME_MIN / 跨人最高分 < CROSS_MAX / **合并后分组 == 真实人物划分**
-第三条是 140 用户实测「同一人分了好几组」的回归闸门——前两条过了也可能
-因为贪心聚类一锚定终身而把同一人拆开。
+  ② 组间合并(DuplicateScanner.mergeGroups v3):组质心连接 + 垃圾剔除
+断言:
+  同人最低分 ≥ SAME_MIN / 跨人最高分 < CROSS_MAX /
+  合并后分组 == 真实人物划分 / 组内成员对锚 ≥ 剔除线
+后两条是回归闸门——140「同一人分了好几组」、141「-6% 垃圾脸混组」都会红。
 
 文件命名约定:aligned_<人物>_<序号>.png,人物名即真值标签。
 """
@@ -52,46 +52,88 @@ def merge_groups(groups, mat, link, expel, rounds=15):
 
     质心=全组向量均值:同人各子组质心逼近本人均值(照片多的人全并拢),
     模糊/误检脸被平均掉拦不住合并;合并后与组锚 < expel 的成员剔除。
-    - 141 单连接版:模糊脸桥把不同人串通(实测 79% 纯度巨组)
+    - 141 单连接版:模糊脸桥把不同人串通(校准模拟实测 79% 纯度巨组)
     - 142 平均连接版:代表样本挑最低分,大组正确合并被卡死(同人又拆散)
+    相似度矩阵上用「跨组成员对的均值」近似质心余弦(紧簇内两者高度一致)。
     """
     cur = [list(g) for g in groups]
-    X = mat  # 相似度矩阵复用
     for _ in range(rounds):
         n = len(cur)
         if n < 2:
             break
-        # 质心两两余弦:用成员均值向量的相似度近似(直接由矩阵聚合)
         pairs = []
         for i in range(n):
             for j in range(i + 1, n):
-                sim = X[np.ix_(cur[i], cur[j])].mean()
+                sim = float(mat[np.ix_(cur[i], cur[j])].mean())
                 if sim >= link:
-                    pairs.append((i, j, float(sim)))
+                    pairs.append((i, j, sim))
         if not pairs:
             break
         pairs.sort(key=lambda p: -p[2])
-        used, nxt, changed = set(), [], False
+        used, nxt = set(), []
         for i, j, s in pairs:
             if i in used or j in used:
                 continue
             used.update({i, j})
             nxt.append(cur[i] + cur[j])
-            changed = True
         for i in range(n):
             if i not in used:
                 nxt.append(cur[i])
         cur = nxt
-        if not changed:
-            break
     out = []
     for g in cur:
         a = g[0]
-        keep = [i for i in g if i == a or X[a, i] >= expel]
+        keep = [i for i in g if i == a or mat[a, i] >= expel]
         if len(keep) >= 2:
             out.append(sorted(keep))
-    return sorted(out, key=len, reverse=True)
+    return out
 
+
+ap = argparse.ArgumentParser()
+ap.add_argument("--model", required=True)
+ap.add_argument("--dir", required=True)
+ap.add_argument("--threshold", type=float, default=0.48, help="App 平衡模式入组阈值")
+ap.add_argument("--link", type=float, default=0.42, help="组间质心连接阈值(低于入组)")
+ap.add_argument("--expel", type=float, default=0.18, help="垃圾剔除线:与组锚相似低于则移出组")
+a = ap.parse_args()
+
+files = sorted(glob.glob(os.path.join(a.dir, "aligned_*.png")))
+if not files:
+    print("FAIL 无对齐图:检测/对齐环节全失败")
+    sys.exit(2)
+
+sess = ort.InferenceSession(a.model, providers=["CPUExecutionProvider"])
+in_name = sess.get_inputs()[0].name
+names, labels, vecs = [], [], []
+for f in files:
+    stem = os.path.basename(f)[len("aligned_"):-len(".png")]
+    names.append(stem)
+    labels.append(stem.rsplit("_", 1)[0])       # 人物名 = 序号前的部分
+    vecs.append(embed(sess, in_name, f))
+mat = np.stack(vecs) @ np.stack(vecs).T
+
+print("样本:", " ".join(names))
+width = max(len(n) for n in names)
+for i, n in enumerate(names):
+    print(f"  {n:<{width}} " + " ".join(f"{mat[i, j]:+.3f}" for j in range(len(names))))
+
+fails = []
+same_pairs = [(i, j) for i in range(len(names)) for j in range(i + 1, len(names))
+              if labels[i] == labels[j]]
+cross_pairs = [(i, j) for i in range(len(names)) for j in range(i + 1, len(names))
+               if labels[i] != labels[j]]
+if same_pairs:
+    (i, j) = min(same_pairs, key=lambda p: mat[p[0], p[1]])
+    lo = float(mat[i, j])
+    print(f"同人最低 {names[i]}×{names[j]} = {lo:+.3f}(要求 ≥ {SAME_MIN})")
+    if lo < SAME_MIN:
+        fails.append(f"同人相似度过低 {lo:.3f}:对齐或模型环节疑似损坏")
+if cross_pairs:
+    (i, j) = max(cross_pairs, key=lambda p: mat[p[0], p[1]])
+    hi = float(mat[i, j])
+    print(f"跨人最高 {names[i]}×{names[j]} = {hi:+.3f}(要求 < {CROSS_MAX})")
+    if hi >= CROSS_MAX:
+        fails.append(f"跨人相似度过高 {hi:.3f}:真实照片上区分度不足")
 
 raw = greedy_cluster(mat, a.threshold)
 merged = merge_groups(raw, mat, a.link, a.expel)
@@ -116,18 +158,20 @@ for g in merged:
 truth = defaultdict(list)
 for i, lb in enumerate(labels):
     truth[lb].append(i)
-want = sorted((sorted(v) for v in truth.values()), key=len, reverse=True)
-got = sorted((sorted(g) for g in merged), key=len, reverse=True)
-print(f"真实人物划分: {show(want)}")
+want = {frozenset(v) for v in truth.values()}
+got = {frozenset(g) for g in merged}
+print("真实人物划分:", show(sorted((sorted(s) for s in want), key=len, reverse=True)))
 if got != want:
-    split = [g for g in want if not any(set(g) <= set(m) for m in got)]
+    split = [g for g in want if not any(g <= m for m in got)]
     if split:
-        fails.append("同一人被拆成多组(或未完整合并):" + show(split))
+        fails.append("同一人被拆成多组(或未完整合并):"
+                     + show(sorted((sorted(s) for s in split), key=len, reverse=True)))
     bad = [m for m in got if len({labels[i] for i in m}) > 1]
     if bad:
-        fails.append("不同人被合并到一组:" + show(bad))
+        fails.append("不同人被合并到一组:"
+                     + show(sorted((sorted(s) for s in bad), key=len, reverse=True)))
     if not split and not bad:
-        fails.append("分组与真值不一致:" + show(got))
+        fails.append("分组与真值不一致")
 else:
     print("分组 == 真实人物划分 ✓")
 

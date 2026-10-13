@@ -120,7 +120,7 @@ enum DuplicateScanner {
                     // 锚沿用成员较多一侧的(大组锚更代表「平均脸」)
                     nextAnchors.append(memberIdx[p.i].count >= memberIdx[p.j].count ? anchors[p.i] : anchors[p.j])
                     var s = [Float](repeating: 0, count: dim)
-                    vDSP_add(sums[p.i], 1, sums[p.j], 1, &s, vDSP_Length(dim))
+                    vDSP_vadd(sums[p.i], 1, sums[p.j], 1, &s, vDSP_Length(dim))
                     nextSums.append(s)
                 }
                 guard !nextIdx.isEmpty else { break }
