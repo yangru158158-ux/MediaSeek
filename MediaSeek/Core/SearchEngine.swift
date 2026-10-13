@@ -375,12 +375,13 @@ final class SearchEngine {
                         minScore: 0.18, among: among))
                 }
                 if hits.isEmpty {
-                    // 真尺度第三档(2026-10-12 设备实测:新文本塔下命中带 0.10-0.14、
-                    // 无关带 0.04-0.09,首名=14% 真海滩):0.30/0.18 悬空失效,
-                    // 地板 0.08 取候选(高于无关带上沿、低于命中带下沿),尾部 best×0.85 截断
+                    // 第三档分两种:全局地板 0.08(高于无关带上沿、低于命中带下沿);
+                    // 结果内 0.03——用户点名的小集合里相对排名优先,弱分真匹配(证件照
+                    // 对「身份证」只有 0.05-0.08)也要浮顶,噪声由低置信尾线 0.95 收
+                    let floor: Float = among != nil ? 0.03 : 0.08
                     hits = Self.dedupByRef(try store.search(
                         space: siglip.space, kinds: [.photo], query: q, limit: topK,
-                        minScore: 0.08, among: among))
+                        minScore: floor, among: among))
                 }
             }
             if imageKinds.contains(.videoFrame) {
@@ -655,11 +656,12 @@ final class SearchEngine {
                     minScore: 0.10, among: within)) ?? [])
             }
             if hits.isEmpty {
-                // 真尺度第三档:0.20/0.10 在命中带 0.10-0.14 上悬空 → 结果内语义词恒空;
-                // 地板 0.07(结果内比全局 0.08 略宽),尾部由 best×0.85(以集合内最佳为基准)截断
+                // 结果内第三档:0.20/0.10 在命中带上悬空 → 结果内语义词恒空;
+                // 地板 0.03(结果内=点名小集合,相对排名优先,与主流程照片第三档同规),
+                // 尾部由 best×0.95 低置信尾线截断
                 hits = Self.dedupByRef((try? store.search(
                     space: siglip.space, kinds: [.photo], query: q, limit: topK,
-                    minScore: 0.07, among: within)) ?? [])
+                    minScore: 0.03, among: within)) ?? [])
             }
             let best = hits.first?.score ?? 0
             if best > 0 { hits = hits.filter { $0.score >= best * 0.85 } }
