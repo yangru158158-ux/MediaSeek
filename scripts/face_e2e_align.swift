@@ -26,43 +26,48 @@ extension MLModel {
     }
 }
 
-guard CommandLine.arguments.count >= 3 else {
-    print("用法: face_e2e_align <输出目录> <照片路径>...")
-    exit(2)
-}
-let outDir = URL(fileURLWithPath: CommandLine.arguments[1])
-try? FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
+@main
+struct FaceE2EAlign {
+    static func main() {
+        guard CommandLine.arguments.count >= 3 else {
+            print("用法: face_e2e_align <输出目录> <照片路径>...")
+            exit(2)
+        }
+        let outDir = URL(fileURLWithPath: CommandLine.arguments[1])
+        try? FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
 
-var ok = 0
-for arg in CommandLine.arguments.dropFirst(2) {
-    let url = URL(fileURLWithPath: arg)
-    let name = url.deletingPathExtension().lastPathComponent
-    guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
-          let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) else {
-        print("SKIP 无法读取 \(name)")
-        continue
+        var ok = 0
+        for arg in CommandLine.arguments.dropFirst(2) {
+            let url = URL(fileURLWithPath: arg)
+            let name = url.deletingPathExtension().lastPathComponent
+            guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+                  let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) else {
+                print("SKIP 无法读取 \(name)")
+                continue
+            }
+            let faces = FaceKit.detect(cg: cg)
+            guard let big = faces.max(by: {
+                $0.boundingBox.width * $0.boundingBox.height < $1.boundingBox.width * $1.boundingBox.height
+            }) else {
+                print("SKIP 未检出人脸 \(name)")
+                continue
+            }
+            guard let aligned = FaceKit.alignedFace(source: cg, observation: big) else {
+                print("SKIP 对齐失败 \(name)")
+                continue
+            }
+            let out = outDir.appendingPathComponent("aligned_\(name).png")
+            guard let dest = CGImageDestinationCreateWithURL(
+                out as CFURL, UTType.png.identifier as CFString, 1, nil) else {
+                print("SKIP 输出创建失败 \(name)")
+                continue
+            }
+            CGImageDestinationAddImage(dest, aligned, nil)
+            CGImageDestinationFinalize(dest)
+            print("OK \(out.lastPathComponent)(检出 \(faces.count) 张脸,取最大)")
+            ok += 1
+        }
+        print("共对齐 \(ok) 张")
+        guard ok > 0 else { exit(2) }
     }
-    let faces = FaceKit.detect(cg: cg)
-    guard let big = faces.max(by: {
-        $0.boundingBox.width * $0.boundingBox.height < $1.boundingBox.width * $1.boundingBox.height
-    }) else {
-        print("SKIP 未检出人脸 \(name)")
-        continue
-    }
-    guard let aligned = FaceKit.alignedFace(source: cg, observation: big) else {
-        print("SKIP 对齐失败 \(name)")
-        continue
-    }
-    let out = outDir.appendingPathComponent("aligned_\(name).png")
-    guard let dest = CGImageDestinationCreateWithURL(
-        out as CFURL, UTType.png.identifier as CFString, 1, nil) else {
-        print("SKIP 输出创建失败 \(name)")
-        continue
-    }
-    CGImageDestinationAddImage(dest, aligned, nil)
-    CGImageDestinationFinalize(dest)
-    print("OK \(out.lastPathComponent)(检出 \(faces.count) 张脸,取最大)")
-    ok += 1
 }
-print("共对齐 \(ok) 张")
-guard ok > 0 else { exit(2) }
