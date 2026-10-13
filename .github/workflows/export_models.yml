@@ -33,7 +33,7 @@ jobs:
       - name: 安装依赖(官方测试组合)
         run: |
           pip install --upgrade pip
-          pip install torch==2.7.0 "transformers>=5.0" "coremltools==9.0" sentencepiece
+          pip install torch==2.7.0 "transformers>=5.0" "coremltools==9.0" sentencepiece onnx onnx2torch onnxruntime
 
       - name: 打 coremltools 兼容补丁
         run: python scripts/patch_transformers_for_coreml.py
@@ -48,17 +48,9 @@ jobs:
           python scripts/export_models.py \
             --outdir MediaSeek/Resources/Models
 
-      - name: 安装人脸转换环境(coremltools 7.2 —— ct 8/9 已移除 ONNX 转换器)
+      - name: 导出人脸模型并打包(onnx2torch→trace→ct,同环境)
         run: |
-          python -m venv "$RUNNER_TEMP/faceenv"
-          "$RUNNER_TEMP/faceenv/bin/pip" install --upgrade pip
-          # setuptools:ct7.2 用 distutils,Python 3.12 已移除标准库版,setuptools 提供 import 钩子;
-          # numpy<2:ct7.2 用了 np.issubclass_(NumPy 2.0 已移除)
-          "$RUNNER_TEMP/faceenv/bin/pip" install setuptools "coremltools==7.2" "onnx==1.16.2" onnxruntime "numpy<2"
-
-      - name: 导出人脸模型并打包(ct 7.2)
-        run: |
-          "$RUNNER_TEMP/faceenv/bin/python" scripts/export_face.py \
+          python scripts/export_face.py \
             --onnx "$RUNNER_TEMP/face/w600k_mbf.onnx" \
             --outdir MediaSeek/Resources/Models
 

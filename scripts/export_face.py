@@ -2,20 +2,25 @@
 """
 人脸识别模型导出(insightface MobileFaceNet / ArcFace 系,512 维)→ Core ML。
 
-为什么独立于 export_models.py:coremltools 8/9 已移除内置 ONNX 转换器,
-本脚本必须在 coremltools 7.x(最后带 ONNX 支持的版本)的隔离环境里运行:
-  python -m venv faceenv
-  faceenv/bin/pip install "coremltools==7.2" "onnx==1.16.2" onnxruntime numpy
-  faceenv/bin/python scripts/export_face.py --onnx w600k_mbf.onnx --outdir MediaSeek/Resources/Models
+路线:ONNX --onnx2torch--> PyTorch 模块 --trace--> coremltools(ct 9,与主流程同环境)。
+为什么不直接 ct.convert(onnx):coremltools 根本没有内置 ONNX 转换器
+(7.2 与 9.0 的 converters 目录都只有 libsvm/mil/sklearn/xgboost),
+历史上 ONNX 转换走的是独立的 onnx-coreml(只出旧 neuralnetwork 格式,已弃)。
+
+用法(主环境,与 export_models.py 同一个 venv):
+  pip install torch "coremltools>=8" onnx onnx2torch onnxruntime numpy
+  python scripts/export_face.py --onnx w600k_mbf.onnx --outdir MediaSeek/Resources/Models
 
 产物:
   <outdir>/FaceEmbedder/
-    Face.mlpackage   # 输入 input.1 (1,3,112,112) fp16;输出未归一化,App 端统一归一化
-    meta.json        # type=face,含 ONNX 原始输入/输出名(如输出 '516')
+    Face.mlpackage   # 输入 face_pixels (1,3,112,112);输出 embedding(未归一化,App 端统一归一化)
+    meta.json        # type=face,space=face,dim=512,input/output 名
   face-only.zip      # 仅 FaceEmbedder 的增量包:已装旧模型包的设备导它即启用人脸
-  models.zip         # 完整包(若 --outdir 里已有 Text/ImageEmbedder,一并打进)
+  models.zip         # 完整包(--outdir 里已有的 Text/ImageEmbedder 一并打进)
 
-预处理约定(insightface 官方):RGB、(px-127.5)/128、112×112(ArcFace 对齐由 App 端完成)。
+预处理约定(insightface 官方):RGB、(px-127.5)/128、112×112;ArcFace 对齐由 App 端完成。
+双重一致性对拍:onnx2torch 转换(torch vs onnxruntime)与 CoreML 转换(coreml vs onnxruntime),
+任一 cos < 0.995 直接失败——转换链路上的保险丝。
 """
 import argparse
 import json
@@ -24,7 +29,9 @@ import zipfile
 
 import numpy as np
 import onnx
+import torch
 import coremltools as ct
+from onnx2torch import convert as onnx2torch_convert
 
 
 def export_face(onnx_path: str, out_root: str, fp16: bool = True):
@@ -36,35 +43,52 @@ def export_face(onnx_path: str, out_root: str, fp16: bool = True):
     for d in m.graph.output[0].type.tensor_type.shape.dim:
         if d.dim_value > 1:
             dim = int(d.dim_value)
-    print(f"  ONNX 签名: 输入 {in_name} → 输出 {out_name} {dim or '?'} 维")
-    print(f"  coremltools {ct.__version__}")
+    print(f"  ONNX 签名: {in_name} → {out_name} {dim or '?'} 维;coremltools {ct.__version__}")
+
+    # onnx2torch:ONNX 图 → torch.nn.Module(纯算子包装,不动权重)
+    torch_model = onnx2torch_convert(m).eval()
+    example = torch.zeros((1, 3, 112, 112), dtype=torch.float32)
+    with torch.no_grad():
+        traced = torch.jit.trace(torch_model, example)
 
     mlmodel = ct.convert(
-        onnx_path,
-        inputs=[ct.TensorType(name=in_name, shape=(1, 3, 112, 112), dtype=np.float32)],
+        traced,
+        inputs=[ct.TensorType(name="face_pixels", shape=(1, 3, 112, 112), dtype=np.float32)],
+        outputs=[ct.TensorType(name="embedding")],
         compute_precision=ct.precision.FLOAT16 if fp16 else ct.precision.FLOAT32,
         minimum_deployment_target=ct.target.iOS17,
         convert_to="mlprogram",
     )
 
-    # 一致性对拍:同一随机输入,CoreML vs ONNX 原模型(转换错误的保险丝)
+    # 双重一致性对拍:同一随机输入,torch/onnxruntime/coreml 三方必须一致
     import onnxruntime as ort
     sess = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
     rng = np.random.RandomState(0)
     x = rng.rand(1, 3, 112, 112).astype(np.float32)
     ref = sess.run([out_name], {in_name: x})[0].flatten()
-    pred = np.array(mlmodel.predict({in_name: x})[out_name], dtype=np.float32).flatten()
-    cos = float(np.dot(ref, pred) / (np.linalg.norm(ref) * np.linalg.norm(pred) + 1e-9))
-    print(f"  CoreML↔ONNX 一致性 cos={cos:.5f}")
-    if cos < 0.995:
-        raise RuntimeError(f"人脸模型 CoreML 转换一致性不足(cos={cos:.4f})")
+    with torch.no_grad():
+        t_out = traced(torch.from_numpy(x)).numpy().flatten()
+    pred = np.array(mlmodel.predict({"face_pixels": x})["embedding"],
+                    dtype=np.float32).flatten()
+
+    def cos(a, b):
+        return float(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9))
+
+    c_torch = cos(ref, t_out)
+    c_ct = cos(ref, pred)
+    print(f"  torch↔onnx cos={c_torch:.5f};coreml↔onnx cos={c_ct:.5f}")
+    if c_torch < 0.995:
+        raise RuntimeError(f"onnx2torch 转换不一致(cos={c_torch:.4f})")
+    if c_ct < 0.995:
+        raise RuntimeError(f"CoreML 转换一致性不足(cos={c_ct:.4f})")
 
     out_dir = os.path.join(out_root, "FaceEmbedder")
     os.makedirs(out_dir, exist_ok=True)
     mlmodel.save(os.path.join(out_dir, "Face.mlpackage"))
     with open(os.path.join(out_dir, "meta.json"), "w", encoding="utf-8") as f:
         json.dump({"type": "face", "space": "face", "dim": dim or 512,
-                   "input": in_name, "output": out_name}, f, ensure_ascii=False, indent=2)
+                   "input": "face_pixels", "output": "embedding"}, f,
+                  ensure_ascii=False, indent=2)
     print(f"  -> {out_dir}")
 
 
