@@ -129,16 +129,6 @@ final class ModelManager: ObservableObject {
                         .write(to: tokCfgURL)
                 }
                 return .success((dir, tokURL, meta))
-                // swift-transformers 需要 config.json(+tokenizer_config.json)选择分词器类。
-                // 注意:SigLIP2 官方就是 GemmaTokenizer,总是覆盖写入以防历史错误值残留
-                let cfgURL = dir.appendingPathComponent("config.json")
-                let modelType = meta.type == "gemma" ? "gemma3_text" : "siglip"
-                try? JSONSerialization.data(withJSONObject: ["model_type": modelType])
-                    .write(to: cfgURL)
-                let tokCfgURL = dir.appendingPathComponent("tokenizer_config.json")
-                try? JSONSerialization.data(withJSONObject: ["tokenizer_class": "GemmaTokenizer"])
-                    .write(to: tokCfgURL)
-                return .success((dir, tokURL, meta))
             } catch {
                 return .failure(error)
             }
@@ -171,6 +161,9 @@ final class ModelManager: ObservableObject {
                         mean: meta.image_mean ?? 0.5, std: meta.image_std ?? 0.5)
                     setState(.ready, for: slot)
                     if textState == .ready && imageState == .ready { detailText = "" }
+                    // 记录当前图像模型维度;IndexingCoordinator 同步前与库内向量维度
+                    // 比对,不一致即清空旧 clip 向量全量重建(so400m 等在线升级换模型)
+                    UserDefaults.standard.set(meta.dim, forKey: "clipModelDim")
                 case "face":
                     let modelURL = dir.appendingPathComponent("Face.mlmodelc")
                     face = try FaceEmbedder(modelURL: modelURL,

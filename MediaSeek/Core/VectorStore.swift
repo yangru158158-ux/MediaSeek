@@ -876,6 +876,41 @@ final class VectorStore {
         return out
     } }
 
+    // MARK: - 图像模型更换(so400m 等在线升级)
+
+    /// 库内 clip 向量的维度(任取一行;空库返回 0)。
+    /// 检索端对维度不匹配的行本就跳过,这里只为「换模型后清旧向量」提供判据
+    func clipVectorDim() -> Int { try serialized {
+        guard let db, let stmt = try? prepare("SELECT dim FROM items WHERE space = 'clip' LIMIT 1")
+        else { return 0 }
+        defer { sqlite3_finalize(stmt) }
+        return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int(stmt, 0)) : 0
+    } }
+
+    /// 清空全部 clip 空间向量(更换图像模型、旧向量点积已无意义时)。
+    /// OCR/标签/人脸/用户标签不受影响,照片/视频在下一轮同步全量重嵌
+    func wipeClipVectors() throws { try serialized {
+        try exec("DELETE FROM items WHERE space = 'clip'")
+    } }
+
+    /// 已有 clip 向量的照片/视频集合(增量同步的「已索引」口径)。
+    /// 只认向量行本身,不认标签/人脸行——更换图像模型清空向量后,
+    /// 仅剩标签行的照片也必须重嵌,否则换模型后一张都不会重建
+    func refKeysWithClipVectors() throws -> Set<String> { try serialized {
+        guard let db else { return [] }
+        let stmt = try prepare("""
+        SELECT DISTINCT ref_key FROM items WHERE space = 'clip' AND kind IN ('photo','videoFrame')
+        """)
+        defer { sqlite3_finalize(stmt) }
+        var out = Set<String>()
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let c = sqlite3_column_text(stmt, 0) {
+                out.insert(String(cString: c))
+            }
+        }
+        return out
+    } }
+
     /// 全部照片的 clip 向量(查重用):keys 与 flat 内的行一一对应
     func allPhotoVectors() throws -> (keys: [String], flat: [Float], dim: Int) { try serialized {
         guard let db else { return ([], [], 0) }

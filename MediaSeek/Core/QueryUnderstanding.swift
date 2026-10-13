@@ -45,6 +45,8 @@ enum QueryUnderstanding {
     /// 核心词命中的词典条目按出现位置拼成英文查询(视觉通道用),无命中返回 nil。
     /// 单字键只在整词完全相等时生效:「中华人民共和国」含「人」字,
     /// 但搜它不是在搜人像——子串匹配会让全库 people/adult 标签灌进来。
+    /// 除本词典外还查 LabelZh 反查表:标签词典里展示的中文(如「消费电子」)
+    /// 直接翻回英文标签(consumer_electronics),走标签精确通道。
     static func english(for core: String) -> String? {
         var matches: [(pos: Int, en: String)] = []
         for (zh, en) in dictionary {
@@ -53,6 +55,15 @@ enum QueryUnderstanding {
                 continue
             }
             if let r = core.range(of: zh) {
+                matches.append((core.distance(from: core.startIndex, to: r.lowerBound), en))
+            }
+        }
+        for (cn, en) in LabelZh.englishFromZh {
+            if cn.count == 1 {
+                if core == cn { matches.append((0, en)) }
+                continue
+            }
+            if let r = core.range(of: cn) {
                 matches.append((core.distance(from: core.startIndex, to: r.lowerBound), en))
             }
         }
@@ -77,7 +88,8 @@ enum QueryUnderstanding {
         "户口": ["户号", "户主"],
     ]
 
-    /// 英文同义扩展:标签是 woman、查询是 girl 时精确匹配会漏,必须互相打通
+    /// 英文同义扩展:标签是 woman、查询是 girl 时精确匹配会漏,必须互相打通。
+    /// 下划线标签(blue_sky/printed_page 等)是独立 token,与近义标签互相桥接
     static let synonyms: [String: [String]] = [
         "person": ["people", "human", "adult", "man", "woman"],
         "people": ["person", "adult", "crowd"],
@@ -92,10 +104,27 @@ enum QueryUnderstanding {
         "car": ["vehicle", "automobile"],
         "screen": ["monitor", "display"], "monitor": ["screen", "display"],
         "food": ["meal", "dish"], "flower": ["blossom"],
-        "sea": ["ocean"], "ocean": ["sea"], "beach": ["sea", "shore"],
-        "document": ["paperwork", "text"], "text": ["document"],
+        "sea": ["ocean"], "ocean": ["sea"], "beach": ["sea", "shore", "coast"],
+        "document": ["paperwork", "text", "printed_page"], "text": ["document"],
+        "printed_page": ["document", "paper"],
         "portrait": ["face", "person"], "face": ["portrait"],
         "beautiful": ["pretty", "attractive"],
+        // Vision 标签体系内部桥接:同一画面常打近义词的不同变体
+        "sky": ["blue_sky", "cloudy"], "blue_sky": ["sky"],
+        "cloud": ["cloudy"], "cloudy": ["cloud"],
+        "building": ["structure", "architecture"], "structure": ["building"],
+        "electronics": ["consumer_electronics", "device"],
+        "consumer_electronics": ["electronics"],
+        "wood": ["wood_processed"], "wood_processed": ["wood"],
+        "plant": ["tree", "flower"], "tree": ["plant"],
+        "clothes": ["clothing", "apparel"], "clothing": ["clothes"],
+        "animal": ["pet"], "pet": ["animal"],
+        "vehicle": ["car"], "sunset": ["sunrise"], "sunrise": ["sunset"],
+        "meal": ["food", "dish"], "dish": ["food", "meal"],
+        "fruit": ["food"], "dessert": ["cake", "pastry"], "cake": ["dessert"],
+        "grass": ["lawn", "meadow"], "lawn": ["grass"],
+        "mountain": ["hill"], "hill": ["mountain"],
+        "river": ["lake"], "lake": ["river"],
     ]
 
     /// 词集做一跳同义扩展

@@ -183,8 +183,17 @@ final class IndexingCoordinator: ObservableObject {
 
     private func syncPhotoLibrary(forceAll: Bool = false, errors: FirstErrorBox) async throws {
         let fetch = photo.fetchAllAssets()
-        // 全量重建:所有照片视为新照片全量覆盖;增量同步:跳过已索引
-        var known = forceAll ? Set<String>() : try store.refKeys(kinds: [.photo, .photoLabel, .userTag, .videoFrame, .videoFrameLabel, .face])
+        // 图像模型更换检测(so400m 等在线升级):模型加载时记下当前维度
+        // (ModelManager 写 clipModelDim),与库内向量维度不一致 = 换过嵌入模型,
+        // 旧向量点积无意义——清空 clip 向量(OCR/标签/人脸保留),本轮全量重嵌
+        if let wantDim = UserDefaults.standard.object(forKey: "clipModelDim") as? Int,
+           store.clipVectorDim() > 0, store.clipVectorDim() != wantDim {
+            try store.wipeClipVectors()
+        }
+        // 全量重建:所有照片视为新照片全量覆盖;增量同步:跳过已索引。
+        // 「已索引」只认 clip 向量行本身——标签/人脸行不算数,否则换模型
+        // 清空向量后照片仍被当成已索引,一张都不会重建
+        var known = forceAll ? Set<String>() : try store.refKeysWithClipVectors()
         // 增量自动补全:已有向量但缺 OCR 原文的照片视为待补(原位覆盖),
         // 跑多少存多少、中断可续,无需全量重建(无字照片有 "" 占位行,不会反复补)
         if !forceAll {

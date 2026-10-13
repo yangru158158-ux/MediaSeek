@@ -7,6 +7,9 @@ name: Export Models
 #   Gemma wrapper 自管掩码,不经 masking_utils;
 #   SigLIP 文本塔在 export_models.py 内手工构建 4D 加性掩码直通 encoder,
 #   绕开 v5 动态掩码闭包(coremltools 不可转)与 v4 的 argmax 池化错位(SigLIP2 池化锚点=末位)
+#
+# 2026-10-13 增加:so400m 增强图像模型包 + GitHub Release(models tag)托管,
+# App 内 设置→模型在线更新 直接下载导入(manifest.json 描述各包版本/大小)
 on:
   workflow_dispatch:
   push:
@@ -17,10 +20,13 @@ on:
       - "scripts/patch_transformers_for_coreml.py"
       - ".github/workflows/export_models.yml"
 
+permissions:
+  contents: write   # 发布 Release(在线更新源)需要
+
 jobs:
   export:
     runs-on: macos-15
-    timeout-minutes: 60
+    timeout-minutes: 90
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
@@ -54,6 +60,17 @@ jobs:
             --onnx "$RUNNER_TEMP/face/w600k_mbf.onnx" \
             --outdir MediaSeek/Resources/Models
 
+      - name: 导出增强图像模型(so400m,可在线更新切换)
+        # 877M 参数在 7GB 内存 runner 上偏紧,失败不阻塞主包发布(continue-on-error)
+        continue-on-error: true
+        env:
+          SIGLIP_MODEL: google/siglip2-so400m-patch14-384
+        run: |
+          python scripts/export_models.py \
+            --outdir "$RUNNER_TEMP/so400m" \
+            --skip-gemma \
+            --zip models-so400m.zip
+
       - name: 上传模型包
         uses: actions/upload-artifact@v4
         with:
@@ -67,3 +84,45 @@ jobs:
           name: face-only-zip
           path: face-only.zip
           retention-days: 90
+
+      - name: 生成更新清单 manifest.json
+        run: |
+          python - <<'EOF'
+          import json, os, datetime
+          files = []
+          def add(key, name, path, note):
+              if os.path.exists(path):
+                  files.append({
+                      "key": key, "name": name,
+                      "url": "https://github.com/yangru158158-ux/MediaSeek/releases/download/models/" + path,
+                      "size": os.path.getsize(path), "note": note})
+          add("full", "标准完整包(文本+图文+人脸)", "models.zip",
+              "三个模型全量;首次安装或一次到位用这个")
+          add("face", "仅人脸(增量)", "face-only.zip",
+              "已装旧包的设备补人物归组功能")
+          add("so400m", "增强图像模型(so400m)", "models-so400m.zip",
+              "识别更强、导入后需全量重建图像向量(约1-2小时,可中断续跑)")
+          m = {
+              "version": (os.environ.get("GITHUB_SHA", "")[:7] or "dev")
+                         + "-" + datetime.datetime.utcnow().strftime("%Y%m%d%H%M"),
+              "date": datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"),
+              "files": files,
+          }
+          with open("manifest.json", "w", encoding="utf-8") as f:
+              json.dump(m, f, ensure_ascii=False, indent=1)
+          print(json.dumps(m, ensure_ascii=False)[:600])
+          EOF
+
+      - name: 发布模型包到 GitHub Release(在线更新源)
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          assets=(manifest.json)
+          for f in models.zip face-only.zip models-so400m.zip; do
+            [ -f "$f" ] && assets+=("$f")
+          done
+          gh release delete models -y --cleanup-tag || true
+          gh release create models "${assets[@]}" \
+            --title "模型包(在线更新源)" \
+            --notes "CI 自动发布;App 内 设置→模型在线更新 读取 manifest.json。仅限本人设备使用。"

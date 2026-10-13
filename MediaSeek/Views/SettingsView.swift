@@ -17,6 +17,7 @@ struct SettingsView: View {
         NavigationStack {
             List {
                 modelSection
+                ModelUpdateSection()
                 tuningSection
                 labelVocabSection
                 videoDiagSection
@@ -140,7 +141,7 @@ struct SettingsView: View {
         } header: {
             Text("图像模型词汇")
         } footer: {
-            Text("列出库里照片/视频实际打上的英文标签。搜这些词(或对应中文,如 woman=女性)会走标签通道精确命中;其余英文词靠语义模型理解,无固定清单。")
+            Text("列出库里照片/视频实际打上的英文标签及中文对照。这些中文直接可搜且双通道兼得:文字维度=照片里含该字样,语义/标签维度=画面内容匹配(如搜「海滩」命中 beach 标签的照片)。未收录中文的标签仍可搜英文原词。")
         }
     }
 
@@ -271,26 +272,35 @@ struct SettingsView: View {
     }
 }
 
-/// 标签词典列表:可搜索筛选,看某个英文词库里有没有、有多少
+/// 标签词典列表:英文标签+对应中文,可按任一语言筛选。
+/// 展示的中文本身可搜:文字维度=照片含该字样(OCR),语义/标签维度=词典反查命中英文标签
 struct LabelVocabSheet: View {
     let items: [(label: String, count: Int)]
     @State private var filter = ""
     @Environment(\.dismiss) private var dismiss
 
     private var filtered: [(label: String, count: Int)] {
-        filter.isEmpty ? items : items.filter { $0.label.localizedCaseInsensitiveContains(filter) }
+        filter.isEmpty ? items : items.filter {
+            $0.label.localizedCaseInsensitiveContains(filter)
+                || (LabelZh.chinese(for: $0.label) ?? "").contains(filter)
+        }
     }
 
     var body: some View {
         NavigationStack {
             List(filtered, id: \.label) { item in
                 HStack {
-                    Text(item.label).font(.footnote.monospaced())
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(LabelZh.chinese(for: item.label) ?? "—")
+                            .font(.subheadline)
+                        Text(item.label).font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                    }
                     Spacer()
                     Text("\(item.count)").font(.footnote).foregroundColor(.secondary)
                 }
             }
-            .searchable(text: $filter, prompt: "筛选标签,如 beach / woman / food")
+            .searchable(text: $filter, prompt: "筛选,如 海滩 / beach / 食物")
             .navigationTitle("标签词典 \(items.count) 项")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
