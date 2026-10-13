@@ -926,6 +926,13 @@ final class VectorStore {
         return out
     } }
 
+    /// 清空全部人脸向量与记账(人脸模型更换、旧嵌入空间不通用时)。
+    /// 照片/OCR/标签不受影响,下一轮同步走轻量补全通道全量重嵌
+    func wipeFaceVectors() throws { try serialized {
+        try exec("DELETE FROM items WHERE kind = 'face'")
+        try exec("DELETE FROM face_done")
+    } }
+
     /// 全部照片的 clip 向量(查重用):keys 与 flat 内的行一一对应
     func allPhotoVectors() throws -> (keys: [String], flat: [Float], dim: Int) { try serialized {
         guard let db else { return ([], [], 0) }

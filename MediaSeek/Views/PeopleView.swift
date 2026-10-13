@@ -21,9 +21,9 @@ struct PeopleView: View {
     @State private var singletonCount = 0
     @State private var totalGroups = 0
 
-    // 阈值(与锚的余弦):135 用户实测大杂烩组后收紧——MobileFaceNet 同人清晰照
-    // 一般 ≥0.55,模糊小脸/证件翻拍质量差会把分数压到跨人区间,宁拆勿合
-    private let thresholds: [String: Float] = ["exact": 0.60, "balanced": 0.50, "loose": 0.40]
+    // 阈值(与锚的余弦,r50 ArcFace 尺度:同人清晰照通常 0.6-0.85,跨人 <0.35;
+    // mbf 时代 60% 分档跨人难照片挤同组的区分度问题靠换 r50 解决,阈值随尺度校准)
+    private let thresholds: [String: Float] = ["exact": 0.68, "balanced": 0.58, "loose": 0.45]
 
     var body: some View {
         NavigationStack {

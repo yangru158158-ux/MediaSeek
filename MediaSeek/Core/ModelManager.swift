@@ -30,6 +30,8 @@ struct ModelMeta: Codable {
     // 人脸模型:ONNX 原始输入/输出名(如 input.1 / 516)
     let input: String?
     let output: String?
+    // 人脸模型指纹(ONNX 字节数):换模型时同步前自动清空旧脸向量重嵌
+    let model_size: Int?
 }
 
 @MainActor
@@ -170,6 +172,11 @@ final class ModelManager: ObservableObject {
                                             inputName: meta.input ?? "input.1",
                                             outputName: meta.output ?? "embedding")
                     setState(.ready, for: slot)
+                    // 记录人脸模型指纹;IndexingCoordinator 同步前与库内已嵌指纹比对,
+                    // 不一致即清空旧向量重嵌(如 mbf→r50 在线升级,旧嵌入空间不通用)
+                    if let size = meta.model_size {
+                        UserDefaults.standard.set(size, forKey: "faceModelSize")
+                    }
                 default:
                     setState(.failed("未知模型类型 \(meta.type)"), for: slot)
                 }

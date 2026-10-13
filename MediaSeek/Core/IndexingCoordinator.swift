@@ -195,6 +195,14 @@ final class IndexingCoordinator: ObservableObject {
            store.clipVectorDim() > 0, store.clipVectorDim() != wantDim {
             try store.wipeClipVectors()
         }
+        // 人脸模型更换检测:模型加载时记下指纹(faceModelSize,如 mbf→r50 升级),
+        // 与库内已嵌指纹不一致 = 换过嵌入模型,旧向量空间不通用——清空重嵌
+        let faceWant = UserDefaults.standard.integer(forKey: "faceModelSize")
+        let faceIndexed = UserDefaults.standard.integer(forKey: "faceIndexedSize")
+        if faceWant > 0, faceWant != faceIndexed {
+            if store.faceStats().faces > 0 { try store.wipeFaceVectors() }
+            UserDefaults.standard.set(faceWant, forKey: "faceIndexedSize")
+        }
         // 全量重建:所有照片视为新照片全量覆盖;增量同步:跳过已索引。
         // 「已索引」只认 clip 向量行本身——标签/人脸行不算数,否则换模型
         // 清空向量后照片仍被当成已索引,一张都不会重建

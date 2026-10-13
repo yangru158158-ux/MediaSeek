@@ -44,10 +44,13 @@ jobs:
       - name: 打 coremltools 兼容补丁
         run: python scripts/patch_transformers_for_coreml.py
 
-      - name: 下载人脸模型(insightface MobileFaceNet,非商用许可,仅内部测试用)
+      - name: 下载人脸模型(insightface buffalo_l 的 r50,非商用许可,仅内部测试用)
+        # 2026-10-13 由 buffalo_s 的 MobileFaceNet 升级 r50:mbf 轻量模型区分度
+        # 天花板低,60% 分档同时装着同人的难照片与跨人/截图,分组混人(r50 端侧
+        # 推理仍为毫秒级;检测/对齐不变,仅换身份嵌入模型)
         run: |
-          curl -sL -o "$RUNNER_TEMP/buffalo_s.zip" https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_s.zip
-          unzip -o -j "$RUNNER_TEMP/buffalo_s.zip" w600k_mbf.onnx -d "$RUNNER_TEMP/face"
+          curl -sL -o "$RUNNER_TEMP/buffalo_l.zip" https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip
+          unzip -o -j "$RUNNER_TEMP/buffalo_l.zip" w600k_r50.onnx -d "$RUNNER_TEMP/face"
 
       - name: 导出文本/图文模型(coremltools 9)
         run: |
@@ -57,7 +60,7 @@ jobs:
       - name: 导出人脸模型并打包(onnx2torch→trace→ct,同环境)
         run: |
           python scripts/export_face.py \
-            --onnx "$RUNNER_TEMP/face/w600k_mbf.onnx" \
+            --onnx "$RUNNER_TEMP/face/w600k_r50.onnx" \
             --outdir MediaSeek/Resources/Models
 
       - name: 导出增强图像模型(so400m,可在线更新切换)
@@ -98,8 +101,8 @@ jobs:
                       "size": os.path.getsize(path), "note": note})
           add("full", "标准完整包(文本+图文+人脸)", "models.zip",
               "三个模型全量;首次安装或一次到位用这个")
-          add("face", "仅人脸(增量)", "face-only.zip",
-              "已装旧包的设备补人物归组功能")
+          add("face", "人脸模型增量(ArcFace r50)", "face-only.zip",
+              "已装旧包的设备补人物归组;r50 识别更强,导入后自动重建人脸数据")
           add("so400m", "增强图像模型(so400m)", "models-so400m.zip",
               "识别更强、导入后需全量重建图像向量(约1-2小时,可中断续跑)")
           m = {

@@ -130,8 +130,7 @@ struct DuplicateResultsView: View {
                         confirmDelete = true
                     }
                     .disabled(selected.isEmpty || deleting)
-                }
-            }
+                }            }
             .confirmationDialog("删除全部 \(selected.count) 张所选照片?",
                                 isPresented: $confirmDelete, titleVisibility: .visible) {
                 Button("全部删除(30 天内可恢复)", role: .destructive) {
@@ -221,6 +220,7 @@ struct DuplicateResultsView: View {
                     confirmGroup = gi
                 }
                 .font(.footnote)
+                .disabled(deleting)   // 删除进行中禁一切删除入口,防连删
             }
         }
     }
@@ -253,7 +253,9 @@ struct DuplicateResultsView: View {
                     selected.subtract(ids)
                     deleting = false
                     app.notify("已删除 \(ids.count) 张,最近删除保留 30 天")
-                    if groups.isEmpty { dismiss() }
+                    // 删除完成立即退出结果页:是否继续处理其他组由用户重新进入决定,
+                    // 避免停留时误触另一组的删除(用户 2026-10-13 要求)
+                    dismiss()
                 }
             } catch {
                 await MainActor.run { deleting = false; app.fail(error) }

@@ -87,7 +87,9 @@ def export_face(onnx_path: str, out_root: str, fp16: bool = True):
     mlmodel.save(os.path.join(out_dir, "Face.mlpackage"))
     with open(os.path.join(out_dir, "meta.json"), "w", encoding="utf-8") as f:
         json.dump({"type": "face", "space": "face", "dim": dim or 512,
-                   "input": "face_pixels", "output": "embedding"}, f,
+                   "input": "face_pixels", "output": "embedding",
+                   # 模型指纹(ONNX 字节数):App 端比对,换模型自动清空旧脸向量重嵌
+                   "model_size": os.path.getsize(onnx_path)}, f,
                   ensure_ascii=False, indent=2)
     print(f"  -> {out_dir}")
 
