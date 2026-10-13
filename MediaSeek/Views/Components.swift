@@ -3,6 +3,8 @@ import SwiftUI
 import Photos
 import AVKit
 import QuickLook
+import UIKit
+import CoreLocation
 
 /// 缩略图加载(相册资产):PHCachingImageManager + 内存缓存
 final class PhotoThumbLoader {
@@ -153,7 +155,7 @@ struct HitCell: View {
     }
 }
 
-/// 详情页:照片查看 / 视频播放 / 文件 QuickLook
+/// 详情页:照片查看 / 视频播放 / 文件 QuickLook + 元信息与跳转
 struct DetailSheet: View {
     let hit: DisplayHit
     var searchTerm: String = ""
@@ -162,16 +164,41 @@ struct DetailSheet: View {
     @EnvironmentObject var app: AppModel
     @Environment(\.dismiss) private var dismiss
     @State private var confirmDelete = false
+    @State private var placeText: String?
+    @State private var fileInfoLines: [(String, String)] = []
+    @State private var folderURL: URL?
+    @State private var showFolderPicker = false
 
     private var fileRecord: ImportedFile? {
         if case .file(let r) = hit.target { return r }
         return nil
     }
 
+    private var asset: PHAsset? {
+        if case .asset(let a) = hit.target { return a }
+        return nil
+    }
+
+    private static let dateFmt: DateFormatter = {
+        let f = DateFormatter()
+        f.dateStyle = .long
+        f.timeStyle = .short
+        f.locale = Locale(identifier: "zh_CN")
+        return f
+    }()
+
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
                 content
+                if let asset {
+                    assetInfo(asset)
+                        .padding(.horizontal, 16).padding(.vertical, 8)
+                }
+                if fileRecord != nil, !fileInfoLines.isEmpty {
+                    fileInfo
+                        .padding(.horizontal, 16).padding(.vertical, 8)
+                }
                 if isAsset {
                     TagEditorView(refKey: hit.refKey)
                         .padding(.vertical, 8)
@@ -219,7 +246,85 @@ struct DetailSheet: View {
                 }
                 Button("取消", role: .cancel) {}
             }
+            .sheet(isPresented: $showFolderPicker) {
+                if let folderURL {
+                    FolderPicker(url: folderURL)
+                }
+            }
+            .onAppear { loadInfo() }
         }
+    }
+
+    /// 照片/视频元信息:拍摄日期、位置、尺寸 + 在相册 App 打开
+    private func assetInfo(_ a: PHAsset) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            if let d = a.creationDate {
+                Text("拍摄日期:\(Self.dateFmt.string(from: d))")
+            }
+            Text(placeText ?? (a.location != nil ? "位置解析中…" : "无位置信息"))
+            Text("尺寸:\(a.pixelWidth) × \(a.pixelHeight)")
+            Button {
+                UIApplication.shared.open(URL(string: "photos-redirect://") ?? URL(string: "photos://")!)
+            } label: {
+                Label("在「照片」App 中打开", systemImage: "photo.on.rectangle")
+                    .font(.footnote.weight(.medium))
+            }
+        }
+        .font(.footnote)
+        .foregroundColor(.secondary)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// 导入文件元信息:大小、创建时间、所在文件夹 + 打开所在文件夹
+    private var fileInfo: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            ForEach(fileInfoLines, id: \.0) { pair in
+                Text("\(pair.0):\(pair.1)")
+            }
+            Button {
+                showFolderPicker = true
+            } label: {
+                Label("打开所在文件夹", systemImage: "folder")
+                    .font(.footnote.weight(.medium))
+            }
+        }
+        .font(.footnote)
+        .foregroundColor(.secondary)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// 元信息装载:资源反地理编码 / 文件的真实创建时间与所在文件夹
+    private func loadInfo() {
+        if let a = asset, let loc = a.location {
+            CLGeocoder().reverseGeocodeLocation(loc) { marks, _ in
+                let text: String
+                if let m = marks?.first {
+                    let parts = [m.subLocality ?? m.name, m.locality].compactMap { $0 }
+                    text = parts.isEmpty
+                        ? String(format: "%.4f, %.4f", loc.coordinate.latitude, loc.coordinate.longitude)
+                        : parts.joined(separator: " ")
+                } else {
+                    text = String(format: "%.4f, %.4f", loc.coordinate.latitude, loc.coordinate.longitude)
+                }
+                DispatchQueue.main.async { placeText = text }
+            }
+        }
+        guard let record = fileRecord, let url = try? app.imports.resolveURL(record) else { return }
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        folderURL = url.deletingLastPathComponent()
+        var lines: [(String, String)] = [("文件名", record.name)]
+        let rv = try? url.resourceValues(forKeys: [.fileSizeKey, .creationDateKey])
+        if let bytes = rv?.fileSize {
+            lines.append(("大小", ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)))
+        }
+        if let created = rv?.creationDate {
+            lines.append(("创建时间", Self.dateFmt.string(from: created)))
+        } else {
+            lines.append(("导入时间", Self.dateFmt.string(from: record.addedAt)))
+        }
+        lines.append(("所在文件夹", url.deletingLastPathComponent().lastPathComponent))
+        fileInfoLines = lines
     }
 
     private var isAsset: Bool {
@@ -240,6 +345,18 @@ struct DetailSheet: View {
             FilePreviewScreen(record: record)
         }
     }
+}
+
+/// 在「文件」App 中打开指定文件夹(定位到导入来源目录)
+struct FolderPicker: UIViewControllerRepresentable {
+    let url: URL
+
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        let picker = UIDocumentPickerViewController(forOpeningContentAt: url, asCopy: false)
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: UIDocumentPickerViewController, context: Context) {}
 }
 
 struct FullImageViewer: View {

@@ -485,14 +485,19 @@ final class SearchEngine {
             var seen = Set<String>()
             var rank = 0
             for t in (textTerms.isEmpty ? [query] : textTerms) where !t.isEmpty {
-                for ref in (try? store.searchOCR(query: t)) ?? []
+                // 证件类 OCR 别名:人像面不印证件名(身份证正面只有「公民身份号码」等字段),
+                // 只搜证件名会漏掉全部正面照——补字段级别名并集保召回
+                let variants = [t] + (QueryUnderstanding.ocrAliases[t] ?? [])
+                for term in variants {
+                for ref in (try? store.searchOCR(query: term)) ?? []
                 where !seen.contains(ref.refKey) && (among?.contains(ref.refKey) ?? true) {
                     seen.insert(ref.refKey)
                     add(SearchHit(kind: ocrKind(ref.refKey), refKey: ref.refKey, frameIndex: 0,
-                                  space: "ocr", title: "含「\(t)」:\(Self.ocrSnippet(ref.text, t))",
+                                  space: "ocr", title: "含「\(term)」:\(Self.ocrSnippet(ref.text, term))",
                                   date: nil, score: 1.0, color: nil),
                         weight: 8.0, rank: rank)
                     rank += 1
+                }
                 }
 
                 // 长中文词整句 LIKE 会因语序漏匹配(搜「医学出生证明」,证书上印的

@@ -67,6 +67,16 @@ enum QueryUnderstanding {
         "text", "structure", "outdoor", "machine", "clothing", "plant",
     ]
 
+    /// 证件类 OCR 别名:人像面不印证件名(身份证正面只有「公民身份号码」「姓名」等字段),
+    /// 只搜证件名会漏掉全部正面照——补字段级别名供文字通道并集保召回
+    static let ocrAliases: [String: [String]] = [
+        "身份证": ["公民身份", "居民身份证", "签发机关"],
+        "护照": ["passport", "签发国"],
+        "驾驶证": ["准驾车型", "机动车驾驶证"],
+        "港澳通行证": ["往来港澳"],
+        "户口": ["户号", "户主"],
+    ]
+
     /// 英文同义扩展:标签是 woman、查询是 girl 时精确匹配会漏,必须互相打通
     static let synonyms: [String: [String]] = [
         "person": ["people", "human", "adult", "man", "woman"],
