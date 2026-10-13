@@ -29,15 +29,22 @@ jobs:
       - name: 安装打分依赖
         run: pip install onnxruntime numpy pillow
 
-      - name: 下载测试照片(维基共享资源固定直链,p1/p2 同人不同照、p3 另一人)
+      - name: 下载测试照片(维基共享资源,3 人×多张不同角度/年代)
+        # 命名 <人物>_<序号>:打分脚本按人物名做真值标签,验证「同人合成一组、
+        # 不同人不混组」——140 用户实测「同一人分了好几组」的回归闸门
         run: |
           cd "$RUNNER_TEMP"
-          curl -fL --retry 3 -A "Mozilla/5.0 (MediaSeek-CI)" -o p1.jpg \
-            "https://upload.wikimedia.org/wikipedia/commons/8/8d/President_Barack_Obama.jpg"
-          curl -fL --retry 3 -A "Mozilla/5.0 (MediaSeek-CI)" -o p2.jpg \
-            "https://upload.wikimedia.org/wikipedia/commons/e/e9/Official_portrait_of_Barack_Obama.jpg"
-          curl -fL --retry 3 -A "Mozilla/5.0 (MediaSeek-CI)" -o p3.jpg \
-            "https://upload.wikimedia.org/wikipedia/commons/5/56/Donald_Trump_official_portrait.jpg"
+          dl() { curl -fL --retry 3 --retry-delay 5 -A "Mozilla/5.0 (MediaSeek-CI)" -o "$1" "$2"; sleep 2; }
+          dl obama_1.jpg "https://upload.wikimedia.org/wikipedia/commons/8/8d/President_Barack_Obama.jpg"
+          dl obama_2.jpg "https://upload.wikimedia.org/wikipedia/commons/e/e9/Official_portrait_of_Barack_Obama.jpg"
+          dl obama_3.png "https://upload.wikimedia.org/wikipedia/commons/e/ec/Barack_H._Obama_%284x5%29.png"
+          dl trump_1.jpg "https://upload.wikimedia.org/wikipedia/commons/5/56/Donald_Trump_official_portrait.jpg"
+          dl trump_2.jpg "https://upload.wikimedia.org/wikipedia/commons/5/53/Donald_Trump_official_portrait_%28cropped%29.jpg"
+          dl trump_3.jpg "https://upload.wikimedia.org/wikipedia/commons/e/e7/National_Portrait_Gallery_Portrait_of_President_Donald_J_Trump_2026_%28HR%29.jpg"
+          dl clinton_1.jpg "https://upload.wikimedia.org/wikipedia/commons/2/27/Hillary_Clinton_official_Secretary_of_State_portrait_crop.jpg"
+          dl clinton_2.jpg "https://upload.wikimedia.org/wikipedia/commons/9/97/Hillary_Clinton_Portrait_%283x4_close_cropped%29.jpg"
+          dl clinton_3.jpg "https://upload.wikimedia.org/wikipedia/commons/d/dd/Hillary_Rodham_Clinton.jpg"
+          ls -la *.jpg *.png
 
       - name: 下载人脸模型(与在线更新源同源 r50)
         run: |
@@ -48,14 +55,15 @@ jobs:
       - name: 编译并运行对齐(Vision + FaceKit,与 App 同源码)
         run: |
           swiftc -O MediaSeek/Core/FaceKit.swift scripts/face_e2e_align.swift -o /tmp/face_e2e_align
-          /tmp/face_e2e_align "$RUNNER_TEMP/aligned" \
-            "$RUNNER_TEMP/p1.jpg" "$RUNNER_TEMP/p2.jpg" "$RUNNER_TEMP/p3.jpg"
+          /tmp/face_e2e_align "$RUNNER_TEMP/aligned" "$RUNNER_TEMP"/*_[0-9].jpg "$RUNNER_TEMP"/*_[0-9].png
 
-      - name: r50 打分并断言
+      - name: r50 打分 + 聚类/合并断言
+        # 阈值与 App 平衡模式一致(入组 0.58 / 连接 = 入组+0.06)
         run: |
           python scripts/face_e2e_score.py \
             --model "$RUNNER_TEMP/face/w600k_r50.onnx" \
-            --dir "$RUNNER_TEMP/aligned"
+            --dir "$RUNNER_TEMP/aligned" \
+            --threshold 0.58 --link 0.64
 
       - name: 上传对齐图(人工目检用)
         if: always()

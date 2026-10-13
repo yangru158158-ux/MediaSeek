@@ -129,9 +129,11 @@ struct PeopleView: View {
         let refs = clusters[i]
         let named = groupNames.indices.contains(i) && !groupNames[i].isEmpty
         let title = named ? groupNames[i] : "未命名"
-        // 组内最弱相似度(去掉锚=1 后的最小值):链式聚类的最弱连接,低=组可疑
+        // 组内最弱相似度:链式聚类的最弱连接,低=组可疑。排除锚(=1)而不是
+        // 按位置 dropFirst——合并后锚所在照片可能被同照片多脸去重挤掉,
+        // 按位置丢会把真正的最低分当成锚丢掉
         let weakest = clusterScores.indices.contains(i)
-            ? clusterScores[i].dropFirst().min() : nil
+            ? clusterScores[i].filter { $0 < 0.999 }.min() : nil
         return NavigationLink {
             ClusterDetailView(refs: refs,
                               existingName: named ? groupNames[i] : "",
@@ -219,9 +221,18 @@ struct PeopleView: View {
         Task.detached(priority: .userInitiated) {
             do {
                 let data = try store.allFaceVectors()
-                let scored = DuplicateScanner.scan(
+                let raw = DuplicateScanner.scan(
                     keys: data.keys, flat: data.flat, dim: data.dim, threshold: threshold) { done, total in
                     Task { @MainActor in progress = (done, total) }
+                }
+                // 组间合并:贪心聚类「一锚定终身」会把同一人按角度/遮挡拆成多组
+                // (140 用户实测);按「两组各有一张互相像」连通,同人的侧脸组与
+                // 正脸组靠中间角度照片串起来。连接阈值略高于入组阈值——入组是
+                // 「与锚像」,连接只需任意一对像,过松会把不同人连成一串
+                let scored = DuplicateScanner.mergeGroups(
+                    raw, flat: data.flat, dim: data.dim,
+                    linkThreshold: threshold + 0.06) { done, total in
+                    Task { @MainActor in progress = (done, max(total, 1)) }
                 }
                 // 脸组 → 照片组(组内同照片多脸去重,保留与锚相似度);按人数降序,封顶 300 组防长列表
                 var photoGroups: [[String]] = []
@@ -236,7 +247,12 @@ struct PeopleView: View {
                     }
                     if !refs.isEmpty { photoGroups.append(refs); groupScores.append(scs) }
                 }
-                photoGroups.sort { $0.count > $1.count }
+                // ⚠️ 照片组与分数必须一起排序:140 只排了 photoGroups,
+                // groupScores 原序不动 → 组行/角标显示的是另一组的分数
+                // (用户实测几乎每组都「最弱 0%」,因为错位取到了别组的空位)
+                let order = photoGroups.indices.sorted { photoGroups[$0].count > photoGroups[$1].count }
+                photoGroups = order.map { photoGroups[$0] }
+                groupScores = order.map { groupScores[$0] }
                 let groupedFaces = scored.reduce(0) { $0 + $1.count }
                 let singles = data.refs.count - groupedFaces
                 let totalGroups = photoGroups.count
@@ -333,13 +349,14 @@ struct ClusterDetailView: View {
                     }
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                     .overlay(alignment: .bottomLeading) {
-                        if i > 0, scores.indices.contains(i) {
+                        // 角标按分数判定基准(≈1),不按下标位置——合并后锚不一定在第 0 位
+                        if scores.indices.contains(i), scores[i] < 0.999 {
                             Text(String(format: "%.0f%%", scores[i] * 100))
                                 .font(.caption2).monospacedDigit()
                                 .padding(.horizontal, 4).padding(.vertical, 2)
                                 .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 4))
                                 .foregroundStyle(scores[i] >= 0.5 ? .white : .orange)
-                        } else if i == 0 {
+                        } else if scores.indices.contains(i) {
                             Text("基准")
                                 .font(.caption2)
                                 .padding(.horizontal, 4).padding(.vertical, 2)
