@@ -62,10 +62,17 @@ enum DuplicateScanner {
     /// - Parameters:
     ///   - linkThreshold: 两组质心相似度达到该值才合并
     ///   - expelFloor: 成员对组锚的相似度下限,低于则剔除
+    ///   - coherenceFloor: 簇内内聚底线(0=关)。合并完成后每簇计算质心
+    ///     (归一化平均向量),成员对质心的**平均**相似度低于它 → 整簇解散
+    ///     (成员回落单例)。148 用户实测「第三组人物众多不知为何合并一组」:
+    ///     截图小脸/影视剧照/模糊脸在嵌入空间互相靠近(打印脸效应),质心
+    ///     连接把它们链式串成「假人物」巨组(154 张里婴儿/明星/界面截屏全有)。
+    ///     真人物的成员围绕平均脸紧密分布(同人中位 ~0.7),假簇平均相似度
+    ///     显著偏低——解散比逐个剔除更对,因为错在「簇本身不是一个人」
     static func mergeGroups(_ groups: [[(index: Int, score: Float)]],
                             flat: [Float], dim: Int, linkThreshold: Float, expelFloor: Float,
                             singletons: [Int] = [], absorbThreshold: Float? = nil,
-                            maxRounds: Int = 25,
+                            maxRounds: Int = 25, coherenceFloor: Float = 0,
                             progress: (Int, Int) -> Void = { _, _ in }) -> [[(index: Int, score: Float)]] {
         guard groups.count > 1, dim > 0 else { return groups }
 
@@ -179,6 +186,25 @@ enum DuplicateScanner {
                 guard !scored.isEmpty else { return nil }   // 剔完只剩锚=单例,不算组
                 scored.sort { $0.score > $1.score }
                 return [(index: anchor, score: Float(1))] + scored
+            }
+
+            // 簇内内聚守卫:假人物簇整簇解散(见 coherenceFloor 文档)。
+            // 每簇质心 = 成员向量和归一化;成员对质心的平均相似度过低即解散
+            if coherenceFloor > 0 {
+                out = out.filter { g in
+                    var c = [Float](repeating: 0, count: dim)
+                    for m in g { for d in 0..<dim { c[d] += flat[m.index * dim + d] } }
+                    var norm: Float = 0
+                    vDSP_dotpr(c, 1, c, 1, &norm, vDSP_Length(dim))
+                    norm = max(norm.squareRoot(), 1e-8)
+                    var total: Float = 0
+                    for m in g {
+                        var d: Float = 0
+                        vDSP_dotpr(c, 1, base + m.index * dim, 1, &d, vDSP_Length(dim))
+                        total += d / norm
+                    }
+                    return total / Float(g.count) >= coherenceFloor
+                }
             }
         }
         return out.sorted { $0.count > $1.count }

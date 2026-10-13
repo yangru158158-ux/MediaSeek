@@ -48,10 +48,14 @@ struct PeopleView: View {
     /// 「人物」门槛:簇至少覆盖 3 张不同照片。更小的簇是一次性路人/海报误检,
     /// 不参与组合键——这是组合数不被噪声撑爆的关键(145 组合分组的教训)
     private let personMinPhotos = 3
-    /// 人名认定的标签覆盖率:≥40% 的组内照片带该标签才显示为人名。
-    /// 147 名字污染的教训:无门槛众数会把散布标签当成组名(命名中断产生的
-    /// 几千张标签散落后,几乎所有组都显示成「程玉婷/杨如」)
-    private func personNameCoverage(_ n: Int, _ total: Int) -> Bool { n * 5 >= total * 2 }
+    /// 簇内内聚底线:成员对簇质心(平均脸)的平均相似度低于它 → 整簇解散。
+    /// 148 实测打印脸/模糊脸被质心连接链式串成「假人物」巨组(第三组 154 张
+    /// 里婴儿/明星/界面截屏全有);真人物该均值 ~0.6-0.75,假簇 ~0.3-0.45
+    private let coherenceFloor: Float = 0.45
+    /// 人名认定的标签票数门槛:≥3 张 且 过半。148 实测教训:只看覆盖率时,
+    /// 两三张的小簇带 1 张污染标签=覆盖率 100%,满屏一人组都叫程玉婷/杨如
+    /// (146 命名中断留下的错标签);有最低票数后小簇一律「未命名」
+    private func personNameCoverage(_ n: Int, _ total: Int) -> Bool { n >= 3 && n * 2 >= total }
 
     var body: some View {
         NavigationStack {
@@ -215,7 +219,7 @@ struct PeopleView: View {
                 let scored = DuplicateScanner.mergeGroups(
                     raw, flat: data.flat, dim: data.dim,
                     linkThreshold: link, expelFloor: expelFloor,
-                    singletons: singletons) { done, total in
+                    singletons: singletons, coherenceFloor: coherenceFloor) { done, total in
                     Task { @MainActor in progress = (done, max(total, 1)) }
                 }
 
@@ -326,6 +330,7 @@ struct ClusterDetailView: View {
 
     @EnvironmentObject var app: AppModel
     @State private var assets: [String: PHAsset] = [:]
+    @State private var naming = false            // 146 真机验证过的纯 Bool 弹出方式
     @State private var namingMember: Int?
     @State private var nameText = ""
     @State private var applying = false
@@ -345,15 +350,17 @@ struct ClusterDetailView: View {
                             .foregroundStyle(.secondary)
                         ForEach(members, id: \.self) { mi in
                             Button {
+                                guard !applying else { return }
                                 nameText = personNames[mi] ?? ""
                                 namingMember = mi
+                                naming = true
                             } label: {
                                 HStack {
                                     Image(systemName: "person.crop.circle")
                                     Text(displayName(mi))
                                         .fontWeight(personNames[mi] != nil ? .semibold : .regular)
                                     Spacer()
-                                    Text(applying && namingMember == mi ? "命名中…" : "命名")
+                                    Text(applying && namingMember == mi ? "命名中…" : "命名 >")
                                         .font(.footnote)
                                         .foregroundStyle(.blue)
                                 }
@@ -374,12 +381,24 @@ struct ClusterDetailView: View {
         }
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
-        .alert("命名这个人物", isPresented: Binding(
-            get: { namingMember != nil },
-            set: { if !$0 { namingMember = nil } })) {
+        .toolbar {
+            // 单人组的命名主入口放工具栏(146 同款位置,醒目);
+            // 组合组从「本组人物」逐行命名
+            if members.count == 1 {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(applying ? "命名中…" : "命名") {
+                        nameText = personNames[members[0]] ?? ""
+                        namingMember = members[0]
+                        naming = true
+                    }
+                    .disabled(applying)
+                }
+            }
+        }
+        .alert("命名这个人物", isPresented: $naming) {
             TextField("人名,如 张三", text: $nameText)
             Button("命名") { applyName() }
-            Button("取消", role: .cancel) { namingMember = nil }
+            Button("取消", role: .cancel) {}
         } message: {
             let n = namingMember.flatMap { personRefs[$0] }?.count ?? 0
             Text("给该人物出现的全部 \(n) 张照片(含其他合照)写入同名标签;搜索该名字即可全部找到")
