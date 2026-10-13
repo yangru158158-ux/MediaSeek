@@ -53,6 +53,8 @@ struct SettingsView: View {
                     // 视频处理记账一并清掉,否则黑屏视频/抽帧数快照会挡住重建后的重索引
                     UserDefaults.standard.removeObject(forKey: "vidFrameCfg")
                     UserDefaults.standard.removeObject(forKey: "vidAllBlack")
+                    UserDefaults.standard.removeObject(forKey: "vidAssetFail")
+                    UserDefaults.standard.removeObject(forKey: "vidAssetFailCnt")
                 }
                 Button("取消", role: .cancel) {}
             }
@@ -196,6 +198,11 @@ struct SettingsView: View {
                 lines.append(contentsOf: sorted.suffix(3).map(line))
                 let missing = assets.filter { (stats.perVideo[$0.localIdentifier] ?? 0) == 0 }
                 lines.append("未索引视频:\(missing.count) 个")
+                // 读取失败黑名单(iCloud 未下载/损坏,连续失败 3 次跳过;全量重建可重试)
+                let failed = UserDefaults.standard.stringArray(forKey: "vidAssetFail") ?? []
+                if !failed.isEmpty {
+                    lines.append("读取失败已跳过:\(failed.count) 个(未下载/损坏;下载到本机后「全量重建索引」可恢复)")
+                }
                 if let oldest = missing.map({ ($0.creationDate ?? .distantPast, $0) }).min(by: { $0.0 < $1.0 }) {
                     let d = DateFormatter.localizedString(from: oldest.0, dateStyle: .medium, timeStyle: .none)
                     lines.append("最旧未索引:\(d)")

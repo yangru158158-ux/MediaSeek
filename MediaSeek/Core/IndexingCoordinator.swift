@@ -183,6 +183,11 @@ final class IndexingCoordinator: ObservableObject {
 
     private func syncPhotoLibrary(forceAll: Bool = false, errors: FirstErrorBox) async throws {
         let fetch = photo.fetchAllAssets()
+        if forceAll {
+            // 全量重建 = 给失败黑名单一次重试机会(iCloud 重新下载/网络恢复后)
+            UserDefaults.standard.removeObject(forKey: "vidAssetFail")
+            UserDefaults.standard.removeObject(forKey: "vidAssetFailCnt")
+        }
         // 图像模型更换检测(so400m 等在线升级):模型加载时记下当前维度
         // (ModelManager 写 clipModelDim),与库内向量维度不一致 = 换过嵌入模型,
         // 旧向量点积无意义——清空 clip 向量(OCR/标签/人脸保留),本轮全量重嵌
@@ -231,6 +236,10 @@ final class IndexingCoordinator: ObservableObject {
         let recentlyDeleted = Self.recentlyDeletedIDs()
         // 黑屏录音类视频记账(全帧黑、无可索引内容):跳过抽帧,不再每轮同步反复扫
         let fullyBlack = Set(UserDefaults.standard.stringArray(forKey: "vidAllBlack") ?? [])
+        // 视频读取/处理连续失败记账(3 次拉黑):iCloud 未下载或损坏的视频每轮同步
+        // 都会被当新视频重做一遍且无声空转(132 用户实测 7 个视频每轮都索引);
+        // 拉黑后跳过,「全量重建索引」会清空黑名单重试(下载/网络恢复后可恢复)
+        let assetFailed = Set(UserDefaults.standard.stringArray(forKey: "vidAssetFail") ?? [])
 
         var libIDs = Set<String>()
         var newPhotos: [PHAsset] = []
@@ -241,6 +250,8 @@ final class IndexingCoordinator: ObservableObject {
             guard recentlyDeleted.contains(asset.localIdentifier) == false else { return }
             // 全黑视频:不进 libIDs(遗留行顺带清除),也不重新处理
             guard !fullyBlack.contains(asset.localIdentifier) else { return }
+            // 连续失败已拉黑的视频:同全黑视频处理,不再每轮空转
+            guard !assetFailed.contains(asset.localIdentifier) else { return }
             libIDs.insert(asset.localIdentifier)
             if known.contains(asset.localIdentifier) {
                 // 已索引但缺人脸数据 → 人脸补全队列(轻量)
@@ -452,8 +463,17 @@ final class IndexingCoordinator: ObservableObject {
             let store = self.store
             let photo = self.photo
             let frameCount = videoFramesPerVideo
+            let refKey = asset.localIdentifier
+            guard let avAsset = await photo.avAsset(for: asset) else {
+                // iCloud 未下载/损坏的视频读不出 AVAsset:原先这里无声 return,
+                // 不报错不记账不写行 → 每轮同步都被当新视频重做(132 实测 7 个视频
+                // 每轮空转)。改为可见失败 + 计数拉黑
+                errors.set("视频读取失败(可能未下载到本机或已损坏)")
+                errorCount += 1
+                markVideoAssetFail(refKey)
+                return
+            }
             try await Task.detached(priority: .utility) {
-                guard let avAsset = await photo.avAsset(for: asset) else { return }
                 // 先清旧帧再采新帧:重索引(如抽帧数变更)后不残留旧帧行
                 try? store.removeFrames(refKey: asset.localIdentifier)
                 // 2048px 抽帧(帧 OCR 需要照片同级的分辨率),嵌入/标签/颜色用 320 降采样
@@ -497,6 +517,11 @@ final class IndexingCoordinator: ObservableObject {
                         var cfg = (UserDefaults.standard.dictionary(forKey: "vidFrameCfg") as? [String: Int]) ?? [:]
                         cfg[asset.localIdentifier] = frameCount
                         UserDefaults.standard.set(cfg, forKey: "vidFrameCfg")
+                        // 成功落库清失败计数(此前几次失败可能是网络/时机问题)
+                        var cnt = (UserDefaults.standard.dictionary(forKey: "vidAssetFailCnt") as? [String: Int]) ?? [:]
+                        if cnt.removeValue(forKey: asset.localIdentifier) != nil {
+                            UserDefaults.standard.set(cnt, forKey: "vidAssetFailCnt")
+                        }
                     } else {
                         var set = Set(UserDefaults.standard.stringArray(forKey: "vidAllBlack") ?? [])
                         set.insert(asset.localIdentifier)
@@ -509,6 +534,20 @@ final class IndexingCoordinator: ObservableObject {
         } catch {
             errors.set("视频处理失败:\(error)")
             errorCount += 1
+            markVideoAssetFail(asset.localIdentifier)
+        }
+    }
+
+    /// 视频读取/处理失败计数:同一视频连续失败 3 次进黑名单 vidAssetFail,
+    /// 增量同步不再重试(避免每轮空转);成功处理会在 embedVideo 落库时清零计数
+    private func markVideoAssetFail(_ refKey: String) {
+        var cnt = (UserDefaults.standard.dictionary(forKey: "vidAssetFailCnt") as? [String: Int]) ?? [:]
+        cnt[refKey, default: 0] += 1
+        UserDefaults.standard.set(cnt, forKey: "vidAssetFailCnt")
+        if cnt[refKey] ?? 0 >= 3 {
+            var set = Set(UserDefaults.standard.stringArray(forKey: "vidAssetFail") ?? [])
+            set.insert(refKey)
+            UserDefaults.standard.set(Array(set), forKey: "vidAssetFail")
         }
     }
 
