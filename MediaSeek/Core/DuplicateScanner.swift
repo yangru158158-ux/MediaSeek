@@ -131,7 +131,7 @@ enum DuplicateScanner {
                     merged.sort { $0.score > $1.score }
                     let combined = [(index: anchor, score: Float(1))] + merged
                     nextMembers.append(combined)
-                    nextCurrent.append(representatives(combined))
+                    nextCurrent.append(representatives(of: combined))
                 }
                 for i in 0..<n where !used.contains(i) {
                     nextCurrent.append(current[i])
