@@ -55,7 +55,7 @@ struct FaceAlignTest {
                 for x in 0..<w {
                     let i = (y * w + x) * 4
                     let v: Double
-                    if y < 72 { v = 250 }   # 白条须覆盖 row5 的采样点(源 y≈69)
+                    if y < 72 { v = 250 }   // 白条须覆盖 row5 的采样点(源 y≈69)
                     else if y >= 240 { v = 5 }
                     else { v = 128 + 60 * sin(Double(x) * .pi / 40 + seed) }
                     let c = UInt8(max(0, min(255, v)))
