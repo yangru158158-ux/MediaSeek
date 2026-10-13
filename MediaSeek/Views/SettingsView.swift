@@ -55,6 +55,10 @@ struct SettingsView: View {
                     UserDefaults.standard.removeObject(forKey: "vidAllBlack")
                     UserDefaults.standard.removeObject(forKey: "vidAssetFail")
                     UserDefaults.standard.removeObject(forKey: "vidAssetFailCnt")
+                    // 语音转写记账:库清了转写文本也没了,记账必须一起清否则永不重转
+                    UserDefaults.standard.removeObject(forKey: "speechDone")
+                    UserDefaults.standard.removeObject(forKey: "speechFail")
+                    UserDefaults.standard.removeObject(forKey: "speechFailCnt")
                 }
                 Button("取消", role: .cancel) {}
             }
@@ -239,6 +243,18 @@ struct SettingsView: View {
         _ = store
     }
 
+    /// 语音转写开关下方的状态说明:权限被拒/机型不支持时给出行动指引,
+    /// 正常态讲清代价与检索入口(文字:)
+    private var speechHint: String {
+        if UserDefaults.standard.bool(forKey: "speechDenied") {
+            return "语音识别权限被拒:到 系统设置→智搜 打开「语音识别」后,下次同步自动生效"
+        }
+        if UserDefaults.standard.bool(forKey: "speechUnsupported") {
+            return "本机不支持中文端侧语音识别,该功能已停用"
+        }
+        return "开启后点「同步新增内容」,把视频里说的话转成本机文字(≈音频时长,耗电,建议插电;可中断续跑)。转写文本可被「文字:」搜索;关闭开关不影响已转写内容"
+    }
+
     private var tuningSection: some View {
         Section("索引选项") {
             Toggle(isOn: Binding(
@@ -247,6 +263,15 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("中文语义标签")
                     Text("增强中文物体查询,但索引速度慢 2-3 倍")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            Toggle(isOn: Binding(
+                get: { UserDefaults.standard.bool(forKey: "speechEnabled") },
+                set: { UserDefaults.standard.set($0, forKey: "speechEnabled") })) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("视频语音转文字")
+                    Text(speechHint)
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }

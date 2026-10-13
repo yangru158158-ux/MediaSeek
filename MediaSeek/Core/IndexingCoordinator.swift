@@ -12,7 +12,7 @@ import UniformTypeIdentifiers
 @MainActor
 final class IndexingCoordinator: ObservableObject {
     enum Phase: Equatable {
-        case idle, waitingModel, photos, videos, faces, files, done, failed(String)
+        case idle, waitingModel, photos, videos, faces, files, speech, done, failed(String)
     }
 
     @Published private(set) var phase: Phase = .idle
@@ -83,6 +83,7 @@ final class IndexingCoordinator: ObservableObject {
         case .videos: return "正在索引视频"
         case .faces: return "正在补人脸数据"
         case .files: return "正在索引文件"
+        case .speech: return "正在转写视频语音"
         case .done: return "索引完成"
         case .failed(let m): return "失败:\(m)"
         }
@@ -150,6 +151,8 @@ final class IndexingCoordinator: ObservableObject {
             // 文件量级小(几十个)先跑完,用户立刻能看到「已索引」;相册大批量随后
             try await syncImportedFiles()
             try await syncPhotoLibrary(forceAll: full, errors: errors)
+            // 语音转写(开关制)放最尾:核心索引不被数小时的转写挡道
+            try await syncSpeechTranscripts(errors: errors)
             await prebuildLabelVocab()   // 重建完成后预建路由词表,首次搜索不再有一次性延迟
 
             lastSyncAt = Date()
@@ -187,6 +190,10 @@ final class IndexingCoordinator: ObservableObject {
             // 全量重建 = 给失败黑名单一次重试机会(iCloud 重新下载/网络恢复后)
             UserDefaults.standard.removeObject(forKey: "vidAssetFail")
             UserDefaults.standard.removeObject(forKey: "vidAssetFailCnt")
+            // 语音转写:只清失败记账,不清 speechDone(已转写文本独立有效,
+            // 全量重建把几小时转写重跑一遍纯属浪费)
+            UserDefaults.standard.removeObject(forKey: "speechFail")
+            UserDefaults.standard.removeObject(forKey: "speechFailCnt")
         }
         // 图像模型更换检测(so400m 等在线升级):模型加载时记下当前维度
         // (ModelManager 写 clipModelDim),与库内向量维度不一致 = 换过嵌入模型,
@@ -364,6 +371,101 @@ final class IndexingCoordinator: ObservableObject {
         if let abortReason { throw MSError(abortReason) }
         try Task.checkCancellation()   // 「停止」从这里立即生效
         processed = processedLocal
+    }
+
+    // MARK: - 视频语音转写(设置开关,默认关)
+
+    /// 开关开启时,同步收尾把还没转写过的视频逐部抽音轨做端侧识别,
+    /// 文本追加进 ocr_text(文字: 精确命中)。耗时≈音频时长,可中断可续;
+    /// 无语音/转写为空也记账 speechDone(与 OCR "" 占位同理,防每轮重跑)。
+    /// 失败连续 3 次进 speechFail 黑名单(与视频资产黑名单同范式),
+    /// 「全量重建」清黑名单给重试机会;连续 10 部失败视为系统性故障,本轮放弃
+    private func syncSpeechTranscripts(errors: FirstErrorBox) async throws {
+        guard UserDefaults.standard.bool(forKey: "speechEnabled") else { return }
+
+        let done = Set(UserDefaults.standard.stringArray(forKey: "speechDone") ?? [])
+        let failed = Set(UserDefaults.standard.stringArray(forKey: "speechFail") ?? [])
+        let rd = Self.recentlyDeletedIDs()
+        let black = Set(UserDefaults.standard.stringArray(forKey: "vidAllBlack") ?? [])
+        let assetFailed = Set(UserDefaults.standard.stringArray(forKey: "vidAssetFail") ?? [])
+        var pending: [PHAsset] = []
+        let fetch = PHAsset.fetchAssets(with: .video, options: nil)
+        fetch.enumerateObjects { asset, _, _ in
+            let id = asset.localIdentifier
+            guard !rd.contains(id), !black.contains(id), !assetFailed.contains(id),
+                  !done.contains(id), !failed.contains(id) else { return }
+            pending.append(asset)
+        }
+        guard !pending.isEmpty else { return }
+        // 有活干才碰权限:语音权限弹窗只在首轮转写前出现一次
+        let authorized = await SpeechTranscriber.requestAuthorization()
+        UserDefaults.standard.set(!authorized, forKey: "speechDenied")
+        guard authorized else { return }
+        let supported = SpeechTranscriber.onDeviceSupported()
+        UserDefaults.standard.set(!supported, forKey: "speechUnsupported")
+        guard supported else { return }
+
+        total += pending.count
+        phase = .speech
+        let store = self.store
+        let photo = self.photo
+        var consecutiveFails = 0
+        for asset in pending {
+            try Task.checkCancellation()
+            let ok = await Self.speechWork(asset: asset, photo: photo, store: store, errors: errors)
+            processedLocal += 1
+            processed = processedLocal
+            if ok {
+                consecutiveFails = 0
+            } else {
+                errorCount += 1
+                if firstErrorMessage == nil { firstErrorMessage = errors.get() }
+                consecutiveFails += 1
+                if consecutiveFails >= 10 {
+                    errors.set("语音转写连续失败已停止,其余视频下轮同步重试")
+                    break
+                }
+            }
+        }
+    }
+
+    /// 单部视频转写。成功(含无语音)返回 true 并记账;失败返回 false 记失败计数
+    nonisolated private static func speechWork(
+        asset: PHAsset, photo: PhotoLibraryService, store: VectorStore,
+        errors: FirstErrorBox) async -> Bool {
+        let id = asset.localIdentifier
+        do {
+            guard let avAsset = await photo.avAsset(for: asset) else {
+                errors.set("视频读取失败(可能未下载到本机):\(id)")
+                markSpeechFail(id)
+                return false
+            }
+            try Task.checkCancellation()
+            let text = try await SpeechTranscriber.transcribeVideo(avAsset: avAsset)
+            try store.appendSpeechText(refKey: id, text: text)
+            var done = Set(UserDefaults.standard.stringArray(forKey: "speechDone") ?? [])
+            done.insert(id)
+            UserDefaults.standard.set(Array(done), forKey: "speechDone")
+            return true
+        } catch is CancellationError {
+            return true   // 用户停止:不记账不算错,下轮同步从未转写的继续
+        } catch {
+            errors.set("语音转写失败:\(error.localizedDescription)")
+            markSpeechFail(id)
+            return false
+        }
+    }
+
+    /// 语音转写失败计数:同一视频连续失败 3 次进 speechFail 黑名单不再重试
+    nonisolated private static func markSpeechFail(_ refKey: String) {
+        var cnt = (UserDefaults.standard.dictionary(forKey: "speechFailCnt") as? [String: Int]) ?? [:]
+        cnt[refKey, default: 0] += 1
+        UserDefaults.standard.set(cnt, forKey: "speechFailCnt")
+        if cnt[refKey] ?? 0 >= 3 {
+            var set = Set(UserDefaults.standard.stringArray(forKey: "speechFail") ?? [])
+            set.insert(refKey)
+            UserDefaults.standard.set(Array(set), forKey: "speechFail")
+        }
     }
 
     /// 「最近删除」智能相册的资产 ID。系统未公开对应枚举,

@@ -63,6 +63,7 @@ targets:
           - UIInterfaceOrientationLandscapeRight
         ITSAppUsesNonExemptEncryption: false
         NSPhotoLibraryUsageDescription: 「智搜」需要读取你的照片与视频,在本机建立索引以支持语义搜索。所有处理均在设备本地完成,数据不会上传。
+        NSSpeechRecognitionUsageDescription: 「智搜」在开启「视频语音转文字」后,用本机语音识别把视频里的话转成文字以支持搜索。音频不会上传,识别全部在本机完成。
 
 schemes:
   MediaSeek:

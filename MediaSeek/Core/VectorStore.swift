@@ -620,6 +620,29 @@ final class VectorStore {
         guard sqlite3_step(stmt) == SQLITE_DONE else { throw MSError("OCR 保存失败") }
     } }
 
+    /// 视频语音转写追加进该 ref 的 OCR 原文(〔语音〕独立段落):
+    /// 帧 OCR 行已存在则追加不覆盖;总长封顶防极端长视频撑爆检索。
+    /// 无文字视频已有 "" 占位行,追加后占位被替换,检索行为不变
+    func appendSpeechText(refKey: String, text: String) throws { try serialized {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        var existing = ""
+        let rd = try prepare("SELECT text FROM ocr_text WHERE ref_key = ?")
+        sqlite3_bind_text(rd, 1, refKey, -1, Self.transient)
+        if sqlite3_step(rd) == SQLITE_ROW, let c = sqlite3_column_text(rd, 0) {
+            existing = String(cString: c)
+        }
+        sqlite3_finalize(rd)
+        let merged = existing.isEmpty
+            ? "〔语音〕\(trimmed)"
+            : existing + "\n〔语音〕\(trimmed)"
+        let stmt = try prepare("INSERT OR REPLACE INTO ocr_text(ref_key, text) VALUES(?,?)")
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, refKey, -1, Self.transient)
+        sqlite3_bind_text(stmt, 2, String(merged.prefix(30_000)), -1, Self.transient)
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw MSError("语音文本保存失败") }
+    } }
+
     /// OCR 文字精确检索(子串匹配,支持中文/数字/编号)
     func searchOCR(query: String) throws -> [(refKey: String, text: String)] { try serialized {
         guard let db, !query.isEmpty else { return [] }
