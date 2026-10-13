@@ -150,7 +150,7 @@ struct PeopleView: View {
 
     private func row(_ g: ComboGroup) -> some View {
         // 缩略图取组内相似度最高的一张(最标准的正面脸)
-        let bestIdx = g.scores.indices.max(by: g.scores[$0] < g.scores[$1]) ?? 0
+        let bestIdx = g.scores.indices.max(by: { g.scores[$0] < g.scores[$1] }) ?? 0
         let thumbRef = g.refs.indices.contains(bestIdx) ? g.refs[bestIdx] : g.refs.first
         let weakest = g.scores.filter { $0 < 0.999 }.min()
         return NavigationLink {
