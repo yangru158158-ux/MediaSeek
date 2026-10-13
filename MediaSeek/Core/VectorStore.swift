@@ -611,6 +611,14 @@ final class VectorStore {
         sqlite3_step(stmt)
     } }
 
+    /// 清空全部人名标签(人物归组「取消命名」用):标签行连向量一起删。
+    /// 聚类只看 face 向量,清标签不影响分组结构,组名回到「未命名」
+    func deleteAllUserTags() throws { try serialized {
+        let stmt = try prepare("DELETE FROM items WHERE kind = 'userTag'")
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_step(stmt)
+    } }
+
     /// 保存照片的 OCR 文字(每照片一行,重复覆盖)
     func saveOCR(refKey: String, text: String) throws { try serialized {
         let stmt = try prepare("INSERT OR REPLACE INTO ocr_text(ref_key, text) VALUES(?,?)")

@@ -189,7 +189,11 @@ enum DuplicateScanner {
             }
 
             // 簇内内聚守卫:假人物簇整簇解散(见 coherenceFloor 文档)。
-            // 每簇质心 = 成员向量和归一化;成员对质心的平均相似度过低即解散
+            // 每簇质心 = 成员向量和归一化;双判据:均值 <floor 或中位数
+            // <floor+0.10 都解散。149 只用均值没杀掉打印脸巨簇(它被 ≥0.60
+            // 扫描阈值预凝过,均值恰好压线)——中位数抓「半数成员都不像
+            // 平均脸」的拼凑簇,对长尾不敏感,真人物(成员紧密围绕平均脸)
+            // 中位通常 0.7 上下,分得开
             if coherenceFloor > 0 {
                 out = out.filter { g in
                     var c = [Float](repeating: 0, count: dim)
@@ -197,13 +201,17 @@ enum DuplicateScanner {
                     var norm: Float = 0
                     vDSP_dotpr(c, 1, c, 1, &norm, vDSP_Length(dim))
                     norm = max(norm.squareRoot(), 1e-8)
-                    var total: Float = 0
+                    var sims: [Float] = []
+                    sims.reserveCapacity(g.count)
                     for m in g {
                         var d: Float = 0
                         vDSP_dotpr(c, 1, base + m.index * dim, 1, &d, vDSP_Length(dim))
-                        total += d / norm
+                        sims.append(d / norm)
                     }
-                    return total / Float(g.count) >= coherenceFloor
+                    sims.sort()
+                    let mean = sims.reduce(0, +) / Float(sims.count)
+                    let median = sims[sims.count / 2]
+                    return mean >= coherenceFloor && median >= coherenceFloor + 0.10
                 }
             }
         }

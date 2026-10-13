@@ -30,6 +30,8 @@ struct PeopleView: View {
     @State private var faceTotal = 0
     @State private var totalPersons = 0
     @State private var unknownCount = 0
+    @State private var showingSmall = false
+    @State private var confirmClearTags = false
 
     // 阈值(与锚的余弦,r50 ArcFace 尺度)。CI 真实照片实测(3 人各 3 张含油画
     // 肖像/不同年代):同人最低 0.484(油画×照片)、跨人最高 0.162——真实安全
@@ -79,6 +81,13 @@ struct PeopleView: View {
             .navigationTitle("人物归组")
             .navigationBarTitleDisplayMode(.inline)
             .onAppear { faceTotal = app.store.faceStats().faces }
+            .confirmationDialog("确定清除全部人名标签?", isPresented: $confirmClearTags,
+                                titleVisibility: .visible) {
+                Button("清除全部人名标签", role: .destructive) { clearTags() }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("删除现有的人物命名(分组结构不受影响,组名全部变回「未命名」);确认单人分组无误后再重新命名")
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button("关闭") { dismiss() }
@@ -120,6 +129,11 @@ struct PeopleView: View {
                 }
             }
             .disabled(scanning || faceTotal < 2 || app.models.state(for: .face) != .ready)
+            Button(role: .destructive) {
+                confirmClearTags = true
+            } label: {
+                Label("清除全部人名标签", systemImage: "tag.slash")
+            }
             Text("先聚类确定总共几个人,再按每张照片「主角是哪几个人」精确归组:abc 三个人至多 a、b、c、a×b、a×c、b×c、a×b×c 七组;合影只出现在组合组,不再算进单人组。命名后搜索名字即命中。")
                 .font(.caption2).foregroundStyle(.secondary)
         }
@@ -129,17 +143,37 @@ struct PeopleView: View {
 
     private var resultsSection: some View {
         Section {
-            ForEach(groups) { g in
+            ForEach(majorGroups) { g in
                 row(g)
+            }
+            if !minorGroups.isEmpty {
+                Button {
+                    showingSmall.toggle()
+                } label: {
+                    Label(showingSmall ? "收起更小的组"
+                                       : "还有 \(minorGroups.count) 个不足 \(foldThreshold) 张的小组",
+                          systemImage: showingSmall ? "chevron.up" : "chevron.down")
+                        .font(.subheadline)
+                }
+            }
+            if showingSmall {
+                ForEach(minorGroups) { g in
+                    row(g)
+                }
             }
         } header: {
             Text("人物 \(totalPersons) 人 · \(groups.count) 组")
         } footer: {
             Text(unknownCount > 0
-                 ? "主角只出现一两次的路人不参与分组;全部主角都无法识别的 \(unknownCount) 张在「未识别人物」。点开组可为其中任一人物命名。"
-                 : "主角只出现一两次的路人不参与分组。点开组可为其中任一人物命名,命名后搜索名字即命中。")
+                 ? "主角只出现一两次的路人不参与分组;全部主角都无法识别的 \(unknownCount) 张在「未识别人物」。不足 \(foldThreshold) 张的组默认折叠。命名后搜索名字即命中。"
+                 : "主角只出现一两次的路人不参与分组。不足 \(foldThreshold) 张的组默认折叠。点开组可为其中任一人物命名,命名后搜索名字即命中。")
         }
     }
+
+    /// 少于 10 张的组默认折叠隐藏(用户指定),主列表只看大组
+    private let foldThreshold = 10
+    private var majorGroups: [ComboGroup] { groups.filter { $0.refs.count >= foldThreshold } }
+    private var minorGroups: [ComboGroup] { groups.filter { $0.refs.count < foldThreshold } }
 
     private func personDisplay(_ ci: Int) -> String {
         let n = personNames[ci] ?? ""
@@ -188,6 +222,18 @@ struct PeopleView: View {
     }
 
     // MARK: - 扫描
+
+    /// 清除全部人名标签(取消命名):聚类只看 face 向量,组结构不变,
+    /// 本地组名清空即回到「未命名」;重新归组也不受影响
+    private func clearTags() {
+        do {
+            try app.store.deleteAllUserTags()
+            personNames = [:]
+            app.notify("已清除全部人名标签;确认单人分组无误后,再逐组重新命名")
+        } catch {
+            app.fail(error)
+        }
+    }
 
     private func start() {
         guard !scanning else { return }
@@ -257,11 +303,8 @@ struct PeopleView: View {
                 }
                 var ordered: [(members: [Int], refs: [String], scores: [Float])] =
                     comboMap.map { (Array($0.key).sorted(), $0.value.refs, $0.value.scores) }
-                // 单人组在前(大→小),组合组按人数升序、张数降序;未识别垫底
-                ordered.sort {
-                    if $0.members.count != $1.members.count { return $0.members.count < $1.members.count }
-                    return $0.refs.count > $1.refs.count
-                }
+                // 按组内照片数降序(用户指定);未识别组垫底
+                ordered.sort { $0.refs.count > $1.refs.count }
                 if !unknownRefs.isEmpty {
                     ordered.append(([], unknownRefs, unknownScores))
                 }

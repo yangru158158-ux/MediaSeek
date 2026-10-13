@@ -7,7 +7,12 @@ import Foundation
 ///      命中对应英文标签(consumer_electronics),走标签精确通道。
 /// 未收录的标签显示英文原文,搜索仍可走 SigLIP 多语言语义通道。
 enum LabelZh {
-    static let zh: [String: String] = [
+    /// 全量标签→中文:手工精选表(base)优先,官方 taxonomy 全量补充表
+    /// (LabelZhExtra)兜底——「标签词典」里不再有无中文的「—」项;
+    /// 中文反查表覆盖全部条目,词典中文可直接作查询词走标签精确通道
+    static let zh: [String: String] = base.merging(LabelZhExtra.table) { a, _ in a }
+
+    private static let base: [String: String] = [
         // 截图首屏高频(用户库实测 top):document/people/screenshot/…
         "document": "文档", "people": "人物", "screenshot": "屏幕截图",
         "adult": "成年人", "structure": "建筑结构", "outdoor": "户外",
