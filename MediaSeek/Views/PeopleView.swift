@@ -12,6 +12,7 @@ struct PeopleView: View {
     @State private var scanning = false
     @State private var progress: (done: Int, total: Int)?
     @State private var clusters: [[String]] = []     // 每组 = 去重后的照片 refKey
+    @State private var clusterScores: [[Float]] = [] // 与 clusters 对齐:成员与组锚的相似度(锚=1)
     @State private var groupNames: [String] = []     // 组的现有名字(成员标签众数,未命名时空),与 clusters 对齐
     @State private var assets: [String: PHAsset] = [:]
     @State private var selection = Set<Int>()
@@ -20,7 +21,9 @@ struct PeopleView: View {
     @State private var singletonCount = 0
     @State private var totalGroups = 0
 
-    private let thresholds: [String: Float] = ["exact": 0.55, "balanced": 0.45, "loose": 0.32]
+    // 阈值(与锚的余弦):135 用户实测大杂烩组后收紧——MobileFaceNet 同人清晰照
+    // 一般 ≥0.55,模糊小脸/证件翻拍质量差会把分数压到跨人区间,宁拆勿合
+    private let thresholds: [String: Float] = ["exact": 0.60, "balanced": 0.50, "loose": 0.40]
 
     var body: some View {
         NavigationStack {
@@ -126,8 +129,13 @@ struct PeopleView: View {
         let refs = clusters[i]
         let named = groupNames.indices.contains(i) && !groupNames[i].isEmpty
         let title = named ? groupNames[i] : "未命名"
+        // 组内最弱相似度(去掉锚=1 后的最小值):链式聚类的最弱连接,低=组可疑
+        let weakest = clusterScores.indices.contains(i)
+            ? clusterScores[i].dropFirst().min() : nil
         return NavigationLink {
-            ClusterDetailView(refs: refs, existingName: named ? groupNames[i] : "")
+            ClusterDetailView(refs: refs,
+                              existingName: named ? groupNames[i] : "",
+                              scores: clusterScores.indices.contains(i) ? clusterScores[i] : [])
         } label: {
             HStack(spacing: 12) {
                 if mergeMode {
@@ -149,7 +157,8 @@ struct PeopleView: View {
                         .font(.subheadline)
                         .fontWeight(named ? .semibold : .regular)
                         .foregroundStyle(named ? .primary : .secondary)
-                    Text("\(refs.count) 张照片").font(.caption2).foregroundStyle(.secondary)
+                    Text("\(refs.count) 张照片\(weakest.map { String(format: " · 最弱 %.0f%%", $0 * 100) } ?? "")")
+                        .font(.caption2).foregroundStyle(.secondary)
                 }
                 Spacer()
                 Image(systemName: "chevron.right").font(.caption).foregroundStyle(.tertiary)
@@ -167,13 +176,21 @@ struct PeopleView: View {
             selection.removeAll()
         } else if selection.count >= 2 {
             var merged: [String] = []
+            var mergedSc: [Float] = []
             var seen = Set<String>()
             for i in selection.sorted() {
-                for r in clusters[i] where seen.insert(r).inserted { merged.append(r) }
+                guard clusters.indices.contains(i) else { continue }
+                let sc = clusterScores.indices.contains(i) ? clusterScores[i] : []
+                for (k, r) in clusters[i].enumerated() where seen.insert(r).inserted {
+                    merged.append(r)
+                    mergedSc.append(sc.indices.contains(k) ? sc[k] : 0)
+                }
             }
             let keep = clusters.indices.filter { !selection.contains($0) }
             let keepNames = keep.map { groupNames.indices.contains($0) ? groupNames[$0] : "" }
+            let keepScores = keep.map { clusterScores.indices.contains($0) ? clusterScores[$0] : [] }
             clusters = [merged] + keep.map { clusters[$0] }
+            clusterScores = [mergedSc] + keepScores
             groupNames = [""] + keepNames
             totalGroups -= selection.count - 1
             selection.removeAll()
@@ -193,23 +210,29 @@ struct PeopleView: View {
         Task.detached(priority: .userInitiated) {
             do {
                 let data = try store.allFaceVectors()
-                let idxGroups = DuplicateScanner.scan(
+                let scored = DuplicateScanner.scan(
                     keys: data.keys, flat: data.flat, dim: data.dim, threshold: threshold) { done, total in
                     Task { @MainActor in progress = (done, total) }
-                }.map { $0.map(\.index) }
-                // 脸组 → 照片组(组内同照片多脸去重);按人数降序,封顶 300 组防长列表
+                }
+                // 脸组 → 照片组(组内同照片多脸去重,保留与锚相似度);按人数降序,封顶 300 组防长列表
                 var photoGroups: [[String]] = []
-                for g in idxGroups {
+                var groupScores: [[Float]] = []
+                for g in scored {
                     var refs: [String] = []
+                    var scs: [Float] = []
                     var seen = Set<String>()
-                    for i in g where seen.insert(data.refs[i]).inserted { refs.append(data.refs[i]) }
-                    if !refs.isEmpty { photoGroups.append(refs) }
+                    for m in g where seen.insert(data.refs[m.index]).inserted {
+                        refs.append(data.refs[m.index])
+                        scs.append(m.score)
+                    }
+                    if !refs.isEmpty { photoGroups.append(refs); groupScores.append(scs) }
                 }
                 photoGroups.sort { $0.count > $1.count }
-                let groupedFaces = idxGroups.reduce(0) { $0 + $1.count }
+                let groupedFaces = scored.reduce(0) { $0 + $1.count }
                 let singles = data.refs.count - groupedFaces
                 let totalGroups = photoGroups.count
                 let shown = Array(photoGroups.prefix(300))
+                let shownScores = Array(groupScores.prefix(300))
 
                 // 照片资产与组名(组名 = 成员已有用户标签的众数,二次扫描自动带名)
                 let shownRefs = shown.flatMap { $0 }
@@ -219,13 +242,19 @@ struct PeopleView: View {
                 let tagMap = store.userTagsForRefs(Array(Set(shownRefs)))
 
                 var outClusters: [[String]] = []
+                var outScores: [[Float]] = []
                 var outNames: [String] = []
-                for g in shown {
-                    let alive = g.filter { fetched[$0] != nil }
-                    guard !alive.isEmpty else { continue }
-                    outClusters.append(alive)
+                for (gi, g) in shown.enumerated() {
+                    // 资产已不在相册的成员剔除(分数按下标同步)
+                    let aliveIdx = g.indices.filter { fetched[g[$0]] != nil }
+                    guard !aliveIdx.isEmpty else { continue }
+                    outClusters.append(aliveIdx.map { g[$0] })
+                    let sc = shownScores.indices.contains(gi)
+                        ? aliveIdx.map { shownScores[gi].indices.contains($0) ? shownScores[gi][$0] : 0 }
+                        : aliveIdx.map { _ in 0 }
+                    outScores.append(sc)
                     var counts: [String: Int] = [:]
-                    for r in alive { for t in tagMap[r] ?? [] { counts[t, default: 0] += 1 } }
+                    for r in aliveIdx.map({ g[$0] }) { for t in tagMap[r] ?? [] { counts[t, default: 0] += 1 } }
                     outNames.append(counts.max { $0.value < $1.value }?.key ?? "")
                 }
 
@@ -233,6 +262,7 @@ struct PeopleView: View {
                     scanning = false
                     progress = nil
                     clusters = outClusters
+                    clusterScores = outScores
                     groupNames = outNames
                     assets = fetched
                     singletonCount = singles
@@ -252,6 +282,7 @@ struct PeopleView: View {
 /// 组详情:成员照片网格 + 命名(写用户标签,搜索人名即命中)
 struct ClusterDetailView: View {
     let refs: [String]
+    var scores: [Float] = []   // 成员与组锚的相似度(锚=1);角标展示,低于 ~50% 的可疑
     @EnvironmentObject var app: AppModel
 
     @State private var assets: [String: PHAsset] = [:]
@@ -265,15 +296,16 @@ struct ClusterDetailView: View {
                            GridItem(.flexible(), spacing: 6),
                            GridItem(.flexible(), spacing: 6)]
 
-    init(refs: [String], existingName: String) {
+    init(refs: [String], existingName: String, scores: [Float] = []) {
         self.refs = refs
+        self.scores = scores
         _currentName = State(initialValue: existingName)
     }
 
     var body: some View {
         ScrollView {
             LazyVGrid(columns: columns, spacing: 6) {
-                ForEach(refs, id: \.self) { ref in
+                ForEach(Array(refs.enumerated()), id: \.element) { i, ref in
                     Group {
                         if let a = assets[ref] {
                             AssetThumbView(asset: a, pixel: 240)
@@ -291,6 +323,21 @@ struct ClusterDetailView: View {
                         }
                     }
                     .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .overlay(alignment: .bottomLeading) {
+                        if i > 0, scores.indices.contains(i) {
+                            Text(String(format: "%.0f%%", scores[i] * 100))
+                                .font(.caption2).monospacedDigit()
+                                .padding(.horizontal, 4).padding(.vertical, 2)
+                                .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 4))
+                                .foregroundStyle(scores[i] >= 0.5 ? .white : .orange)
+                        } else if i == 0 {
+                            Text("基准")
+                                .font(.caption2)
+                                .padding(.horizontal, 4).padding(.vertical, 2)
+                                .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 4))
+                                .foregroundStyle(.white)
+                        }
+                    }
                 }
             }
             .padding(12)

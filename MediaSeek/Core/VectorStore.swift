@@ -83,6 +83,13 @@ final class VectorStore {
             try? exec("DELETE FROM face_done")
             UserDefaults.standard.set(true, forKey: "face_align_v2")
         }
+        // 一次性迁移 v3:135 版未按 x 排序眼位,若 Vision 的 leftEye 命名与图像
+        // 左右相反,对齐脸倒立、嵌入区分度崩塌(不同人+证件聚 128 张大组)——再清一次
+        if !UserDefaults.standard.bool(forKey: "face_align_v3") {
+            try? exec("DELETE FROM items WHERE kind = 'face'")
+            try? exec("DELETE FROM face_done")
+            UserDefaults.standard.set(true, forKey: "face_align_v3")
+        }
         // 「不相关」黑名单:term=归一化查询词,ref=被标记的结果(该查询下不再出现)
         try exec("CREATE TABLE IF NOT EXISTS query_block(term TEXT NOT NULL, ref_key TEXT NOT NULL, created_at REAL NOT NULL, UNIQUE(term, ref_key))")
         try exec("CREATE TABLE IF NOT EXISTS label_vocab(label TEXT PRIMARY KEY, vec BLOB)")

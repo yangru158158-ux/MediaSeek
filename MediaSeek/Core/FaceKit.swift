@@ -65,25 +65,34 @@ enum FaceKit {
     private static let eyeDistance: CGFloat = 35.2372
 
     /// 检测人脸(带关键点)。VNDetectFaceLandmarksRequest 自带检测步,
-    /// 结果同时含外接框与五官区域;一张合照最多取 maxFaces 张脸,防群照拖垮索引
-    static func detect(cg: CGImage, maxFaces: Int = 8) -> [VNFaceObservation] {
+    /// 结果同时含外接框与五官区域;一张合照最多取 maxFaces 张脸,防群照拖垮索引。
+    /// 小脸过滤:外接框宽 < minFacePx 像素的脸跳过——远景小人/文字纹理误检的
+    /// 对齐图分辨率不足,嵌入质量差只会把不同人挤成一组(135 用户实测大杂烩组)
+    static func detect(cg: CGImage, maxFaces: Int = 8, minFacePx: Int = 64) -> [VNFaceObservation] {
         let request = VNDetectFaceLandmarksRequest()
         let handler = VNImageRequestHandler(cgImage: cg, options: [:])
         do {
             try handler.perform([request])
-            return Array((request.results ?? []).prefix(maxFaces))
+            let minW = CGFloat(minFacePx) / CGFloat(max(cg.width, 1))
+            return Array((request.results ?? [])
+                .filter { $0.boundingBox.width >= minW }
+                .prefix(maxFaces))
         } catch {
             return []
         }
     }
 
     /// 按双眼做相似变换对齐(双眼转水平、瞳距缩放到模板值、眼中点平移到模板位)。
+    /// ⚠️ 眼位按 x 坐标排序,不信任 Vision 的 leftEye/rightEye 命名——该命名是
+    /// 「人自己的左右眼」还是「图像观察者左右」官方文档不明,拿反了会把脸
+    /// 旋转 180° 倒立,ArcFace 只认正立对齐脸、区分度崩塌(135 用户实测
+    /// 不同性别证件/文字截图/多人生活照聚成 128 张大杂烩组)。
     /// 无关键点时退化为外接框放大 40% 的中心方形。
     static func alignedFace(source: CGImage, observation: VNFaceObservation) -> CGImage? {
         if let lm = observation.landmarks,
            let le = centroid(lm.leftEye, imageSize: source),
            let re = centroid(lm.rightEye, imageSize: source) {
-            return aligned(source: source, leftEye: le, rightEye: re)
+            return aligned(source: source, leftEye: le, rightEye: re)   // aligned 内部按 x 排序,免疫命名歧义
         }
         let w = CGFloat(source.width), h = CGFloat(source.height)
         let bb = observation.boundingBox   // Vision 归一化坐标,原点左下
@@ -99,11 +108,15 @@ enum FaceKit {
 
     /// 纯几何对齐核心(CI 几何测试直接调用):双眼像素坐标(顶行原点 y 向下)
     /// → 112×112 模板位。逆映射:src = mid + R(θ)·((dst - eyeMid)/s),
-    /// s = 模板瞳距/实际瞳距,R 把输出水平基向量转到源图双眼方向
+    /// s = 模板瞳距/实际瞳距,R 把输出水平基向量转到源图双眼方向。
+    /// 眼位先按 x 排序:调用方(或 Vision 命名)把左右眼对调也不影响——
+    /// 图像上靠左的眼必须画到模板 x=38 侧,对调会把脸旋转 180° 倒立
     static func aligned(source: CGImage, leftEye le: CGPoint, rightEye re: CGPoint) -> CGImage? {
         guard let (sw, sh, buf) = rgbaBuffer(of: source) else { return nil }
-        let mid = CGPoint(x: (le.x + re.x) / 2, y: (le.y + re.y) / 2)
-        let dx = re.x - le.x, dy = re.y - le.y
+        let eyeL = le.x <= re.x ? le : re
+        let eyeR = le.x <= re.x ? re : le
+        let mid = CGPoint(x: (eyeL.x + eyeR.x) / 2, y: (eyeL.y + eyeR.y) / 2)
+        let dx = eyeR.x - eyeL.x, dy = eyeR.y - eyeL.y
         let dist = max(hypot(dx, dy), 1)
         let s = eyeDistance / dist
         let c = dx / dist, sn = dy / dist

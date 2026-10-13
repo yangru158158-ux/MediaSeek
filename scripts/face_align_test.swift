@@ -133,6 +133,18 @@ struct FaceAlignTest {
         let meanDiff = diff / Double(112 * 112)
         check("不同图案不塌缩", meanDiff > 15, String(format: "平均差=%.1f", meanDiff))
 
+        // ⑤ 眼位对调免疫:左右眼参数互换(Vision leftEye 命名歧义的场景),
+        // 输出应与正常传入一致(135 bug:对调把脸旋转 180° 倒立、嵌入区分度崩塌)
+        if let alSwap = FaceKit.aligned(source: imgA, leftEye: reA, rightEye: leA) {
+            let s = rgba(alSwap)
+            var swapDiff = 0.0
+            for i in 0..<(112 * 112) { swapDiff += abs(Double(a[i * 4]) - Double(s[i * 4])) }
+            let m = swapDiff / Double(112 * 112)
+            check("眼位对调免疫", m < 1.0, String(format: "平均差=%.2f", m))
+        } else {
+            check("眼位对调免疫", false, "对齐返回 nil")
+        }
+
         print(failed == 0 ? "== 全部通过 ==" : "== \(failed) 项失败 ==")
         exit(failed == 0 ? 0 : 1)
     }
