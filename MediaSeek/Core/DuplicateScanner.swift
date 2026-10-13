@@ -40,39 +40,40 @@ enum DuplicateScanner {
     /// 组间合并:贪心聚类「一锚定终身」会把同一人拆成多组(锚若是侧脸/油画,
     /// 正脸够不到阈值就另起一组,且组一旦成形永不复合)。
     ///
-    /// **三重防链式塌缩**(141 用户实测单连接版把 1047 组并成 119 组、
-    /// 首组 1900 张、组内最弱 -6% = 组里混进了完全不是一个人的脸):
-    /// ① **平均连接**而非单连接——两组相似度取「跨组成员对的平均」,不是
-    ///    「任意一对够像」;单连接下 A像B、B像C 就把 A C 串起来,一条链能把
-    ///    几百人连成一坨(链式塌缩,人脸库里尤其致命)。
-    /// ② **互为最佳**——每轮只合并「彼此都是对方最相似组」的一对,逐轮收敛;
-    ///    防止一个大组像磁铁一样把所有组吸走。
-    /// ③ **组内底线守卫**——合并后若跨组最低成员对低于 floor 就撤销本次合并,
-    ///    硬性保证组里不会出现互相完全不像的两张脸(-6% 这类不可能再出现)。
+    /// **组质心连接 + 垃圾剔除**(v3,校准模拟验证:15 子组 120 张的大人物全并
+    /// 一组、跨人零串组;141 单连接版会把 A B 经「模糊脸桥」串通成 79% 纯度
+    /// 巨组,142 平均连接版又保守到把大人物拆散——用户 142 实测同一人又分
+    /// 好几组,「照片特别多的人一组近 2000 张本来就可能是对的」):
+    /// ① 两组相似度 = **质心(全组向量均值)的余弦**——质心即「平均脸」,
+    ///    同人的各子组质心都逼近本人均值、必然相近;个别模糊/误检脸在几百张
+    ///    里被平均掉,拦不住正确合并(142 的教训:代表样本挑最低分几张,
+    ///    平均被最难看的样本拖低,大组正确合并全被卡死)。
+    /// ② 每轮按质心相似度**降序**贪心合并(最像的先并),逐轮收敛——不设
+    ///    「互为最佳」限制,大人物的十几个子组就是靠连续合并聚拢的。
+    /// ③ **垃圾剔除**——合并完成后,与组锚相似 < expelFloor 的成员移出组
+    ///    (成为单例):模糊/误检脸混进大组拉低「最弱」显示(141 的 -6%),
+    ///    该剔的是它们,而不是拦整个合并。
     ///
     /// - Parameters:
-    ///   - linkThreshold: 两组平均相似度达到该值才考虑合并
-    ///   - floor: 跨组最低成员对的下限,低于则拒绝合并
+    ///   - linkThreshold: 两组质心相似度达到该值才合并
+    ///   - expelFloor: 成员对组锚的相似度下限,低于则剔除
     static func mergeGroups(_ groups: [[(index: Int, score: Float)]],
-                            flat: [Float], dim: Int, linkThreshold: Float, floor: Float,
-                            maxRounds: Int = 12,
+                            flat: [Float], dim: Int, linkThreshold: Float, expelFloor: Float,
+                            maxRounds: Int = 15,
                             progress: (Int, Int) -> Void = { _, _ in }) -> [[(index: Int, score: Float)]] {
         guard groups.count > 1, dim > 0 else { return groups }
 
-        // 代表样本:锚 + 组内最低分几张(边缘角度正是与其他组的连接点)。
-        // 平均/最低都在代表样本上算,成本按代表数平方封顶
-        let maxReps = 5
-        func representatives(of group: [(index: Int, score: Float)]) -> [Int] {
-            let anchor = group[0].index
-            let weakest = group.sorted { $0.score < $1.score }
-                .prefix(maxReps - 1)
-                .map(\.index)
-                .filter { $0 != anchor }
-            return [anchor] + weakest
+        // 每组维护:成员下标、向量逐维和(质心=归一化后的和)、锚(成员最多原组的锚)
+        var out: [[(index: Int, score: Float)]] = []
+        var memberIdx: [[Int]] = groups.map { $0.map(\.index) }
+        var anchors: [Int] = groups.map { $0[0].index }
+        var sums: [[Float]] = memberIdx.map { idx in
+            var s = [Float](repeating: 0, count: dim)
+            for i in idx {
+                for d in 0..<dim { s[d] += flat[i * dim + d] }
+            }
+            return s
         }
-
-        var current: [[Int]] = groups.map(representatives)
-        var members: [[(index: Int, score: Float)]] = groups
 
         flat.withUnsafeBufferPointer { fb in
             guard let base = fb.baseAddress else { return }
@@ -81,67 +82,71 @@ enum DuplicateScanner {
                 vDSP_dotpr(base + a * dim, 1, base + b * dim, 1, &d, vDSP_Length(dim))
                 return d
             }
+            func centroidDot(_ i: Int, _ j: Int) -> Float {
+                var d: Float = 0
+                vDSP_dotpr(sums[i], 1, sums[j], 1, &d, vDSP_Length(dim))
+                return d   // 未归一化,仅用于同轮内排序与阈值比较前先归一化
+            }
 
             for round in 0..<maxRounds {
                 progress(round, maxRounds)
-                let n = current.count
+                let n = memberIdx.count
                 if n < 2 { break }
-
-                var bestPeer = [Int](repeating: -1, count: n)
-                var bestAvg = [Float](repeating: -2, count: n)
-                var lowPair = [[Int: Float]](repeating: [:], count: n)
+                // 归一化质心两两余弦(同轮内公平可比)
+                var norms = [Float](repeating: 0, count: n)
+                for i in 0..<n {
+                    var ss: Float = 0
+                    vDSP_dotpr(sums[i], 1, sums[i], 1, &ss, vDSP_Length(dim))
+                    norms[i] = max(ss.squareRoot(), 1e-8)
+                }
+                var pairs: [(i: Int, j: Int, sim: Float)] = []
                 for i in 0..<n {
                     for j in (i + 1)..<n {
-                        var sum: Float = 0, low: Float = 1
-                        var count = 0
-                        for a in current[i] {
-                            for b in current[j] {
-                                let d = dot(a, b)
-                                sum += d
-                                low = min(low, d)
-                                count += 1
-                            }
-                        }
-                        let avg = count > 0 ? sum / Float(count) : -1
-                        lowPair[i][j] = low
-                        if avg > bestAvg[i] { bestAvg[i] = avg; bestPeer[i] = j }
-                        if avg > bestAvg[j] { bestAvg[j] = avg; bestPeer[j] = i }
+                        let sim = centroidDot(i, j) / (norms[i] * norms[j])
+                        if sim >= linkThreshold { pairs.append((i, j, sim)) }
                     }
                 }
+                if pairs.isEmpty { break }
+                pairs.sort { $0.sim > $1.sim }
 
                 var used = Set<Int>()
-                var nextCurrent: [[Int]] = []
-                var nextMembers: [[(index: Int, score: Float)]] = []
-                var changed = false
-                for i in 0..<n where !used.contains(i) {
-                    let j = bestPeer[i]
-                    guard j >= 0, !used.contains(j), bestPeer[j] == i,
-                          bestAvg[i] >= linkThreshold,
-                          (lowPair[min(i, j)][max(i, j)] ?? -1) >= floor else { continue }
-                    used.insert(i); used.insert(j)
-                    changed = true
-                    // 新组锚 = 成员多的那组的锚;全员分数相对新锚重算
-                    let bigger = members[i].count >= members[j].count ? i : j
-                    let anchor = members[bigger][0].index
-                    var seen: Set<Int> = [anchor]
-                    var merged: [(index: Int, score: Float)] = []
-                    for e in members[i] + members[j] where seen.insert(e.index).inserted {
-                        merged.append((e.index, dot(anchor, e.index)))
-                    }
-                    merged.sort { $0.score > $1.score }
-                    let combined = [(index: anchor, score: Float(1))] + merged
-                    nextMembers.append(combined)
-                    nextCurrent.append(representatives(of: combined))
+                var nextIdx: [[Int]] = []
+                var nextAnchors: [Int] = []
+                var nextSums: [[Float]] = []
+                for p in pairs {
+                    guard !used.contains(p.i), !used.contains(p.j) else { continue }
+                    used.insert(p.i); used.insert(p.j)
+                    nextIdx.append(memberIdx[p.i] + memberIdx[p.j])
+                    // 锚沿用成员较多一侧的(大组锚更代表「平均脸」)
+                    nextAnchors.append(memberIdx[p.i].count >= memberIdx[p.j].count ? anchors[p.i] : anchors[p.j])
+                    var s = [Float](repeating: 0, count: dim)
+                    vDSP_add(sums[p.i], 1, sums[p.j], 1, &s, vDSP_Length(dim))
+                    nextSums.append(s)
                 }
+                guard !nextIdx.isEmpty else { break }
                 for i in 0..<n where !used.contains(i) {
-                    nextCurrent.append(current[i])
-                    nextMembers.append(members[i])
+                    nextIdx.append(memberIdx[i])
+                    nextAnchors.append(anchors[i])
+                    nextSums.append(sums[i])
                 }
-                current = nextCurrent
-                members = nextMembers
-                if !changed { break }
+                memberIdx = nextIdx
+                anchors = nextAnchors
+                sums = nextSums
+            }
+
+            // 垃圾剔除 + 按锚重算分数
+            out = memberIdx.enumerated().compactMap { gi, idx in
+                let anchor = anchors[gi]
+                var scored: [(index: Int, score: Float)] = []
+                for i in idx where i != anchor {
+                    let d = dot(anchor, i)
+                    if d >= expelFloor { scored.append((i, d)) }
+                }
+                guard !scored.isEmpty else { return nil }   // 剔完只剩锚=单例,不算组
+                scored.sort { $0.score > $1.score }
+                return [(index: anchor, score: Float(1))] + scored
             }
         }
-        return members.sorted { $0.count > $1.count }
+        return out.sorted { $0.count > $1.count }
     }
 }

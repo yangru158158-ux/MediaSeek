@@ -58,14 +58,13 @@ jobs:
           /tmp/face_e2e_align "$RUNNER_TEMP/aligned" "$RUNNER_TEMP"/*_[0-9].jpg "$RUNNER_TEMP"/*_[0-9].png
 
       - name: r50 打分 + 聚类/合并断言
-        # 阈值与 App 平衡模式一致(入组 0.48 / 连接 入组−0.06 / 底线 入组−0.25)。
-        # 连接必须低于入组:组间只有边缘样本(侧脸/油画/旧照)可连。
-        # 底线是链式塌缩闸门:合并后组内不得出现互相完全不像的两张脸
+        # 阈值与 App 平衡模式一致(入组 0.48 / 质心连接 入组−0.06 / 垃圾剔除 0.18)。
+        # 质心连接:照片多的人全并拢;剔除线:模糊/误检脸清出大组
         run: |
           python scripts/face_e2e_score.py \
             --model "$RUNNER_TEMP/face/w600k_r50.onnx" \
             --dir "$RUNNER_TEMP/aligned" \
-            --threshold 0.48 --link 0.42 --floor 0.23
+            --threshold 0.48 --link 0.42 --expel 0.18
 
       - name: 上传对齐图(人工目检用)
         if: always()
