@@ -55,3 +55,10 @@ jobs:
           name: models-zip
           path: models.zip
           retention-days: 90
+
+      - name: 上传仅人脸增量包
+        uses: actions/upload-artifact@v4
+        with:
+          name: face-only-zip
+          path: face-only.zip
+          retention-days: 90

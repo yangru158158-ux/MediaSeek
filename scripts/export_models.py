@@ -236,7 +236,7 @@ def export_face(out_root: str, onnx_path: str, fp16: bool):
     print(f"  ONNX 签名: 输入 {in_name} → 输出 {out_name} {dim or '?'} 维")
 
     mlmodel = ct.convert(
-        m,
+        onnx_path,   # 必须传路径:coremltools 按扩展名识别 ONNX,传 ModelProto 对象会报「无法判断来源框架」
         inputs=[ct.TensorType(name=in_name, shape=(1, 3, 112, 112), dtype=np.float32)],
         compute_precision=ct.precision.FLOAT16 if fp16 else ct.precision.FLOAT32,
         minimum_deployment_target=ct.target.iOS17,
@@ -275,6 +275,20 @@ def make_zip(out_root: str, zip_path: str):
     print(f"已打包 -> {zip_path}")
 
 
+def make_face_only_zip(out_root: str, zip_path: str):
+    """仅含 FaceEmbedder 的增量包(~十几 MB):设备上已装旧模型包的用户
+    导这个即可启用人脸功能,App 端按目录增量导入,不动已有文本/图文模型"""
+    face_dir = os.path.join(out_root, "FaceEmbedder")
+    if not os.path.isdir(face_dir):
+        return
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
+        for root, _, files in os.walk(face_dir):
+            for name in files:
+                p = os.path.join(root, name)
+                z.write(p, os.path.join("FaceEmbedder", os.path.relpath(p, face_dir)))
+    print(f"已打包(仅人脸,增量导入用) -> {zip_path}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--outdir", default="MediaSeek/Resources/Models")
@@ -303,6 +317,7 @@ def main():
         print("== 跳过人脸模型(未提供 --face 路径)==")
     if args.zip:
         make_zip(args.outdir, args.zip)
+        make_face_only_zip(args.outdir, "face-only.zip")
     print("完成。接下来: xcodegen generate && open MediaSeek.xcodeproj")
 
 
