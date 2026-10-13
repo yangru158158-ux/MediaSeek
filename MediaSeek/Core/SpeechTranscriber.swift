@@ -24,7 +24,7 @@ enum SpeechTranscriber {
     /// 不逐视频试错——每部试一遍只会得到同一张错误罚单
     static func onDeviceSupported() -> Bool {
         guard let rec = SFSpeechRecognizer(locale: Locale(identifier: "zh-CN")) else { return false }
-        return rec.supportsOnDeviceRecognition()
+        return rec.supportsOnDeviceRecognition   // 属性,不是方法
     }
 
     /// 转写一部视频的音轨。无有效语音返回空串(调用方照常记账防重复处理)。
