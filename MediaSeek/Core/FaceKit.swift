@@ -90,8 +90,8 @@ enum FaceKit {
     /// 无关键点时退化为外接框放大 40% 的中心方形。
     static func alignedFace(source: CGImage, observation: VNFaceObservation) -> CGImage? {
         if let lm = observation.landmarks,
-           let le = centroid(lm.leftEye, imageSize: source),
-           let re = centroid(lm.rightEye, imageSize: source) {
+           let le = centroid(lm.leftEye, imageSize: source, box: observation.boundingBox),
+           let re = centroid(lm.rightEye, imageSize: source, box: observation.boundingBox) {
             return aligned(source: source, leftEye: le, rightEye: re)   // aligned 内部按 x 排序,免疫命名歧义
         }
         let w = CGFloat(source.width), h = CGFloat(source.height)
@@ -127,14 +127,23 @@ enum FaceKit {
         }
     }
 
-    /// 关键点区域质心。Vision normalizedPoints 原点在左下,
-    /// 换算成顶行原点像素坐标:y = (1 - ny) * height
-    private static func centroid(_ region: VNFaceLandmarkRegion2D?, imageSize: CGImage) -> CGPoint? {
+    /// 关键点区域质心。⚠️ Vision 的 normalizedPoints 是「人脸框内归一化坐标」
+    /// (0-1 相对 boundingBox),不是整图归一化——直接乘整图宽高会把眼睛算到
+    /// 脸框外(实测 2687px 宽图:框宽 771px,算出的眼距 922px>框宽),且脸在
+    /// 照片里的位置/大小不同错法不同,嵌入近乎随机:同人分低、跨人偶然高分,
+    /// 人物归组从第一版起混人、换 r50 也救不了的真根因(e2e 实测 同人 0.244
+    /// < 跨人 0.562)。正确换算:图内坐标(原点左下)= box.origin + n*box.size,
+    /// 再翻到顶行原点:y_top = H - y_bottom
+    private static func centroid(_ region: VNFaceLandmarkRegion2D?, imageSize: CGImage,
+                                 box: CGRect) -> CGPoint? {
         guard let pts = region?.normalizedPoints, !pts.isEmpty else { return nil }
         var sumX: CGFloat = 0, sumY: CGFloat = 0
         for p in pts { sumX += p.x; sumY += p.y }
-        return CGPoint(x: sumX / CGFloat(pts.count) * CGFloat(imageSize.width),
-                       y: (1 - sumY / CGFloat(pts.count)) * CGFloat(imageSize.height))
+        let nx = sumX / CGFloat(pts.count)
+        let ny = sumY / CGFloat(pts.count)
+        let x = (box.minX + nx * box.width) * CGFloat(imageSize.width)
+        let yBottom = (box.minY + ny * box.height) * CGFloat(imageSize.height)
+        return CGPoint(x: x, y: CGFloat(imageSize.height) - yBottom)
     }
 
     /// 源图解码为 RGBA 缓冲(行主序 = 顶行起、y 向下,与采样坐标一致)。

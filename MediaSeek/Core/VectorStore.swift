@@ -90,6 +90,16 @@ final class VectorStore {
             try? exec("DELETE FROM face_done")
             UserDefaults.standard.set(true, forKey: "face_align_v3")
         }
+        // 一次性迁移 v4:关键点坐标一直按「整图归一化」换算,而 Vision 的
+        // normalizedPoints 实为「人脸框内归一化」——眼睛被算到脸框外,错法随
+        // 脸在照片里的位置/大小变化,嵌入近乎随机(同人 0.24 < 跨人 0.56,
+        // CI 真实照片端到端实锤)。修的是坐标换算、模型文件未变,指纹不会
+        // 触发重建,必须迁移清库重嵌
+        if !UserDefaults.standard.bool(forKey: "face_align_v4") {
+            try? exec("DELETE FROM items WHERE kind = 'face'")
+            try? exec("DELETE FROM face_done")
+            UserDefaults.standard.set(true, forKey: "face_align_v4")
+        }
         // 「不相关」黑名单:term=归一化查询词,ref=被标记的结果(该查询下不再出现)
         try exec("CREATE TABLE IF NOT EXISTS query_block(term TEXT NOT NULL, ref_key TEXT NOT NULL, created_at REAL NOT NULL, UNIQUE(term, ref_key))")
         try exec("CREATE TABLE IF NOT EXISTS label_vocab(label TEXT PRIMARY KEY, vec BLOB)")
