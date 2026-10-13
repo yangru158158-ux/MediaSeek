@@ -52,7 +52,8 @@ jobs:
         run: |
           python -m venv "$RUNNER_TEMP/faceenv"
           "$RUNNER_TEMP/faceenv/bin/pip" install --upgrade pip
-          "$RUNNER_TEMP/faceenv/bin/pip" install "coremltools==7.2" "onnx==1.16.2" onnxruntime numpy
+          # setuptools:ct7.2 用 distutils,Python 3.12 已移除标准库版,setuptools 提供 import 钩子
+          "$RUNNER_TEMP/faceenv/bin/pip" install setuptools "coremltools==7.2" "onnx==1.16.2" onnxruntime numpy
 
       - name: 导出人脸模型并打包(ct 7.2)
         run: |
