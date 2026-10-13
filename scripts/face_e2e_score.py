@@ -74,8 +74,8 @@ def merge_groups(groups, mat, link):
 ap = argparse.ArgumentParser()
 ap.add_argument("--model", required=True)
 ap.add_argument("--dir", required=True)
-ap.add_argument("--threshold", type=float, default=0.58, help="App 平衡模式入组阈值")
-ap.add_argument("--link", type=float, default=0.64, help="组间合并连接阈值")
+ap.add_argument("--threshold", type=float, default=0.48, help="App 平衡模式入组阈值")
+ap.add_argument("--link", type=float, default=0.42, help="组间合并连接阈值(低于入组)")
 a = ap.parse_args()
 
 files = sorted(glob.glob(os.path.join(a.dir, "aligned_*.png")))

@@ -91,8 +91,7 @@ enum DuplicateScanner {
                     if linked { union(i, j) }
                 }
             }
-        }
-        // 按连通分量汇总成员,去重后以「成员最多的原组的锚」为新锚重算分数
+        }        // 按连通分量汇总成员,去重后以「成员最多的原组的锚」为新锚重算分数
         var buckets: [Int: [Int]] = [:]          // 根 → 原组号
         for i in 0..<g { buckets[find(i), default: []].append(i) }
         var out: [[(index: Int, score: Float)]] = []
