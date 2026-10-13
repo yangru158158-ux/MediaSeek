@@ -219,53 +219,6 @@ def export_siglip(out_root: str, model_id: str, fp16: bool, txt_fp32: bool = Fal
     print(f"  -> {out_dir}")
 
 
-def export_face(out_root: str, onnx_path: str, fp16: bool):
-    """人脸识别模型(insightface MobileFaceNet / ArcFace 系,512 维)。
-    检测与关键点用系统 Vision,这里只转识别塔:
-    输入 input.1 (N,3,112,112),RGB,(px-127.5)/128;输出未归一化,App 端统一归一化。
-    注意:输入/输出名保留 ONNX 原名(如输出 '516'),写进 meta.json 供 App 读取。"""
-    import onnx
-    print(f"== 导出人脸模型 {onnx_path} ==")
-    m = onnx.load(onnx_path)
-    in_name = m.graph.input[0].name
-    out_name = m.graph.output[0].name
-    dim = None
-    for d in m.graph.output[0].type.tensor_type.shape.dim:
-        if d.dim_value > 1:
-            dim = int(d.dim_value)
-    print(f"  ONNX 签名: 输入 {in_name} → 输出 {out_name} {dim or '?'} 维")
-
-    mlmodel = ct.convert(
-        onnx_path,   # 必须传路径:coremltools 按扩展名识别 ONNX,传 ModelProto 对象会报「无法判断来源框架」
-        inputs=[ct.TensorType(name=in_name, shape=(1, 3, 112, 112), dtype=np.float32)],
-        compute_precision=ct.precision.FLOAT16 if fp16 else ct.precision.FLOAT32,
-        minimum_deployment_target=ct.target.iOS17,
-        convert_to="mlprogram",
-    )
-
-    # 一致性对拍:同一随机输入,CoreML vs ONNX 原模型(转换错误的保险丝)
-    try:
-        import onnxruntime as ort
-        sess = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
-        rng = np.random.RandomState(0)
-        x = rng.rand(1, 3, 112, 112).astype(np.float32)
-        ref = sess.run([out_name], {in_name: x})[0].flatten()
-        pred = np.array(mlmodel.predict({in_name: x})[out_name], dtype=np.float32).flatten()
-        cos = float(np.dot(ref, pred) / (np.linalg.norm(ref) * np.linalg.norm(pred) + 1e-9))
-        print(f"  CoreML↔ONNX 一致性 cos={cos:.5f}")
-        if cos < 0.995:
-            raise RuntimeError(f"人脸模型 CoreML 转换一致性不足(cos={cos:.4f})")
-    except ImportError:
-        print("  (未安装 onnxruntime,跳过一致性对拍)")
-
-    out_dir = os.path.join(out_root, "FaceEmbedder")
-    os.makedirs(out_dir, exist_ok=True)
-    mlmodel.save(os.path.join(out_dir, "Face.mlpackage"))
-    save_meta(out_dir, {"type": "face", "space": "face", "dim": dim or 512,
-                        "input": in_name, "output": out_name})
-    print(f"  -> {out_dir}")
-
-
 def make_zip(out_root: str, zip_path: str):
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
         for root, _, files in os.walk(out_root):
@@ -275,20 +228,6 @@ def make_zip(out_root: str, zip_path: str):
     print(f"已打包 -> {zip_path}")
 
 
-def make_face_only_zip(out_root: str, zip_path: str):
-    """仅含 FaceEmbedder 的增量包(~十几 MB):设备上已装旧模型包的用户
-    导这个即可启用人脸功能,App 端按目录增量导入,不动已有文本/图文模型"""
-    face_dir = os.path.join(out_root, "FaceEmbedder")
-    if not os.path.isdir(face_dir):
-        return
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
-        for root, _, files in os.walk(face_dir):
-            for name in files:
-                p = os.path.join(root, name)
-                z.write(p, os.path.join("FaceEmbedder", os.path.relpath(p, face_dir)))
-    print(f"已打包(仅人脸,增量导入用) -> {zip_path}")
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--outdir", default="MediaSeek/Resources/Models")
@@ -296,9 +235,8 @@ def main():
     ap.add_argument("--siglip", default=SIGLIP_DEFAULT)
     ap.add_argument("--skip-gemma", action="store_true")
     ap.add_argument("--skip-siglip", action="store_true")
-    ap.add_argument("--face", default=os.environ.get("FACE_ONNX"),
-                    help="人脸识别 ONNX 路径(insightface w600k_mbf.onnx);缺省且环境变量也没给则跳过")
-    ap.add_argument("--skip-face", action="store_true")
+    # 人脸模型(ArcFace ONNX)的转换走 scripts/export_face.py 独立脚本 +
+    # coremltools 7.x 隔离环境:ct 8/9 已移除内置 ONNX 转换器
     ap.add_argument("--fp32", action="store_true", help="不量化,使用 float32(默认 fp16)")
     ap.add_argument("--txt-fp32", action="store_true",
                     help="仅 SigLIP 文本塔用 float32(掩码 fp16 溢出致一致性 0.72 的对策)")
@@ -311,13 +249,8 @@ def main():
         export_gemma(args.outdir, args.gemma, fp16)
     if not args.skip_siglip:
         export_siglip(args.outdir, args.siglip, fp16, txt_fp32=args.txt_fp32)
-    if not args.skip_face and args.face:
-        export_face(args.outdir, args.face, fp16)
-    elif not args.skip_face:
-        print("== 跳过人脸模型(未提供 --face 路径)==")
     if args.zip:
         make_zip(args.outdir, args.zip)
-        make_face_only_zip(args.outdir, "face-only.zip")
     print("完成。接下来: xcodegen generate && open MediaSeek.xcodeproj")
 
 

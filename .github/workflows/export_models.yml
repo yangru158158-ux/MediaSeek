@@ -13,6 +13,7 @@ on:
     branches: [main]
     paths:
       - "scripts/export_models.py"
+      - "scripts/export_face.py"
       - "scripts/patch_transformers_for_coreml.py"
       - ".github/workflows/export_models.yml"
 
@@ -32,7 +33,7 @@ jobs:
       - name: 安装依赖(官方测试组合)
         run: |
           pip install --upgrade pip
-          pip install torch==2.7.0 "transformers>=5.0" "coremltools==9.0" sentencepiece onnx onnxruntime
+          pip install torch==2.7.0 "transformers>=5.0" "coremltools==9.0" sentencepiece
 
       - name: 打 coremltools 兼容补丁
         run: python scripts/patch_transformers_for_coreml.py
@@ -42,12 +43,22 @@ jobs:
           curl -sL -o "$RUNNER_TEMP/buffalo_s.zip" https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_s.zip
           unzip -o -j "$RUNNER_TEMP/buffalo_s.zip" w600k_mbf.onnx -d "$RUNNER_TEMP/face"
 
-      - name: 导出模型
+      - name: 导出文本/图文模型(coremltools 9)
         run: |
           python scripts/export_models.py \
-            --outdir MediaSeek/Resources/Models \
-            --face "$RUNNER_TEMP/face/w600k_mbf.onnx" \
-            --zip models.zip
+            --outdir MediaSeek/Resources/Models
+
+      - name: 安装人脸转换环境(coremltools 7.2 —— ct 8/9 已移除 ONNX 转换器)
+        run: |
+          python -m venv "$RUNNER_TEMP/faceenv"
+          "$RUNNER_TEMP/faceenv/bin/pip" install --upgrade pip
+          "$RUNNER_TEMP/faceenv/bin/pip" install "coremltools==7.2" "onnx==1.16.2" onnxruntime numpy
+
+      - name: 导出人脸模型并打包(ct 7.2)
+        run: |
+          "$RUNNER_TEMP/faceenv/bin/python" scripts/export_face.py \
+            --onnx "$RUNNER_TEMP/face/w600k_mbf.onnx" \
+            --outdir MediaSeek/Resources/Models
 
       - name: 上传模型包
         uses: actions/upload-artifact@v4
