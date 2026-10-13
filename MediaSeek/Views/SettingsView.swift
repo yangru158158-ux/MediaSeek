@@ -95,6 +95,7 @@ struct SettingsView: View {
         Section {
             modelRow(.text)
             modelRow(.image)
+            modelRow(.face)
             if !app.models.detailText.isEmpty {
                 Text(app.models.detailText).font(.caption2).foregroundStyle(.secondary)
             }
@@ -108,7 +109,7 @@ struct SettingsView: View {
                 }
             }
             .disabled(importing)
-            Text("模型包由仓库中的 scripts/export_models.py 在电脑上导出,包含 TextEmbedder 与 ImageEmbedder 两个目录。")
+            Text("模型包包含 TextEmbedder / ImageEmbedder / FaceEmbedder(可选,人物归组用)三个目录;旧包没有人脸目录时 App 自动忽略,不影响其他功能。")
                 .font(.caption).foregroundStyle(.secondary)
         } header: {
             Text("端侧模型")

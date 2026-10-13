@@ -145,7 +145,7 @@ struct HitCell: View {
 
     private var badgeText: String {
         switch hit.kind {
-        case .photo, .photoLabel: return "照片"
+        case .photo, .photoLabel, .face: return "照片"
         case .videoFrame, .videoFrameLabel: return "视频"
         case .file, .fileChunk: return "文件"
         case .userTag:

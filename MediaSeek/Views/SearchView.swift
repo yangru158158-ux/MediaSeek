@@ -37,6 +37,7 @@ struct SearchView: View {
     @State private var showTagAlert = false
     @State private var showDeleteDialog = false
     @State private var showDupScan = false
+    @State private var showPeople = false
     @State private var showRenameAlert = false
     @State private var renameText = ""
     @State private var colorFilter: String?
@@ -70,6 +71,9 @@ struct SearchView: View {
             }
             .sheet(isPresented: $showDupScan) {
                 DuplicateScanView()
+            }
+            .sheet(isPresented: $showPeople) {
+                PeopleView()
             }
             .alert("批量标注", isPresented: $showTagAlert) {
                 TextField("标签内容(如:程小姐)", text: $batchTagText)
@@ -565,6 +569,7 @@ struct SearchView: View {
             } else {
                 Button { selectionMode = true; selected.removeAll() } label: { Label("选择", systemImage: "checkmark.circle") }
                 Button { showDupScan = true } label: { Label("查重(重复/雷同照片)…", systemImage: "square.stack.3d.down.right") }
+                Button { showPeople = true } label: { Label("人物归组(按人浏览/命名)…", systemImage: "person.2") }
                 Button { exportToAlbum(selectedOnly: false) } label: { Label("结果存入相册", systemImage: "photo.stack") }
                 Button { exportToFiles(selectedOnly: false) } label: { Label("结果导出到文件", systemImage: "folder") }
             }

@@ -9,32 +9,39 @@ enum ModelState: Equatable {
 enum ModelSlot: String {
     case text = "TextEmbedder"
     case image = "ImageEmbedder"
+    case face = "FaceEmbedder"
 
     var displayName: String {
         switch self {
         case .text: return "文本模型(EmbeddingGemma)"
         case .image: return "图文模型(SigLIP)"
+        case .face: return "人脸模型(MobileFaceNet)"
         }
     }
 }
 
 struct ModelMeta: Codable {
-    let type: String     // "gemma" | "clip"
+    let type: String     // "gemma" | "clip" | "face"
     let space: String
     let dim: Int
     let image_size: Int?
     let image_mean: Float?
     let image_std: Float?
+    // 人脸模型:ONNX 原始输入/输出名(如 input.1 / 516)
+    let input: String?
+    let output: String?
 }
 
 @MainActor
 final class ModelManager: ObservableObject {
     @Published private(set) var textState: ModelState = .missing
     @Published private(set) var imageState: ModelState = .missing
+    @Published private(set) var faceState: ModelState = .missing
     @Published private(set) var detailText: String = ""
 
     private(set) var gemma: GemmaTextEmbedder?
     private(set) var siglip: SigLIPEmbedder?
+    private(set) var face: FaceEmbedder?
 
     var bothReady: Bool { textState == .ready && imageState == .ready }
     var anyReady: Bool { textState == .ready || imageState == .ready }
@@ -47,19 +54,27 @@ final class ModelManager: ObservableObject {
     }
 
     func state(for slot: ModelSlot) -> ModelState {
-        slot == .text ? textState : imageState
+        switch slot {
+        case .text: return textState
+        case .image: return imageState
+        case .face: return faceState
+        }
     }
 
     private func setState(_ s: ModelState, for slot: ModelSlot) {
-        if slot == .text { textState = s } else { imageState = s }
+        switch slot {
+        case .text: textState = s
+        case .image: imageState = s
+        case .face: faceState = s
+        }
     }
 
     // MARK: - 加载
 
     func loadAll() async {
-        guard textState != .ready, imageState != .ready else { return }
-        await loadSlot(.text)
-        await loadSlot(.image)
+        if textState != .ready { await loadSlot(.text) }
+        if imageState != .ready { await loadSlot(.image) }
+        await loadSlot(.face)   // 人脸模型可选:未装时静默降级(人物归组功能不可用)
     }
 
     private func loadSlot(_ slot: ModelSlot) async {
@@ -68,7 +83,7 @@ final class ModelManager: ObservableObject {
         let bundleDir = Bundle.main.url(forResource: "Models", withExtension: nil)?
             .appendingPathComponent(slot.rawValue)
 
-        let prepared = await Task.detached(priority: .userInitiated) { () -> Result<(URL, URL, ModelMeta), Error> in
+        let prepared = await Task.detached(priority: .userInitiated) { () -> Result<(URL, URL?, ModelMeta), Error> in
             do {
                 // 1) 已编译缓存
                 var dir = root.appendingPathComponent(slot.rawValue)
@@ -95,10 +110,25 @@ final class ModelManager: ObservableObject {
                 }
                 let metaURL = dir.appendingPathComponent("meta.json")
                 let meta = try JSONDecoder().decode(ModelMeta.self, from: Data(contentsOf: metaURL))
-                let tokURL = dir.appendingPathComponent("tokenizer.json")
-                guard FileManager.default.fileExists(atPath: tokURL.path) else {
-                    throw MSError("缺少 tokenizer.json")
+                var tokURL: URL? = nil
+                if slot != .face {
+                    // 人脸模型无分词器;文本/图文模型必须有
+                    let t = dir.appendingPathComponent("tokenizer.json")
+                    guard FileManager.default.fileExists(atPath: t.path) else {
+                        throw MSError("缺少 tokenizer.json")
+                    }
+                    tokURL = t
+                    // swift-transformers 需要 config.json(+tokenizer_config.json)选择分词器类。
+                    // 注意:SigLIP2 官方就是 GemmaTokenizer,总是覆盖写入以防历史错误值残留
+                    let cfgURL = dir.appendingPathComponent("config.json")
+                    let modelType = meta.type == "gemma" ? "gemma3_text" : "siglip"
+                    try? JSONSerialization.data(withJSONObject: ["model_type": modelType])
+                        .write(to: cfgURL)
+                    let tokCfgURL = dir.appendingPathComponent("tokenizer_config.json")
+                    try? JSONSerialization.data(withJSONObject: ["tokenizer_class": "GemmaTokenizer"])
+                        .write(to: tokCfgURL)
                 }
+                return .success((dir, tokURL, meta))
                 // swift-transformers 需要 config.json(+tokenizer_config.json)选择分词器类。
                 // 注意:SigLIP2 官方就是 GemmaTokenizer,总是覆盖写入以防历史错误值残留
                 let cfgURL = dir.appendingPathComponent("config.json")
@@ -117,18 +147,23 @@ final class ModelManager: ObservableObject {
         switch prepared {
         case .failure(let error):
             setState(.missing, for: slot)
-            detailText = "\(slot.displayName):\(error.localizedDescription)"
+            // 人脸模型是可选件,缺它不写全局提示(只在设置页自己的行上显示「未安装」)
+            if slot != .face {
+                detailText = "\(slot.displayName):\(error.localizedDescription)"
+            }
         case .success(let (dir, tokURL, meta)):
             do {
                 switch meta.type {
                 case "gemma":
                     let modelURL = dir.appendingPathComponent("GemmaText.mlmodelc")
+                    guard let tokURL else { throw MSError("缺少 tokenizer.json") }
                     gemma = try await GemmaTextEmbedder(modelURL: modelURL, tokenizerFolder: tokURL.deletingLastPathComponent())
                     setState(.ready, for: slot)
                     if textState == .ready && imageState == .ready { detailText = "" }
                 case "clip":
                     let imgURL = dir.appendingPathComponent("SiglipImage.mlmodelc")
                     let txtURL = dir.appendingPathComponent("SiglipText.mlmodelc")
+                    guard let tokURL else { throw MSError("缺少 tokenizer.json") }
                     siglip = try await SigLIPEmbedder(
                         textModelURL: txtURL, imageModelURL: imgURL,
                         tokenizerFolder: tokURL.deletingLastPathComponent(),
@@ -136,6 +171,12 @@ final class ModelManager: ObservableObject {
                         mean: meta.image_mean ?? 0.5, std: meta.image_std ?? 0.5)
                     setState(.ready, for: slot)
                     if textState == .ready && imageState == .ready { detailText = "" }
+                case "face":
+                    let modelURL = dir.appendingPathComponent("Face.mlmodelc")
+                    face = try FaceEmbedder(modelURL: modelURL,
+                                            inputName: meta.input ?? "input.1",
+                                            outputName: meta.output ?? "embedding")
+                    setState(.ready, for: slot)
                 default:
                     setState(.failed("未知模型类型 \(meta.type)"), for: slot)
                 }
@@ -163,8 +204,7 @@ final class ModelManager: ObservableObject {
 
         var found = 0
         for name in try FileManager.default.contentsOfDirectory(atPath: extractDir.path) {
-            guard name == ModelSlot.text.rawValue || name == ModelSlot.image.rawValue else { continue }
-            let slot: ModelSlot = (name == ModelSlot.text.rawValue) ? .text : .image
+            guard let slot = ModelSlot(rawValue: name) else { continue }
             let src = extractDir.appendingPathComponent(name)
             guard FileManager.default.fileExists(atPath: src.appendingPathComponent("meta.json").path) else { continue }
 

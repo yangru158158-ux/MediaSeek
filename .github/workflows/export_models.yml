@@ -32,15 +32,21 @@ jobs:
       - name: 安装依赖(官方测试组合)
         run: |
           pip install --upgrade pip
-          pip install torch==2.7.0 "transformers>=5.0" "coremltools==9.0" sentencepiece
+          pip install torch==2.7.0 "transformers>=5.0" "coremltools==9.0" sentencepiece onnx onnxruntime
 
       - name: 打 coremltools 兼容补丁
         run: python scripts/patch_transformers_for_coreml.py
+
+      - name: 下载人脸模型(insightface MobileFaceNet,非商用许可,仅内部测试用)
+        run: |
+          curl -sL -o "$RUNNER_TEMP/buffalo_s.zip" https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_s.zip
+          unzip -o -j "$RUNNER_TEMP/buffalo_s.zip" w600k_mbf.onnx -d "$RUNNER_TEMP/face"
 
       - name: 导出模型
         run: |
           python scripts/export_models.py \
             --outdir MediaSeek/Resources/Models \
+            --face "$RUNNER_TEMP/face/w600k_mbf.onnx" \
             --zip models.zip
 
       - name: 上传模型包

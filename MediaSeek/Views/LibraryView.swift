@@ -20,6 +20,8 @@ struct LibraryView: View {
     @State private var showFileDeleteDialog = false
     @State private var showDupResults = false
     @State private var showDupScan = false
+    @State private var showPeople = false
+    @State private var faceCount = 0
 
     private let columns = [GridItem(.flexible()), GridItem(.flexible())]
 
@@ -30,6 +32,7 @@ struct LibraryView: View {
                 statsSection
                 indexingSection
                 dedupSection
+                peopleSection
                 importSection
                 if !importedFiles.isEmpty {
                     importedSection
@@ -65,6 +68,9 @@ struct LibraryView: View {
             }
             .sheet(isPresented: $showDupScan) {
                 DuplicateScanView()
+            }
+            .sheet(isPresented: $showPeople) {
+                PeopleView()
             }
             .confirmationDialog("删除 \(selectedFileIDs.count) 个导入文件", isPresented: $showFileDeleteDialog,
                                 titleVisibility: .visible) {
@@ -211,6 +217,24 @@ struct LibraryView: View {
         }
     }
 
+    // MARK: - 人物归组
+
+    private var peopleSection: some View {
+        Section("人物") {
+            Button {
+                showPeople = true
+            } label: {
+                Label(faceCount > 0 ? "按人物浏览/归组(\(faceCount) 张照片)" : "按人物浏览/归组",
+                      systemImage: "person.2")
+            }
+            .disabled(faceCount < 2)
+            Text(faceCount > 0
+                 ? "同一人的照片自动归为一组;给组命名后,搜索名字即可找到全部照片。"
+                 : "需先在「设置」导入含人脸模型的新模型包,并点「同步新增内容」补全人脸数据(约 30-60 分钟,可中断可续)。")
+                .font(.caption2).foregroundStyle(.secondary)
+        }
+    }
+
     // MARK: - 导入
 
     private var importSection: some View {
@@ -346,6 +370,7 @@ struct LibraryView: View {
             photoCount = counts[.photo] ?? 0
             videoCount = counts[.videoFrame] ?? 0
             vectorCount = counts.values.reduce(0, +)
+            faceCount = app.store.faceStats().photos
             importedFiles = app.imports.allFiles()
         }
     }

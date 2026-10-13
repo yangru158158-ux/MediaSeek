@@ -5,7 +5,7 @@ import Accelerate
 /// 媒体条目类别。photoLabel 是照片的 Vision 标签文本向量(gemma 空间),
 /// 让"一只猫"这类中文查询通过多语言文本模型命中照片。
 enum ItemKind: String, CaseIterable {
-    case photo, photoLabel, userTag, videoFrame, videoFrameLabel, file, fileChunk
+    case photo, photoLabel, userTag, videoFrame, videoFrameLabel, file, fileChunk, face
 }
 
 struct SearchHit {
@@ -72,6 +72,9 @@ final class VectorStore {
         try exec("PRAGMA journal_mode=WAL")
         try exec("PRAGMA synchronous=NORMAL")
         try exec("CREATE TABLE IF NOT EXISTS ocr_text(ref_key TEXT PRIMARY KEY, text TEXT)")
+        // 人脸处理记账:该照片已按当前人脸模型做过检测/嵌入(含 0 脸照片)。
+        // 没有它,无脸照片(截图/风景)会因「缺 face 行」被每轮同步反复重处理
+        try exec("CREATE TABLE IF NOT EXISTS face_done(ref_key TEXT PRIMARY KEY)")
         // 「不相关」黑名单:term=归一化查询词,ref=被标记的结果(该查询下不再出现)
         try exec("CREATE TABLE IF NOT EXISTS query_block(term TEXT NOT NULL, ref_key TEXT NOT NULL, created_at REAL NOT NULL, UNIQUE(term, ref_key))")
         try exec("CREATE TABLE IF NOT EXISTS label_vocab(label TEXT PRIMARY KEY, vec BLOB)")
@@ -272,6 +275,8 @@ final class VectorStore {
         try exec("BEGIN")
         let ocrStmt = try prepare("DELETE FROM ocr_text WHERE ref_key = ?")
         defer { sqlite3_finalize(ocrStmt) }
+        let faceDoneStmt = try prepare("DELETE FROM face_done WHERE ref_key = ?")
+        defer { sqlite3_finalize(faceDoneStmt) }
         for key in stale {
             for (i, k) in kinds.enumerated() {
                 sqlite3_bind_text(stmt, Int32(i + 1), k.rawValue, -1, Self.transient)
@@ -284,6 +289,10 @@ final class VectorStore {
             sqlite3_step(ocrStmt)
             sqlite3_reset(ocrStmt)
             sqlite3_clear_bindings(ocrStmt)
+            sqlite3_bind_text(faceDoneStmt, 1, key, -1, Self.transient)
+            sqlite3_step(faceDoneStmt)
+            sqlite3_reset(faceDoneStmt)
+            sqlite3_clear_bindings(faceDoneStmt)
         }
         try exec("COMMIT")
     } }
@@ -563,6 +572,10 @@ final class VectorStore {
         defer { sqlite3_finalize(stmt2) }
         sqlite3_bind_text(stmt2, 1, refKey, -1, Self.transient)
         sqlite3_step(stmt2)
+        let stmt3 = try prepare("DELETE FROM face_done WHERE ref_key = ?")
+        defer { sqlite3_finalize(stmt3) }
+        sqlite3_bind_text(stmt3, 1, refKey, -1, Self.transient)
+        sqlite3_step(stmt3)
     } }
 
     func deleteUserTag(refKey: String, tag: String) throws { try serialized {
@@ -761,6 +774,106 @@ final class VectorStore {
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, refKey, -1, Self.transient)
         sqlite3_step(stmt)
+    } }
+
+    // MARK: - 人脸(方案B:人脸识别归组)
+
+    /// 标记照片已完成人脸处理(有脸无脸都记;人脸模型缺失时不记,装上后自动补)
+    func markFaceDone(refKey: String) throws { try serialized {
+        let stmt = try prepare("INSERT OR REPLACE INTO face_done(ref_key) VALUES(?)")
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, refKey, -1, Self.transient)
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw MSError("face_done 写入失败") }
+    } }
+
+    /// 已有照片向量但未做过人脸处理的照片(人脸补全队列;face_done 是唯一依据,
+    /// 直接看 face 行会把无脸照片卷进无限重处理)
+    func photoRefKeysMissingFaces() throws -> Set<String> { try serialized {
+        guard let db else { return [] }
+        let stmt = try prepare("""
+        SELECT ref_key FROM items
+        WHERE kind = 'photo' AND space = 'clip'
+          AND ref_key NOT IN (SELECT ref_key FROM face_done)
+        """)
+        defer { sqlite3_finalize(stmt) }
+        var out = Set<String>()
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            out.insert(String(cString: sqlite3_column_text(stmt, 0)))
+        }
+        return out
+    } }
+
+    /// 人脸覆盖度(设置/资料库提示用):向量总行数 + 涉及照片数 + 已记账照片数
+    func faceStats() -> (faces: Int, photos: Int, done: Int) { try serialized {
+        guard let db, let stmt = try? prepare("""
+            SELECT (SELECT COUNT(*) FROM items WHERE kind = 'face'),
+                   (SELECT COUNT(DISTINCT ref_key) FROM items WHERE kind = 'face'),
+                   (SELECT COUNT(*) FROM face_done)
+            """) else { return (0, 0, 0) }
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return (0, 0, 0) }
+        return (Int(sqlite3_column_int64(stmt, 0)),
+                Int(sqlite3_column_int64(stmt, 1)),
+                Int(sqlite3_column_int64(stmt, 2)))
+    } }
+
+    /// 全部人脸向量(归组扫描用):keys 形如 "refKey#脸序号",
+    /// refs 与 keys 一一对应指向所属照片;blob 字节数校验防截断行越界(同 allPhotoVectors)
+    func allFaceVectors() throws -> (keys: [String], refs: [String], flat: [Float], dim: Int) { try serialized {
+        guard let db else { return ([], [], [], 0) }
+        let stmt = try prepare("""
+        SELECT ref_key, frame_index, vec, dim FROM items WHERE kind = 'face' AND space = 'face' ORDER BY ref_key
+        """)
+        defer { sqlite3_finalize(stmt) }
+        var keys: [String] = []
+        var refs: [String] = []
+        var flat: [Float] = []
+        var dim = 0
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let d = Int(sqlite3_column_int(stmt, 3))
+            guard d > 0, let blob = sqlite3_column_blob(stmt, 2) else { continue }
+            guard sqlite3_column_bytes(stmt, 2) == d * 4 else { continue }
+            if dim == 0 { dim = d } else if d != dim { continue }
+            let ref = String(cString: sqlite3_column_text(stmt, 0))
+            keys.append("\(ref)#\(sqlite3_column_int(stmt, 1))")
+            refs.append(ref)
+            flat.append(contentsOf: Array(UnsafeBufferPointer(
+                start: blob.assumingMemoryBound(to: Float.self), count: d)))
+        }
+        return (keys, refs, flat, dim)
+    } }
+
+    /// 下一张照片的用户标签槽位(frame_index):同照片可挂多个人名(合照两人各归各组)
+    func nextUserTagSlot(refKey: String) -> Int { try serialized {
+        guard let db,
+              let stmt = try? prepare("SELECT COALESCE(MAX(frame_index), -1) + 1 FROM items WHERE kind = 'userTag' AND ref_key = ?")
+        else { return 0 }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, refKey, -1, Self.transient)
+        return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int(stmt, 0)) : 0
+    } }
+
+    /// 批量取照片的已有用户标签(人物归组展示组名用),IN 列表分片绑定
+    func userTagsForRefs(_ refKeys: [String]) -> [String: [String]] { try serialized {
+        var out: [String: [String]] = [:]
+        guard let db, !refKeys.isEmpty else { return out }
+        for chunkStart in stride(from: 0, to: refKeys.count, by: 400) {
+            let part = Array(refKeys[chunkStart..<min(chunkStart + 400, refKeys.count)])
+            let marks = Array(repeating: "?", count: part.count).joined(separator: ",")
+            guard let stmt = try? prepare("SELECT ref_key, title FROM items WHERE kind = 'userTag' AND ref_key IN (\(marks))")
+            else { continue }
+            defer { sqlite3_finalize(stmt) }
+            for (i, id) in part.enumerated() {
+                sqlite3_bind_text(stmt, Int32(i + 1), id, -1, Self.transient)
+            }
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                if let t = sqlite3_column_text(stmt, 1) {
+                    out[String(cString: sqlite3_column_text(stmt, 0)), default: []]
+                        .append(String(cString: t))
+                }
+            }
+        }
+        return out
     } }
 
     /// 全部照片的 clip 向量(查重用):keys 与 flat 内的行一一对应

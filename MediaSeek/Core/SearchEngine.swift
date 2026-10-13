@@ -774,6 +774,8 @@ final class SearchEngine {
         var out: [DisplayHit] = []
         for hit in hits {
             switch hit.kind {
+            case .face:
+                continue   // 人脸向量只做归组数据源,不进搜索结果
             case .photo, .photoLabel, .userTag, .videoFrame, .videoFrameLabel:
                 guard let asset = assets[hit.refKey] else { continue }
                 guard Self.assetPasses(asset, dateRange: dateRange, place: place) else { continue }

@@ -74,15 +74,19 @@ final class AppModel: ObservableObject {
         UserDefaults.standard.removeObject(forKey: "recentSearches")
     }
 
-    /// 给照片/视频添加人名或主题标签(生成 Gemma 语义向量)
+    /// 给照片/视频添加人名或主题标签(生成 Gemma 语义向量)。
+    /// frame_index 用递增槽位:同一张合照可以挂多个人名(人物归组分别命名);
+    /// 已有同名标签则跳过,不重复建行
     func addUserTag(refKey: String, tag: String) async throws {
         guard let gemma = models.gemma else { throw MSError("文本模型未就绪") }
         let trimmed = tag.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
+        if (try? store.userTags(forRefKey: refKey))?.contains(trimmed) == true { return }
         let vec = try await Task.detached(priority: .userInitiated) {
             try gemma.embedDocument("person: \(trimmed)")
         }.value
-        try store.upsert(kind: .userTag, refKey: refKey, space: gemma.space,
+        let slot = store.nextUserTagSlot(refKey: refKey)
+        try store.upsert(kind: .userTag, refKey: refKey, frameIndex: slot, space: gemma.space,
                          vector: vec, title: trimmed, date: Date())
     }
 

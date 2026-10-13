@@ -12,7 +12,7 @@ import UniformTypeIdentifiers
 @MainActor
 final class IndexingCoordinator: ObservableObject {
     enum Phase: Equatable {
-        case idle, waitingModel, photos, videos, files, done, failed(String)
+        case idle, waitingModel, photos, videos, faces, files, done, failed(String)
     }
 
     @Published private(set) var phase: Phase = .idle
@@ -81,6 +81,7 @@ final class IndexingCoordinator: ObservableObject {
         case .waitingModel: return "等待模型加载…"
         case .photos: return "正在索引照片"
         case .videos: return "正在索引视频"
+        case .faces: return "正在补人脸数据"
         case .files: return "正在索引文件"
         case .done: return "索引完成"
         case .failed(let m): return "失败:\(m)"
@@ -183,7 +184,7 @@ final class IndexingCoordinator: ObservableObject {
     private func syncPhotoLibrary(forceAll: Bool = false, errors: FirstErrorBox) async throws {
         let fetch = photo.fetchAllAssets()
         // 全量重建:所有照片视为新照片全量覆盖;增量同步:跳过已索引
-        var known = forceAll ? Set<String>() : try store.refKeys(kinds: [.photo, .photoLabel, .userTag, .videoFrame, .videoFrameLabel])
+        var known = forceAll ? Set<String>() : try store.refKeys(kinds: [.photo, .photoLabel, .userTag, .videoFrame, .videoFrameLabel, .face])
         // 增量自动补全:已有向量但缺 OCR 原文的照片视为待补(原位覆盖),
         // 跑多少存多少、中断可续,无需全量重建(无字照片有 "" 占位行,不会反复补)
         if !forceAll {
@@ -211,6 +212,13 @@ final class IndexingCoordinator: ObservableObject {
                 }
             }
         }
+        // 人脸补全:已索引但未做过人脸处理的照片(装上人脸模型后的一次性回填)。
+        // 走轻量管线(只检测+嵌入,不重跑 SigLIP/OCR/标签),可中断可续;
+        // 人脸模型未装时跳过——face_done 不记账,装上后下一轮同步自动开始补
+        let faceEmbedder = models.face
+        let missingFaces: Set<String> = (!forceAll && faceEmbedder != nil)
+            ? try store.photoRefKeysMissingFaces() : []
+
         let recentlyDeleted = Self.recentlyDeletedIDs()
         // 黑屏录音类视频记账(全帧黑、无可索引内容):跳过抽帧,不再每轮同步反复扫
         let fullyBlack = Set(UserDefaults.standard.stringArray(forKey: "vidAllBlack") ?? [])
@@ -218,22 +226,29 @@ final class IndexingCoordinator: ObservableObject {
         var libIDs = Set<String>()
         var newPhotos: [PHAsset] = []
         var newVideos: [PHAsset] = []
+        var faceBackfill: [PHAsset] = []
         fetch.enumerateObjects { asset, _, _ in
             // 「最近删除」里的照片/视频不入库:不新增索引,旧行按 stale 一并清除
             guard recentlyDeleted.contains(asset.localIdentifier) == false else { return }
             // 全黑视频:不进 libIDs(遗留行顺带清除),也不重新处理
             guard !fullyBlack.contains(asset.localIdentifier) else { return }
             libIDs.insert(asset.localIdentifier)
-            guard !known.contains(asset.localIdentifier) else { return }
+            if known.contains(asset.localIdentifier) {
+                // 已索引但缺人脸数据 → 人脸补全队列(轻量)
+                if missingFaces.contains(asset.localIdentifier), asset.mediaType == .image {
+                    faceBackfill.append(asset)
+                }
+                return
+            }
             if asset.mediaType == .image {
                 newPhotos.append(asset)
             } else if asset.mediaType == .video {
                 newVideos.append(asset)
             }
         }
-        try store.removeRefs(kinds: [.photo, .photoLabel, .userTag, .videoFrame, .videoFrameLabel], notIn: libIDs)
+        try store.removeRefs(kinds: [.photo, .photoLabel, .userTag, .videoFrame, .videoFrameLabel, .face], notIn: libIDs)
 
-        total += newPhotos.count + newVideos.count
+        total += newPhotos.count + newVideos.count + faceBackfill.count
         // 视频量级小先处理:几分钟后即可被「视频」范围搜到,不必等全部照片
         phase = .videos
         for asset in newVideos {
@@ -242,11 +257,48 @@ final class IndexingCoordinator: ObservableObject {
             processedLocal += 1
             processed = processedLocal
         }
+        // 人脸补全先于新照片:人物归组数据尽早可用,且与照片全量嵌入互不阻塞
+        if !faceBackfill.isEmpty, let faceEmbedder {
+            phase = .faces
+            let fstore = self.store
+            let fphoto = self.photo
+            var faceAbort: String? = nil
+            await withTaskGroup(of: Int.self) { group in
+                var index = 0
+                let maxConcurrent = 2
+                while index < min(maxConcurrent, faceBackfill.count) {
+                    let asset = faceBackfill[index]; index += 1
+                    group.addTask { await Self.faceOnlyWork(
+                        asset: asset, photo: fphoto, store: fstore, face: faceEmbedder, errors: errors) }
+                }
+                while !group.isEmpty {
+                    let fails = await group.next() ?? 0
+                    errorCount += fails
+                    processedLocal += 1
+                    if processedLocal % 5 == 0 { processed = processedLocal }
+                    if fails > 0, firstErrorMessage == nil {
+                        firstErrorMessage = errors.get()
+                    }
+                    if errorCount >= 20, let msg = errors.get() {
+                        faceAbort = "人脸补全连续失败已停止:\(msg)"
+                        break
+                    }
+                    if Task.isCancelled { break }
+                    if index < faceBackfill.count {
+                        let asset = faceBackfill[index]; index += 1
+                        group.addTask { await Self.faceOnlyWork(
+                            asset: asset, photo: fphoto, store: fstore, face: faceEmbedder, errors: errors) }
+                    }
+                }
+            }
+            if let faceAbort { throw MSError(faceAbort) }
+        }
         phase = .photos
         // 双路并发:解码/下载与 ANE 推理流水线重叠
         let useLabels = chineseLabels
         let clip = models.siglip
         let gemma = models.gemma
+        let face = models.face
         let store = self.store
         let photo = self.photo
         var abortReason: String? = nil
@@ -257,7 +309,7 @@ final class IndexingCoordinator: ObservableObject {
                 let asset = newPhotos[index]; index += 1
                 group.addTask { await Self.embedPhotoWork(
                     asset: asset, photo: photo, store: store,
-                    clip: clip, gemma: gemma, useLabels: useLabels, errors: errors) }
+                    clip: clip, gemma: gemma, face: face, useLabels: useLabels, errors: errors) }
             }
             while !group.isEmpty {
                 let fails = await group.next() ?? 0
@@ -277,7 +329,7 @@ final class IndexingCoordinator: ObservableObject {
                     let asset = newPhotos[index]; index += 1
                     group.addTask { await Self.embedPhotoWork(
                         asset: asset, photo: photo, store: store,
-                        clip: clip, gemma: gemma, useLabels: useLabels, errors: errors) }
+                        clip: clip, gemma: gemma, face: face, useLabels: useLabels, errors: errors) }
                 }
             }
         }
@@ -305,8 +357,8 @@ final class IndexingCoordinator: ObservableObject {
 
     nonisolated private static func embedPhotoWork(
         asset: PHAsset, photo: PhotoLibraryService, store: VectorStore,
-        clip: SigLIPEmbedder?, gemma: GemmaTextEmbedder?, useLabels: Bool,
-        errors: FirstErrorBox) async -> Int {
+        clip: SigLIPEmbedder?, gemma: GemmaTextEmbedder?, face: FaceEmbedder?,
+        useLabels: Bool, errors: FirstErrorBox) async -> Int {
         guard let clip, let gemma else { return 0 }
         do {
             // 2048px 用于 OCR 文字识别(拍屏角度/小字也尽量认出);320px 用于嵌入向量
@@ -330,6 +382,10 @@ final class IndexingCoordinator: ObservableObject {
             let ocr = Self.recognizeText(in: full)
             try store.saveOCR(refKey: asset.localIdentifier, text: ocr ?? "")
 
+            // 人脸层:检测+对齐+身份向量(人物归组数据源);模型未装则跳过且不记账
+            try Self.embedFaces(full: full, assetID: asset.localIdentifier,
+                                date: asset.creationDate, face: face, store: store)
+
             guard useLabels, let labels = Self.visionLabels(cg: small), !labels.isEmpty else { return 0 }
             try Task.checkCancellation()
             let lvec = try gemma.embedDocument("photo tags: \(labels)")
@@ -341,6 +397,43 @@ final class IndexingCoordinator: ObservableObject {
             errors.set("照片处理失败:\(error)")
             return 1
         }
+    }
+
+    /// 人脸补全(轻量管线):对已索引但缺人脸数据的照片只做检测+嵌入,
+    /// 不重跑 SigLIP/OCR/标签——14k 张约 30-60 分钟,可中断可续
+    nonisolated private static func faceOnlyWork(
+        asset: PHAsset, photo: PhotoLibraryService, store: VectorStore,
+        face: FaceEmbedder, errors: FirstErrorBox) async -> Int {
+        do {
+            guard let full = try await photo.image(for: asset, maxPixel: 2048) else {
+                errors.set("取图失败(可能 iCloud 未下载):\(asset.localIdentifier)")
+                return 1
+            }
+            try Task.checkCancellation()
+            try Self.embedFaces(full: full, assetID: asset.localIdentifier,
+                                date: asset.creationDate, face: face, store: store)
+            return 0
+        } catch {
+            if Task.isCancelled { return 0 }
+            errors.set("人脸处理失败:\(error)")
+            return 1
+        }
+    }
+
+    /// 检测人脸并对齐嵌入入库。先清旧行防残留(重处理时脸数可能变少);
+    /// 无论检出几张(含 0 张)都写 face_done 记账,防无脸照片反复重处理
+    nonisolated private static func embedFaces(full: CGImage, assetID: String,
+                                               date: Date?, face: FaceEmbedder?,
+                                               store: VectorStore) throws {
+        guard let face else { return }
+        try store.removeByRef(kind: .face, refKey: assetID)
+        for (i, obs) in FaceKit.detect(cg: full).enumerated() {
+            guard let aligned = FaceKit.alignedFace(source: full, observation: obs) else { continue }
+            let vec = try face.embed(aligned: aligned)
+            try store.upsert(kind: .face, refKey: assetID, frameIndex: i, space: face.space,
+                             vector: vec, title: nil, date: date)
+        }
+        try store.markFaceDone(refKey: assetID)
     }
 
     private func embedVideo(_ asset: PHAsset, errors: FirstErrorBox) async {
