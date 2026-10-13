@@ -64,7 +64,7 @@ jobs:
           python scripts/face_e2e_score.py \
             --model "$RUNNER_TEMP/face/w600k_r50.onnx" \
             --dir "$RUNNER_TEMP/aligned" \
-            --threshold 0.48 --link 0.42 --expel 0.18
+            --threshold 0.48 --link 0.34 --expel 0.18
 
       - name: 上传对齐图(人工目检用)
         if: always()
