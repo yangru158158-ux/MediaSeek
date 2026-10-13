@@ -96,22 +96,28 @@ final class ModelUpdateLoader: NSObject, ObservableObject, URLSessionDownloadDel
         try? FileManager.default.removeItem(at: dest)
         do {
             try FileManager.default.moveItem(at: location, to: dest)
-            let c = continuation
-            continuation = nil
-            c?.resume(returning: dest)
+            Task { @MainActor in
+                guard let c = self.continuation else { return }
+                self.continuation = nil
+                c.resume(returning: dest)
+            }
         } catch {
-            let c = continuation
-            continuation = nil
-            c?.resume(throwing: error)
+            Task { @MainActor in
+                guard let c = self.continuation else { return }
+                self.continuation = nil
+                c.resume(throwing: error)
+            }
         }
     }
 
     nonisolated func urlSession(_ session: URLSession, task: URLSessionTask,
                                 didCompleteWithError error: Error?) {
         guard let error else { return }   // 正常结束时 didFinish 已恢复
-        let c = continuation
-        continuation = nil
-        c?.resume(throwing: error)
+        Task { @MainActor in
+            guard let c = self.continuation else { return }
+            self.continuation = nil
+            c.resume(throwing: error)
+        }
     }
 }
 
