@@ -220,7 +220,38 @@ def decide(v, key, old_rule=False):
 cents = {p: (lambda m: m / (np.linalg.norm(m) + 1e-9))(np.stack([vecs[i] for i in idxs]).mean(axis=0))
          for p, idxs in truth.items()}
 persons = sorted(cents)
+# 大簇稀释质心(模拟真实库里 996 张的「全员平均脸」方向,对糊脸捕获盆最大——
+# 164 吞脸事故的机制条件;3 张的纯净质心复现不出来):
+# owner 质心 = 55% 本人均值 + 45% 全样本均值,竞争者保持纯净质心
+global_mean = np.stack(vecs).mean(axis=0)
 old_swallow = 0
+for i, f in enumerate(files):
+    hv = embed_img(hard_variant(f))
+    owner = labels[i]
+    for p in persons:
+        if p == owner:
+            continue
+        # owner 侧用稀释质心(忠实于大簇),其余人物用纯净质心
+        diluted = 0.55 * cents[p] + 0.45 * global_mean
+        diluted /= np.linalg.norm(diluted) + 1e-9
+        cents_scene = dict(cents)
+        cents_scene[p] = diluted
+        sims = sorted(((float(hv @ c), ci) for ci, c in cents_scene.items()), reverse=True)
+        bs, bi = sims[0]
+        ss, si = sims[1]
+        old_hit = bi == p   # 旧规则:最像本人即吞(无地板无边距)
+        new_hit = (bi == p and bs < 0.40 and not (bs >= 0.32 and bs - ss >= 0.12)
+                   and bs >= 0.25 and (bs - ss >= 0.08))
+        if old_hit:
+            old_swallow += 1
+            print(f"  牙齿样本 {names[i]}(真身 {owner})对稀释质心 {p}:"
+                  f"best {bs:+.3f} second({si}) {ss:+.3f} 边距 {bs - ss:+.3f} "
+                  f"旧规则吞 新规则{'吞' if new_hit else '拒'}")
+        if new_hit:
+            fails.append(f"同行者难脸被吞:{names[i]}(真身 {owner})在 key={{{p}}}(稀释质心)下"
+                         f"边距 {bs - ss:.3f} 仍被放行")
+# 纯净质心场景(3 张小簇):本人难脸必须能被自己组解释(回退保护成立),
+# 同行者难脸不得被吞或误认
 for i, f in enumerate(files):
     hv = embed_img(hard_variant(f))
     owner = labels[i]
@@ -230,12 +261,10 @@ for i, f in enumerate(files):
         if p == owner:
             continue
         m, ok = decide(hv, {p})
-        if decide(hv, {p}, old_rule=True) == (None, True):
-            old_swallow += 1
         if ok and m != owner:
             fails.append(f"同行者难脸被吞/误认:{names[i]}(真身 {owner})在 key={{{p}}} 下"
                          f"被判成 {'本人难脸放行' if m is None else m}")
-print(f"合影补认回归:旧规则会吞 {old_swallow}/{len(files) * (len(persons) - 1)} "
+print(f"合影补认回归:稀释质心场景旧规则会吞 {old_swallow}/{len(files) * (len(persons) - 1)} "
       f"张同行者难脸(测试牙齿对照),新规则容忍 0 张")
 
 if fails:
