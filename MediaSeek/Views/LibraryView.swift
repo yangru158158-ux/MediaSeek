@@ -7,7 +7,6 @@ struct LibraryView: View {
 
     @State private var photoCount = 0
     @State private var videoCount = 0
-    @State private var vectorCount = 0
     @State private var importedFiles: [ImportedFile] = []
     @State private var showFilePicker = false
     @State private var showFolderPicker = false
@@ -129,9 +128,15 @@ struct LibraryView: View {
                 statCard("照片", "\(photoCount)", "photo")
                 statCard("视频", "\(videoCount)", "video")
                 statCard("导入文件", "\(importedFiles.count)", "doc")
-                statCard("向量条目", "\(vectorCount)", "point.3.filled.connected.trianglepath.dotted")
+                statCard("人脸", "\(faceCount)", "faceid")
             }
             .listRowInsets(EdgeInsets(top: 8, leading: 12, bottom: 8, trailing: 12))
+        } footer: {
+            // 157 用户实测「总数与分项数对不上」:原「向量条目」把有人脸的照片数
+            // 混进素材合计(照片+视频+文件+人脸照片),数字合法但语义误导。
+            // 四张卡各自独立计数,不再有隐含的加总关系
+            Text("四项各自独立计数:人脸 = 识别出人脸的照片数(一张照片多张脸只计一次)。")
+                .font(.caption2)
         }
     }
 
@@ -369,7 +374,6 @@ struct LibraryView: View {
             let counts = (try? app.store.counts()) ?? [:]
             photoCount = counts[.photo] ?? 0
             videoCount = counts[.videoFrame] ?? 0
-            vectorCount = counts.values.reduce(0, +)
             faceCount = app.store.faceStats().photos
             importedFiles = app.imports.allFiles()
         }

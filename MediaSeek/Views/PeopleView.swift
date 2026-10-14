@@ -1,5 +1,6 @@
 import SwiftUI
 import Photos
+import Accelerate
 
 /// 人物组合分组:①人脸向量聚类确定「总共几个人」;②每张照片按检出脸
 /// 归出「主角是哪几个人」的集合;③照片归入且只归入该集合对应的组——
@@ -14,9 +15,6 @@ struct ComboGroup: Identifiable {
     let members: [Int]        // 主角人物簇 id;空 = 全是路人/未识别脸
     let refs: [String]
     let scores: [Float]       // 每张照片在其主角簇内的最高相似度
-    /// 照片里还有未识别为「人物」的其他人脸(合影/同行照):单人组只放真单人照,
-    /// 这类照片归「某某 与其他人」桶(153/155 用户三次点名合影不能混进单人组)
-    var withOthers: Bool = false
 }
 
 struct PeopleView: View {
@@ -138,7 +136,7 @@ struct PeopleView: View {
             } label: {
                 Label("清除全部人名标签", systemImage: "tag.slash")
             }
-            Text("精确档:入库即过滤——截图、低质量脸、大侧脸一律不参与(苹果官方质量分把关);每张脸都必须与「平均脸」核验达标才归属,拿不准的一律进「不确定人物」;照片里还有未识别的人(合影/同行)归「某某 与其他人」,单人组只放真单人照。重新命名会覆盖旧名。组内点「排除」可手动移除错误照片,命名后搜索名字即命中。")
+            Text("精确档:入库即过滤——截图、低质量脸、大侧脸一律不参与(苹果官方质量分把关);每张脸都必须与「平均脸」核验达标才归属,拿不准的一律进「不确定人物」。归组时现场补认合影里的第二个人:认出是谁就进对应组合组(如 程玉婷 × 杨如),认不出的路人不算——单人组只放真单人照。重新命名会覆盖旧名。组内点「排除」可手动移除错误照片,命名后搜索名字即命中。")
                 .font(.caption2).foregroundStyle(.secondary)
         }
     }
@@ -169,8 +167,8 @@ struct PeopleView: View {
             Text("人物 \(totalPersons) 人 · \(groups.count) 组")
         } footer: {
             Text(unknownCount > 0
-                 ? "截图/低质量/大侧脸不入库;每张脸都与平均脸核验达标才归属,拿不准的 \(unknownCount) 张在「不确定人物」。角标=与平均脸的相似度。不足 \(foldThreshold) 张的组默认折叠。组内可「排除」错误照片,命名后搜索名字即命中。"
-                 : "截图/低质量/大侧脸不入库;每张脸都与平均脸核验达标才归属,拿不准的进「不确定人物」。角标=与平均脸的相似度。不足 \(foldThreshold) 张的组默认折叠。组内可「排除」错误照片,命名后搜索名字即命中。")
+                 ? "截图/低质量/大侧脸不入库;每张脸都与平均脸核验达标才归属,拿不准的 \(unknownCount) 张在「不确定人物」。角标=与平均脸的相似度。不足 \(foldThreshold) 张的组默认折叠。归组含合影第二人现场补认(约多花 2-5 分钟)。"
+                 : "截图/低质量/大侧脸不入库;每张脸都与平均脸核验达标才归属,拿不准的进「不确定人物」。角标=与平均脸的相似度。不足 \(foldThreshold) 张的组默认折叠。归组含合影第二人现场补认(约多花 2-5 分钟)。")
         }
     }
 
@@ -187,8 +185,7 @@ struct PeopleView: View {
     private func groupTitle(_ g: ComboGroup) -> String {
         guard !g.members.isEmpty else { return "不确定人物" }
         let parts = g.members.map(personDisplay)
-        let base = parts.count == 1 ? parts[0] : parts.joined(separator: " × ")
-        return g.withOthers ? "\(base) 与其他人" : base
+        return parts.count == 1 ? parts[0] : parts.joined(separator: " × ")
     }
 
     private func row(_ g: ComboGroup) -> some View {
@@ -256,48 +253,63 @@ struct PeopleView: View {
         }
     }
 
-    /// 无闸门人头复查(见 start() 内调用处注释):对每组每张照片取 1024px
-    /// 图跑 VNDetectFaceRectanglesRequest(只数人头,不走嵌入闸门),
-    /// 检出人脸数 > 主角数的组标记 withOthers。不确定组跳过(它们本来就
-    /// 是没识别的)。返回与 groups 等长的标记数组
-    private static func presenceCheck(_ groups: [ComboGroup], photo: PhotoLibraryService,
-                                      assets: [String: PHAsset],
-                                      progress: @escaping (Int, Int) -> Void) async -> [Bool] {
-        var maxFaces = Array(repeating: 0, count: groups.count)
-        let items: [(gi: Int, ref: String)] = groups.enumerated().flatMap { gi, g in
-            g.members.isEmpty ? [] : g.refs.map { (gi, $0) }
-        }
-        let total = items.count
+    /// 合影第二人现场补认(见 start() 调用处注释):对每张「检出脸数 > 主角数」
+    /// 的照片,把全部脸无闸门检测+对齐+嵌入,与人物质心点积 ≥0.48 即认出该人,
+    /// 照片的主角集合并入认出的人 → 进对应组合组。认不出(路人/背景脸)不算。
+    /// 4 并发;1024px 取图(闸门滤掉的中小脸在 1024px 下仍可检出)
+    private static func recoverCompanions(refs: [String], baseKeys: [String: Set<Int>],
+                                          centroids: [Int: [Float]], dim: Int,
+                                          photo: PhotoLibraryService, assets: [String: PHAsset],
+                                          face: FaceEmbedder,
+                                          progress: @escaping (Int, Int) -> Void) async -> [String: Set<Int>] {
+        var out: [String: Set<Int>] = [:]
+        let total = refs.count
         progress(0, total)
         var done = 0
         var idx = 0
-        func check(_ it: (gi: Int, ref: String)) async -> (Int, Int) {
-            guard let a = assets[it.ref],
-                  let img = try? await photo.image(for: a, maxPixel: 1024) else { return (it.gi, 0) }
-            return (it.gi, FaceKit.countFaces(cg: img))
+        func work(_ ref: String) async -> (String, Set<Int>)? {
+            guard let a = assets[ref], let key = baseKeys[ref],
+                  let img = try? await photo.image(for: a, maxPixel: 1024) else { return nil }
+            // 无闸门检测(质量/姿态闸门全关,只留 30px 小脸下限):补认的目的
+            // 恰是找回被闸门滤掉的第二人
+            let faces = FaceKit.detect(cg: img, maxFaces: 12, minFacePx: 30,
+                                       minQuality: 0, maxYawDeg: 360)
+            guard faces.count > key.count else { return nil }
+            var matched = Set<Int>()
+            for obs in faces {
+                guard let aligned = FaceKit.alignedFace(source: img, observation: obs),
+                      let vec = try? face.embed(aligned: aligned) else { continue }
+                var bestCi = -1
+                var bestSim: Float = -2
+                for (ci, c) in centroids {
+                    var dot: Float = 0
+                    vDSP_dotpr(vec, 1, c, 1, &dot, vDSP_Length(dim))
+                    if dot > bestSim { bestSim = dot; bestCi = ci }
+                }
+                if bestCi >= 0, bestSim >= 0.48 { matched.insert(bestCi) }
+            }
+            return matched.isEmpty ? nil : (ref, matched)
         }
-        await withTaskGroup(of: (Int, Int).self) { group in
+        await withTaskGroup(of: (String, Set<Int>)?.self) { group in
             let maxConcurrent = 4
-            while idx < min(maxConcurrent, items.count) {
-                let it = items[idx]; idx += 1
-                group.addTask { await check(it) }
+            while idx < min(maxConcurrent, refs.count) {
+                let ref = refs[idx]; idx += 1
+                group.addTask { await work(ref) }
             }
             while !group.isEmpty {
-                if let (gi, faces) = await group.next() {
+                if let r = await group.next() {
                     done += 1
-                    maxFaces[gi] = max(maxFaces[gi], faces)
                     if done % 10 == 0 || done == total { progress(done, total) }
+                    if let (ref, matched) = r { out[ref] = matched }
                 }
                 if Task.isCancelled { break }
-                if idx < items.count {
-                    let it = items[idx]; idx += 1
-                    group.addTask { await check(it) }
+                if idx < refs.count {
+                    let ref = refs[idx]; idx += 1
+                    group.addTask { await work(ref) }
                 }
             }
         }
-        return groups.indices.map { i in
-            !groups[i].members.isEmpty && maxFaces[i] > groups[i].members.count
-        }
+        return out
     }
 
     private func start() {
@@ -314,6 +326,8 @@ struct PeopleView: View {
         scanning = true
         progress = (0, 1)
         let store = app.store
+        let photoLib = app.photoLib
+        let faceModel = app.models.face
         Task.detached(priority: .userInitiated) {
             do {
                 let data = try store.allFaceVectors()
@@ -348,50 +362,72 @@ struct PeopleView: View {
                 for (ci, best) in clusterBest { clusterRefSets[ci] = Set(best.keys) }
                 // ② 谁是「人物」:簇覆盖 ≥3 张不同照片;更小簇是一次性路人/误检脸
                 let persons = Set(clusterRefSets.filter { $0.value.count >= personMinPhotos }.keys)
-                // ③ 照片按主角集合精确归组:属于且只属于「主角是哪几个人」对应组。
-                // 合影判定:照片的人脸总数(blocked 已排除)减去「已达标人物」的脸数,
-                // 差 ≥1 = 还有未识别的人(同行者/未达标簇/被核验移出的脸)——
-                // 真单人照进单人组,合影进「主角 与其他人」桶;镜像/海报同人双脸
-                // (两张脸同簇)不会被误判为「有他人」
-                var faceCount: [String: Int] = [:]
-                for r in data.refs { faceCount[r, default: 0] += 1 }
-                var refPersonFaces: [String: Int] = [:]
-                for (ci, g) in scored.enumerated() where persons.contains(ci) {
-                    for m in g { refPersonFaces[data.refs[m.index], default: 0] += 1 }
+                // ③ 先取资产(补认要用图),再对「合影嫌疑照片」做第二人现场补认,
+                // 最后按主角集合精确归组
+                var fetched: [String: PHAsset] = [:]
+                let fetch = PHAsset.fetchAssets(withLocalIdentifiers: Array(refClusters.keys), options: nil)
+                fetch.enumerateObjects { a, _, _ in fetched[a.localIdentifier] = a }
+
+                // 合影第二人现场补认:入库闸门(小脸/质量/姿态)会把合影里第二个人
+                // 的脸滤在库外 → 该照片只挂主角、混进单人组(156 实测杨如组混两人
+                // 合影)。157 曾用组级「与其他人」标记——一张背景路人脸污染整组
+                // (157 用户实测所有组全被误标,组级聚合是错的)。158 改逐张补认:
+                // 检出脸数 > 主角数的照片,对其全部脸无闸门检测+对齐+嵌入,与
+                // 人物质心(平均脸)≥0.48 匹配 → 主角集合扩为真实集合,进对应
+                // 组合组(杨如×程玉婷);认不出的(路人/背景脸)不算他人——
+                // 单人组只放真单人照,合影进组合组,没有「与其他人」桶
+                var baseKeys: [String: Set<Int>] = [:]
+                for (r, cs) in refClusters {
+                    let key = cs.intersection(persons)
+                    if !key.isEmpty { baseKeys[r] = key }
                 }
+                var centroids: [Int: [Float]] = [:]
+                for (ci, g) in scored.enumerated() where persons.contains(ci) {
+                    var c = [Float](repeating: 0, count: data.dim)
+                    for m in g { for d in 0..<data.dim { c[d] += data.flat[m.index * data.dim + d] } }
+                    var ss: Float = 0
+                    vDSP_dotpr(c, 1, c, 1, &ss, vDSP_Length(data.dim))
+                    let n = max(ss.squareRoot(), 1e-8)
+                    for d in 0..<data.dim { c[d] /= n }
+                    centroids[ci] = c
+                }
+                var recovered: [String: Set<Int>] = [:]
+                if let faceModel {
+                    recovered = await Self.recoverCompanions(
+                        refs: Array(baseKeys.keys), baseKeys: baseKeys,
+                        centroids: centroids, dim: data.dim,
+                        photo: photoLib, assets: fetched, face: faceModel) { done, total in
+                        Task { @MainActor in progress = (done, total) }
+                    }
+                }
+
                 var comboMap: [Set<Int>: (refs: [String], scores: [Float])] = [:]
-                var othersMap: [Set<Int>: (refs: [String], scores: [Float])] = [:]
                 var unknownRefs: [String] = []
                 var unknownScores: [Float] = []
                 for (r, cs) in refClusters {
-                    let key = cs.intersection(persons)
+                    var key = cs.intersection(persons)
+                    if let rec = recovered[r] { key.formUnion(rec) }
                     let best = cs.compactMap { clusterBest[$0]?[r] }.max() ?? Float(1)
-                    let hasExtra = (faceCount[r] ?? 0) - (refPersonFaces[r] ?? 0) >= 1
                     if key.isEmpty {
                         unknownRefs.append(r); unknownScores.append(best)
                     } else {
-                        var entry = (hasExtra ? othersMap[key] : comboMap[key]) ?? ([], [])
+                        var entry = comboMap[key] ?? ([], [])
                         entry.refs.append(r)
                         entry.scores.append(best)
-                        if hasExtra { othersMap[key] = entry } else { comboMap[key] = entry }
+                        comboMap[key] = entry
                     }
                 }
-                var ordered: [(members: [Int], refs: [String], scores: [Float], withOthers: Bool)] =
-                    comboMap.map { (Array($0.key).sorted(), $0.value.refs, $0.value.scores, false) }
-                    + othersMap.map { (Array($0.key).sorted(), $0.value.refs, $0.value.scores, true) }
+                var ordered: [(members: [Int], refs: [String], scores: [Float])] =
+                    comboMap.map { (Array($0.key).sorted(), $0.value.refs, $0.value.scores) }
                 // 不确定组先入列再排序:它也是普通一组,按照片数排(153 排序 bug 教训:
                 // 排序后追加会让 44 张的不确定组落在 10 张组后面)
                 if !unknownRefs.isEmpty {
-                    ordered.append(([], unknownRefs, unknownScores, false))
+                    ordered.append(([], unknownRefs, unknownScores))
                 }
                 // 按组内照片数降序(用户指定)
                 ordered.sort { $0.refs.count > $1.refs.count }
-                // 已删除照片不出场(资产取不到的顺带剔除),空组丢弃
-                let allRefs = Array(Set(ordered.flatMap { $0.refs }))
-                var fetched: [String: PHAsset] = [:]
-                let fetch = PHAsset.fetchAssets(withLocalIdentifiers: allRefs, options: nil)
-                fetch.enumerateObjects { a, _, _ in fetched[a.localIdentifier] = a }
                 // ④ 人名:该人照片里覆盖率 ≥40% 的标签众数(无门槛众数会污染,147 教训)
+                let allRefs = Array(Set(ordered.flatMap { $0.refs }))
                 let tagMap = store.userTagsForRefs(allRefs)
                 var names: [Int: String] = [:]
                 var refsOf: [Int: [String]] = [:]
@@ -413,25 +449,9 @@ struct PeopleView: View {
                     let scores = o.scores.enumerated()
                         .filter { aliveSet.contains(o.refs[$0.offset]) }.map(\.element)
                     outGroups.append(ComboGroup(id: i, members: o.members,
-                                                refs: alive, scores: scores, withOthers: o.withOthers))
+                                                refs: alive, scores: scores))
                 }
                 let unknownAlive = outGroups.first { $0.members.isEmpty }?.refs.count ?? 0
-
-                // 合影补检:入库闸门(小脸/质量/姿态)会把合影里第二个人的脸
-                // 滤在库外——库里只剩主角 = 单人组混进合影(156 用户实测杨如组
-                // 多张与程玉婷合影)。对每组照片做一次无闸门人头计数复查:
-                // 检出人脸数 > 主角数 → 「与其他人」。检测毫秒级,1024px 取图
-                let photo = app.photoLib
-                let flagged = await Self.presenceCheck(
-                    outGroups, photo: photo, assets: fetched) { done, total in
-                    Task { @MainActor in progress = (done, total) }
-                }
-                outGroups = outGroups.enumerated().map { i, g in
-                    var g = g
-                    g.withOthers = g.withOthers || (flagged[i] == true)
-                    return g
-                }
-                await MainActor.run { progress = nil }
 
                 await MainActor.run {
                     scanning = false
