@@ -238,7 +238,7 @@ final class IndexingCoordinator: ObservableObject {
             // ⚠️ vidNoLabel 里的跳过:整部视频所有帧 Vision 分类置信度都 <0.3
             // (暗光/抽象内容)的视频永远写不出标签行,不跳过=每轮自愈无限重跑
             // (155 用户实测「永远有 6 个视频一直可以索引」的根因之一)
-            if let frameStats = try? store.videoFrameStats(), stats.videos > 0,
+            if let frameStats = try? store.videoFrameStats(), frameStats.videos > 0,
                let labelRefs = try? store.refKeys(kinds: [.videoFrameLabel]) {
                 let noLabel = Set(UserDefaults.standard.stringArray(forKey: "vidNoLabel") ?? [])
                 for key in frameStats.perVideo.keys
