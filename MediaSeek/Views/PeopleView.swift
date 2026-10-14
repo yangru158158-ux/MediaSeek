@@ -538,7 +538,9 @@ struct PeoplePanel: View {
                 }
                 for _ in 0..<embedFails { detailParts.append("嵌入失败U") }
                 // 未识别的主角级脸 = 检出但对不上任何人物、也不像组内本人
-                // (侧/糊/路人/veto)。镜像/海报同人双脸两张分接近,不会被 veto
+                // (侧/糊/路人)。镜像/海报同人双脸:嵌入一致(≥0.48)豁免
+                // 分差 veto(第十一批)——第二脸分数天然更低,降级会凭空造出
+                // 「未识别同行脸」把单人照推进「与其他人」
                 var unexplained = major.count - explained
                 var bodyNote = ""
                 // 躯干兜底(167 实测漏径:双人照复检只出 1 脸——同行者的脸被
@@ -653,11 +655,11 @@ struct PeoplePanel: View {
     /// 人名按当前标签重推——重命名/清标签无需重扫
     private func hydrateIfNeeded() {
         guard m.groups.isEmpty, !m.scanning else { return }
-        // 算法盐 a10:归组/补认逻辑变更必须升盐——旧快照与补认缓存不能复活旧裁决。
+        // 算法盐 a11:归组/补认逻辑变更必须升盐——旧快照与补认缓存不能复活旧裁决。
         // (人脸行/排除/模型)不含算法版本,163 的旧判决经快照水化+缓存命中在
         // 164 原样复活,用户看到的就是"修了没变化"
         let ver = app.store.peopleFingerprint(
-            extra: "a10-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
+            extra: "a11-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
         guard let json = app.store.loadPeopleResults(ver: ver),
               let data = json.data(using: .utf8),
               let snap = try? JSONDecoder().decode(PeopleSnapshot.self, from: data) else {
@@ -725,9 +727,9 @@ struct PeoplePanel: View {
         let faceModel = app.models.face
         let model = app.people   // 结果写共享模型:面板关了再开不丢(160 教训)
         // 指纹:人脸数据/排除集合/模型任一变化,快照与补认缓存自动作废;
-        // a8=算法盐,归组逻辑变更必须升盐(与 hydrateIfNeeded 同串)
+        // a11=算法盐,归组逻辑变更必须升盐(与 hydrateIfNeeded 同串)
         let ver = store.peopleFingerprint(
-            extra: "a10-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
+            extra: "a11-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
         // 「扫描中」记账 + 屏幕常亮:退后台被系统结束进程后,重开面板能明确
         // 告知「上次未完成」;常亮防前台锁屏挂起
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "peopleScanRunning")

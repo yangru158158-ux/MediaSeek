@@ -32,7 +32,8 @@ jobs:
 
       - name: 编译并运行几何测试
         run: |
-          swiftc -O MediaSeek/Core/FaceKit.swift scripts/face_align_test.swift \
+          swiftc -O MediaSeek/Core/FaceKit.swift MediaSeek/Core/FaceRecoveryPolicy.swift \
+            scripts/face_align_test.swift \
             -o /tmp/facetest -framework CoreML -framework Vision
           /tmp/facetest
 

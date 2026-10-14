@@ -40,15 +40,35 @@ struct FaceRecoveryPolicyTest {
             "脸间相似的同人双脸不应因共享人物簇而被额外 veto"
         )
 
-        let lowScoreFace = FaceRecoveryPolicy.Match(
+        let mirrorFace = FaceRecoveryPolicy.Match(
             cluster: owner,
             score: 0.44,
             strong: true,
             embedding: [0.99, sqrt(Float(1) - Float(0.99 * 0.99)), 0]
         )
         expect(
-            vetoes([similarFaceA, lowScoreFace]) == [1],
-            "原有低分/大分差 veto 必须继续生效"
+            vetoes([similarFaceA, mirrorFace]).isEmpty,
+            "同人双脸(镜像/海报/倒影,嵌入一致≥0.48)分数悬殊也不 veto——降级会凭空造出未识别脸把单人照推进「与其他人」(第十一批)"
+        )
+        let strayLowFace = FaceRecoveryPolicy.Match(
+            cluster: owner,
+            score: 0.44,
+            strong: true,
+            embedding: [0, 1, 0]
+        )
+        expect(
+            vetoes([similarFaceA, strayLowFace]) == [1],
+            "跨人低分认领(嵌入不一致)的绝对分 veto 照常生效(166 同伴保护)"
+        )
+        let strayFarFace = FaceRecoveryPolicy.Match(
+            cluster: owner,
+            score: 0.30,
+            strong: false,
+            embedding: [0, 0.6, 0.8]
+        )
+        expect(
+            vetoes([similarFaceA, strayFarFace]) == [1],
+            "跨人大分差认领(嵌入不一致)的分差 veto 照常生效"
         )
 
         let tiedBest = FaceRecoveryPolicy.Match(
@@ -128,6 +148,37 @@ struct FaceRecoveryPolicyTest {
                 CGRect(x: 0.02, y: 0.50, width: 0.04, height: 0.15)
             ]) == 2,
             "同行者计入且背景小躯干不计入(混合场景)"
+        )
+
+        // —— 躯干去重(第十一批):上半身+全身双模式同框各框一次,上半身框
+        // 嵌套在全身框上部(IoU 0.35-0.5 卡 0.5 线下),单人照被数成 2 躯干 ——
+        // 173 实测『躯干2个[100%,81%]/同伴级2→判有同行』单人照误进「与其他人」
+        let fullBody = CGRect(x: 0.10, y: 0.0, width: 0.40, height: 0.90)
+        let upperBody = CGRect(x: 0.12, y: 0.50, width: 0.32, height: 0.40)
+        expect(
+            FaceRecoveryPolicy.mergedBodyBoxes([fullBody, upperBody]).count == 1,
+            "同人上半身框嵌套在全身框内(IoU≈0.36<0.5)应并成 1 个躯干"
+        )
+        expect(
+            FaceRecoveryPolicy.significantBodyCount(
+                FaceRecoveryPolicy.mergedBodyBoxes([fullBody, upperBody])) == 1,
+            "去重后单人照同伴级躯干=1,不再误判有同行(宽度比 80%≈实测 81% 样本)"
+        )
+        expect(
+            FaceRecoveryPolicy.mergedBodyBoxes([
+                heroBody, CGRect(x: 0.52, y: 0.0, width: 0.32, height: 0.85)
+            ]).count == 2,
+            "并肩两人的躯干框不并"
+        )
+        expect(
+            FaceRecoveryPolicy.mergedBodyBoxes([
+                heroBody, CGRect(x: 0.42, y: 0.0, width: 0.30, height: 0.85)
+            ]).count == 2,
+            "部分交叠(前后站)的两人躯干框不并(交叠/较小框 ≈27% < 60%)"
+        )
+        expect(
+            FaceRecoveryPolicy.mergedBodyBoxes([heroBody, heroBody]).count == 1,
+            "近重合双框(IoU>0.5)照旧去重"
         )
 
         // SigLIP 计数兜底(贴脸/重叠构图连躯干检测器都只框出一人时的最后证据):
@@ -228,7 +279,7 @@ struct FaceRecoveryPolicyTest {
             "『嵌入失败U』段被跳过,只解析出 1 个脸段"
         )
 
-        print("PASS: 同图双脸补认策略的 37 项确定性回归断言全部通过")
+        print("PASS: 同图双脸补认策略的 44 项确定性回归断言全部通过")
     }
 
     private static func vetoes(_ matches: [FaceRecoveryPolicy.Match]) -> Set<Int> {

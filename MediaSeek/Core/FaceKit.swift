@@ -153,8 +153,11 @@ enum FaceKit {
     }
 
     /// 人体检测(躯干兜底):VNDetectHumanRectanglesRequest 上半身+全身两种
-    /// 模式并跑,IoU>0.5 去重。只数身体不认身份——167 实测漏径:合影第二人
-    /// 被脸检整个漏检(侧脸/遮挡/动感模糊),躯干是最后的几何证据通道。
+    /// 模式并跑,去重交给 FaceRecoveryPolicy.mergedBodyBoxes(IoU>0.5 近重合
+    /// + 交叠≥较小框 60% 嵌套——同人上半身框嵌在全身框上部,IoU 常只有
+    /// 0.35-0.5,第十一批前漏去重把单人照数成 2 个躯干)。只数身体不认
+    /// 身份——167 实测漏径:合影第二人被脸检整个漏检(侧脸/遮挡/动感
+    /// 模糊),躯干是最后的几何证据通道。
     /// ⚠️ 单一模式各有盲区(实测互为镜像):全身模式(upperBodyOnly=false)
     /// 对自拍/半身构图整张漏检(人只有上半身在画面里);上半身模式对
     /// 弯腰/躺姿/身体被裁切的构图漏检(170 实测双人照『躯干1个/主角级1』=
@@ -170,11 +173,7 @@ enum FaceKit {
                 boxes.append(contentsOf: (request.results ?? []).map { $0.boundingBox })
             }
         }
-        var merged: [CGRect] = []
-        for b in boxes where !merged.contains(where: { iou($0, b) > 0.5 }) {
-            merged.append(b)
-        }
-        return merged
+        return FaceRecoveryPolicy.mergedBodyBoxes(boxes)
     }
 
     /// 按双眼做相似变换对齐(双眼转水平、瞳距缩放到模板值、眼中点平移到模板位)。

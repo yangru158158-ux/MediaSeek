@@ -14,17 +14,29 @@ enum FaceRecoveryPolicy {
         recognizedClusters: Set<Int>,
         pairSimilarityFloor: Float = 0.48
     ) -> Set<Int> {
-        var topByCluster: [Int: Float] = [:]
-        for match in matches where recognizedClusters.contains(match.cluster) {
-            topByCluster[match.cluster] = max(topByCluster[match.cluster] ?? -2, match.score)
+        // 每簇最高分认领的行号(嵌入一致性豁免的对照对象)
+        var topIndexByCluster: [Int: Int] = [:]
+        for (index, match) in matches.enumerated() where recognizedClusters.contains(match.cluster) {
+            if let cur = topIndexByCluster[match.cluster] {
+                if matches[cur].score < match.score { topIndexByCluster[match.cluster] = index }
+            } else {
+                topIndexByCluster[match.cluster] = index
+            }
         }
 
         var vetoed = Set<Int>()
         for (index, match) in matches.enumerated() where recognizedClusters.contains(match.cluster) {
-            let top = topByCluster[match.cluster] ?? match.score
-            if match.score < top && (top - match.score > 0.15 || match.score < 0.45) {
-                vetoed.insert(index)
-            }
+            guard let topIndex = topIndexByCluster[match.cluster], topIndex != index else { continue }
+            let top = matches[topIndex].score
+            guard match.score < top, top - match.score > 0.15 || match.score < 0.45 else { continue }
+            // 分差/低分只是嫌疑不是定罪:与最高分认领嵌入一致(≥0.48,同人
+            // 下限 0.484/跨人上限 0.16 的 CI 标定带)= 同人双脸(镜像/海报/
+            // 水面倒影,第二脸因更糊/角度更偏天然压分)→ 豁免。173 实测大量
+            // 「见2脸·均判本人」的单人照被 V 凭空造出「未识别同行脸」推进
+            // 「与其他人」。同行者的脸是跨人嵌入,到不了 0.48 线,照 veto。
+            if let sim = cosineSimilarity(match.embedding, matches[topIndex].embedding),
+               sim >= pairSimilarityFloor { continue }
+            vetoed.insert(index)
         }
 
         for cluster in recognizedClusters.sorted() {
@@ -74,6 +86,34 @@ enum FaceRecoveryPolicy {
     static func significantBodyCount(_ bodies: [CGRect], ratio: CGFloat = 0.18) -> Int {
         guard let hero = bodies.max(by: { $0.width < $1.width }), hero.width > 0 else { return 0 }
         return bodies.filter { $0.width >= hero.width * ratio }.count
+    }
+
+    /// 躯干框去重(第十一批):上半身+全身双模式并跑时,同一个人常被两种
+    /// 模式各框一次——上半身框嵌套在全身框上部,高度只有全身框约一半,
+    /// IoU 常 0.35-0.5 卡在 0.5 线下漏去重,单人照被数成 2 个躯干
+    /// (173 实测『躯干2个[100%,81%]/同伴级2→判有同行』单人照整批误进
+    /// 「与其他人」)。追加嵌套判据:交叠面积 ≥ 较小框面积 60% = 同一人
+    /// 的两个框,保留先到者。并不同人的身体框(并肩/前后站)互相包含率
+    /// 低,不受影响;成人框完全包住身前小孩的极端构图会被并掉(取舍:
+    /// 该构图脸检通常能数出两人,不走躯干层)。
+    static func mergedBodyBoxes(_ boxes: [CGRect], containment: CGFloat = 0.6) -> [CGRect] {
+        var merged: [CGRect] = []
+        for b in boxes {
+            let duplicate = merged.contains { m -> Bool in
+                let inter = m.intersection(b)
+                guard !inter.isNull, inter.width > 0, inter.height > 0 else { return false }
+                let interArea = inter.width * inter.height
+                let areaM = m.width * m.height, areaB = b.width * b.height
+                let union = areaM + areaB - interArea
+                guard union > 0 else { return false }
+                if interArea / union > 0.5 { return true }   // 近重合(Vision 双框原判据)
+                let smaller = min(areaM, areaB)
+                guard smaller > 0 else { return false }
+                return interArea / smaller >= containment    // 嵌套:同人上半身框⊂全身框
+            }
+            if !duplicate { merged.append(b) }
+        }
+        return merged
     }
 
     /// SigLIP 计数兜底:脸检(双通道并集)与躯干(双模式+同伴级)都只数出
