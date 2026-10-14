@@ -23,6 +23,9 @@ final class AppModel: ObservableObject {
     let models: ModelManager
     let indexing: IndexingCoordinator
     let search: SearchEngine
+    /// 人物归组的扫描状态与结果:App 级共享,归组面板关了再开不丢
+    /// (160 教训:结果放视图 @State,长扫描期间关面板=结果写给已销毁视图)
+    let people = PeopleModel()
 
     @Published var errorMessage: String?
     @Published var successMessage: String?

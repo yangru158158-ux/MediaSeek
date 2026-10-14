@@ -21,19 +21,35 @@ struct ComboGroup: Identifiable {
     var withOthers: Bool = false
 }
 
+/// 归组扫描共享状态:挂在 AppModel 一份,视图只观察。
+/// 160 的教训:结果放在 sheet 的 @State 里,用户长扫描期间关面板等全局弹窗
+/// (两轮实测都是这个习惯),完成时结果写进已销毁的视图,重开面板=全新空视图,
+/// 「扫描完没有结果生成」。搬进共享对象后:关了再开照常显示进度/结果;
+/// 跨视图实例的防重复扫描守卫也才真正生效(@State 私有,守不住新实例)
+@MainActor
+final class PeopleModel: ObservableObject {
+    @Published var scanning = false
+    @Published var progress: (done: Int, total: Int)?
+    @Published var groups: [ComboGroup] = []
+    @Published var personNames: [Int: String] = [:]   // 簇 → 显示名(标签覆盖达标)
+    @Published var personRefs: [Int: [String]] = [:]  // 簇 → 该人全部照片(命名打标签范围)
+    @Published var assets: [String: PHAsset] = [:]
+    @Published var totalPersons = 0
+    @Published var unknownCount = 0
+}
+
 struct PeopleView: View {
+    @EnvironmentObject var app: AppModel
+
+    var body: some View { PeoplePanel(m: app.people) }
+}
+
+struct PeoplePanel: View {
+    @ObservedObject var m: PeopleModel
     @EnvironmentObject var app: AppModel
     @Environment(\.dismiss) private var dismiss
 
-    @State private var scanning = false
-    @State private var progress: (done: Int, total: Int)?
-    @State private var groups: [ComboGroup] = []
-    @State private var personNames: [Int: String] = [:]   // 簇 → 显示名(标签覆盖达标)
-    @State private var personRefs: [Int: [String]] = [:]  // 簇 → 该人全部照片(命名打标签范围)
-    @State private var assets: [String: PHAsset] = [:]
     @State private var faceTotal = 0
-    @State private var totalPersons = 0
-    @State private var unknownCount = 0
     @State private var showingSmall = false
     @State private var confirmClearTags = false
     @State private var blockedCount = 0
@@ -64,16 +80,16 @@ struct PeopleView: View {
         NavigationStack {
             Form {
                 setupSection
-                if scanning, let p = progress, p.total > 0 {
+                if m.scanning, let p = m.progress, p.total > 0 {
                     Section {
                         ProgressView(value: Double(p.done) / Double(p.total))
                         Text("已处理 \(p.done)/\(p.total)")
                             .font(.caption2).foregroundStyle(.secondary)
                     }
                 }
-                if !groups.isEmpty {
+                if !m.groups.isEmpty {
                     resultsSection
-                } else if !scanning, faceTotal == 0 {
+                } else if !m.scanning, faceTotal == 0 {
                     Section {
                         Text(emptyHint).font(.footnote).foregroundStyle(.secondary)
                     }
@@ -119,14 +135,14 @@ struct PeopleView: View {
             Button {
                 start()
             } label: {
-                if scanning {
+                if m.scanning {
                     HStack { ProgressView(); Text("扫描中…") }
                 } else {
                     Label(faceTotal < 2 ? "人脸数据不足,先同步补全" : "开始归组",
                           systemImage: "person.2")
                 }
             }
-            .disabled(scanning || faceTotal < 2 || app.models.state(for: .face) != .ready)
+            .disabled(m.scanning || faceTotal < 2 || app.models.state(for: .face) != .ready)
             if blockedCount > 0 {
                 Button {
                     restoreBlocked()
@@ -168,21 +184,21 @@ struct PeopleView: View {
                 }
             }
         } header: {
-            Text("人物 \(totalPersons) 人 · \(groups.count) 组")
+            Text("人物 \(m.totalPersons) 人 · \(m.groups.count) 组")
         } footer: {
-            Text(unknownCount > 0
-                 ? "截图/低质量/大侧脸不入库;每张脸都与平均脸核验达标才归属,拿不准的 \(unknownCount) 张在「不确定人物」。角标=与平均脸的相似度。不足 \(foldThreshold) 张的组默认折叠。归组含合影第二人现场补认(2048px 复检,约多花几分钟);认不出的同行人照片归「与其他人」。"
+            Text(m.unknownCount > 0
+                 ? "截图/低质量/大侧脸不入库;每张脸都与平均脸核验达标才归属,拿不准的 \(m.unknownCount) 张在「不确定人物」。角标=与平均脸的相似度。不足 \(foldThreshold) 张的组默认折叠。归组含合影第二人现场补认(2048px 复检,约多花几分钟);认不出的同行人照片归「与其他人」。"
                  : "截图/低质量/大侧脸不入库;每张脸都与平均脸核验达标才归属,拿不准的进「不确定人物」。角标=与平均脸的相似度。不足 \(foldThreshold) 张的组默认折叠。归组含合影第二人现场补认(2048px 复检,约多花几分钟);认不出的同行人照片归「与其他人」。")
         }
     }
 
     /// 少于 10 张的组默认折叠隐藏(用户指定),主列表只看大组
     private let foldThreshold = 10
-    private var majorGroups: [ComboGroup] { groups.filter { $0.refs.count >= foldThreshold } }
-    private var minorGroups: [ComboGroup] { groups.filter { $0.refs.count < foldThreshold } }
+    private var majorGroups: [ComboGroup] { m.groups.filter { $0.refs.count >= foldThreshold } }
+    private var minorGroups: [ComboGroup] { m.groups.filter { $0.refs.count < foldThreshold } }
 
     private func personDisplay(_ ci: Int) -> String {
-        let n = personNames[ci] ?? ""
+        let n = m.personNames[ci] ?? ""
         return n.isEmpty ? "未命名" : n
     }
 
@@ -201,7 +217,7 @@ struct PeopleView: View {
         return NavigationLink {
             ClusterDetailView(members: g.members,
                               refs: g.refs, scores: g.scores,
-                              personNames: $personNames, personRefs: personRefs,
+                              personNames: $m.personNames, personRefs: m.personRefs,
                               title: groupTitle(g),
                               onChanged: {
                                   blockedCount = app.store.blockedFacePhotoCount()
@@ -210,7 +226,7 @@ struct PeopleView: View {
         } label: {
             HStack(spacing: 12) {
                 Group {
-                    if let a = thumbRef.flatMap({ assets[$0] }) {
+                    if let a = thumbRef.flatMap({ m.assets[$0] }) {
                         AssetThumbView(asset: a, pixel: 160)
                     } else {
                         Rectangle().fill(Color(.systemGray5))
@@ -239,7 +255,7 @@ struct PeopleView: View {
     private func clearTags() {
         do {
             try app.store.deleteAllUserTags()
-            personNames = [:]
+            m.personNames = [:]
             app.notify("已清除全部人名标签;确认单人分组无误后,再逐组重新命名")
         } catch {
             app.fail(error)
@@ -279,44 +295,49 @@ struct PeopleView: View {
         func work(_ ref: String) async -> (String, Set<Int>, Int)? {
             guard let a = assets[ref], let key = baseKeys[ref],
                   let img = try? await photo.image(for: a, maxPixel: 2048) else { return nil }
-            // 无闸门检测(质量/姿态全关):补认的目的恰是找回被闸门滤掉的第二人;
-            // 2048px 与索引同级,被索引漏掉的小脸这里同样漏不掉
-            let faces = FaceKit.detect(cg: img, maxFaces: 12, minFacePx: 40,
-                                       minQuality: 0, maxYawDeg: 360)
-            guard !faces.isEmpty else { return nil }
-            // 主角级脸 = 宽度 ≥ 最大脸 30%:合影第二人与主脸尺寸相当;远处路人/
-            // 背景小脸不到这条线,不参与触发也不参与补认
-            let maxW = faces.map { $0.boundingBox.width }.max() ?? 0
-            let major = faces.filter { $0.boundingBox.width >= maxW * 0.3 }
-            guard major.count > key.count else { return nil }
-            var matched = Set<Int>()
-            var explained = 0
-            for obs in major {
-                guard let aligned = FaceKit.alignedFace(source: img, observation: obs),
-                      let vec = try? face.embed(aligned: aligned) else {
-                    continue   // 对齐/嵌入失败的算未识别
-                }
-                var bestCi = -1
-                var bestSim: Float = -2, secondSim: Float = -2
-                for (ci, c) in centroids {
-                    var dot: Float = 0
-                    vDSP_dotpr(vec, 1, c, 1, &dot, vDSP_Length(dim))
-                    if dot > bestSim {
-                        secondSim = bestSim
-                        bestSim = dot; bestCi = ci
-                    } else if dot > secondSim {
-                        secondSim = dot
+            // 协作线程没有逐任务的 autorelease pool:上千张 × 2048px 的 Vision
+            // ObjC 临时对象会一路攒到内存红线被系统杀进程(扫描到末尾莫名
+            // 无结果的潜在诱因)——每张处理完立即排干
+            return autoreleasepool { () -> (String, Set<Int>, Int)? in
+                // 无闸门检测(质量/姿态全关):补认的目的恰是找回被闸门滤掉的第二人;
+                // 2048px 与索引同级,被索引漏掉的小脸这里同样漏不掉
+                let faces = FaceKit.detect(cg: img, maxFaces: 12, minFacePx: 40,
+                                           minQuality: 0, maxYawDeg: 360)
+                guard !faces.isEmpty else { return nil }
+                // 主角级脸 = 宽度 ≥ 最大脸 30%:合影第二人与主脸尺寸相当;远处路人/
+                // 背景小脸不到这条线,不参与触发也不参与补认
+                let maxW = faces.map { $0.boundingBox.width }.max() ?? 0
+                let major = faces.filter { $0.boundingBox.width >= maxW * 0.3 }
+                guard major.count > key.count else { return nil }
+                var matched = Set<Int>()
+                var explained = 0
+                for obs in major {
+                    guard let aligned = FaceKit.alignedFace(source: img, observation: obs),
+                          let vec = try? face.embed(aligned: aligned) else {
+                        continue   // 对齐/嵌入失败的算未识别
+                    }
+                    var bestCi = -1
+                    var bestSim: Float = -2, secondSim: Float = -2
+                    for (ci, c) in centroids {
+                        var dot: Float = 0
+                        vDSP_dotpr(vec, 1, c, 1, &dot, vDSP_Length(dim))
+                        if dot > bestSim {
+                            secondSim = bestSim
+                            bestSim = dot; bestCi = ci
+                        } else if dot > secondSim {
+                            secondSim = dot
+                        }
+                    }
+                    if bestCi >= 0,
+                       bestSim >= 0.40 || (bestSim >= 0.32 && bestSim - secondSim >= 0.12) {
+                        matched.insert(bestCi)
+                        explained += 1
                     }
                 }
-                if bestCi >= 0,
-                   bestSim >= 0.40 || (bestSim >= 0.32 && bestSim - secondSim >= 0.12) {
-                    matched.insert(bestCi)
-                    explained += 1
-                }
+                // 未识别的主角级脸 = 检出但对不上任何人物(侧/糊/路人)。镜像/海报
+                // 同人双脸不会误报:两张脸都匹配上本人 → explained=2
+                return (ref, matched, major.count - explained)
             }
-            // 未识别的主角级脸 = 检出但对不上任何人物(侧/糊/路人)。镜像/海报
-            // 同人双脸不会误报:两张脸都匹配上本人 → explained=2
-            return (ref, matched, major.count - explained)
         }
         await withTaskGroup(of: (String, Set<Int>, Int)?.self) { group in
             let maxConcurrent = 4
@@ -343,7 +364,7 @@ struct PeopleView: View {
     }
 
     private func start() {
-        guard !scanning else { return }
+        guard !m.scanning else { return }
         // 守卫:人脸模型换了但脸数据还没按新模型重嵌——此时聚类的是旧模型向量,
         // 新旧嵌入空间不通用,聚出来的必然混人。重建中(库被清空重嵌)不拦,
         // 聚的是已完成部分的新向量
@@ -353,17 +374,18 @@ struct PeopleView: View {
             app.notify("人脸模型已更换,旧数据还没重建完:回资料库等「同步」跑完再归组(约 30-60 分钟,可中断可续)")
             return
         }
-        scanning = true
-        progress = (0, 1)
+        m.scanning = true
+        m.progress = (0, 1)
         let store = app.store
         let photoLib = app.photoLib
         let faceModel = app.models.face
+        let model = app.people   // 结果写共享模型:面板关了再开不丢(160 教训)
         Task.detached(priority: .userInitiated) {
             do {
                 let data = try store.allFaceVectors()
                 let raw = DuplicateScanner.scan(
                     keys: data.keys, flat: data.flat, dim: data.dim, threshold: threshold) { done, total in
-                    Task { @MainActor in progress = (done, total) }
+                    Task { @MainActor in model.progress = (done, total) }
                 }
                 // 组间合并+垃圾剔除+逐脸核验+内聚解散(全部在扫描器内完成)
                 let groupedIdx = Set(raw.flatMap { $0.map(\.index) })
@@ -373,7 +395,7 @@ struct PeopleView: View {
                     linkThreshold: link, expelFloor: expelFloor,
                     singletons: singletons,
                     coherenceFloor: coherenceFloor, verifyFloor: verifyFloor) { done, total in
-                    Task { @MainActor in progress = (done, max(total, 1)) }
+                    Task { @MainActor in model.progress = (done, max(total, 1)) }
                 }
 
                 // ① 簇 → 照片集合(同照片多脸去重)与每照片最高分
@@ -426,7 +448,7 @@ struct PeopleView: View {
                         refs: Array(baseKeys.keys), baseKeys: baseKeys,
                         centroids: centroids, dim: data.dim,
                         photo: photoLib, assets: fetched, face: faceModel) { done, total in
-                            Task { @MainActor in progress = (done, total) }
+                        Task { @MainActor in model.progress = (done, total) }
                     }
                 }
 
@@ -486,7 +508,9 @@ struct PeopleView: View {
                 }
                 var outGroups: [ComboGroup] = []
                 for (i, o) in ordered.enumerated() {
-                    let alive = o.refs.filter { fetched[$0] != nil }
+                    // PHAsset 取回整体为空(授权降级/图库瞬断)时不能把全部结果
+                    // 滤没——宁可保留组,缩略图占灰块,结果不能凭空消失
+                    let alive = fetched.isEmpty ? o.refs : o.refs.filter { fetched[$0] != nil }
                     guard !alive.isEmpty else { continue }
                     let aliveSet = Set(alive)
                     let scores = o.scores.enumerated()
@@ -497,15 +521,14 @@ struct PeopleView: View {
                 let unknownAlive = outGroups.first { $0.members.isEmpty }?.refs.count ?? 0
 
                 await MainActor.run {
-                    scanning = false
-                    progress = nil
-                    groups = outGroups
-                    personNames = names
-                    personRefs = refsOf
-                    assets = fetched
-                    totalPersons = persons.count
-                    unknownCount = unknownAlive
-                    faceTotal = data.refs.count
+                    model.scanning = false
+                    model.progress = nil
+                    model.groups = outGroups
+                    model.personNames = names
+                    model.personRefs = refsOf
+                    model.assets = fetched
+                    model.totalPersons = persons.count
+                    model.unknownCount = unknownAlive
                     if outGroups.isEmpty {
                         app.notify("没有找到可归组的人脸")
                     } else if statRecovered > 0 || statOthers > 0 {
@@ -514,7 +537,7 @@ struct PeopleView: View {
                     }
                 }
             } catch {
-                await MainActor.run { scanning = false; app.fail(error) }
+                await MainActor.run { model.scanning = false; app.fail(error) }
             }
         }
     }
