@@ -1027,8 +1027,8 @@ final class VectorStore {
         sqlite3_bind_text(stmt, 1, ver, -1, Self.transient)
         while sqlite3_step(stmt) == SQLITE_ROW {
             if let rk = sqlite3_column_text(stmt, 0) {
-                let matched = Set(String(cString: sqlite3_column_text(stmt, 1) ?? "")
-                    .split(separator: ",").compactMap { Int($0) })
+                let matchedStr = sqlite3_column_text(stmt, 1).map { String(cString: $0) } ?? ""
+                let matched = Set(matchedStr.split(separator: ",").compactMap { Int($0) })
                 out[String(cString: rk)] = (matched, Int(sqlite3_column_int(stmt, 2)))
             }
         }
