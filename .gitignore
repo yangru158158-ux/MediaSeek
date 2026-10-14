@@ -11,3 +11,4 @@ MediaSeek/Resources/Models/*
 .DS_Store
 *.ipa
 *.xcarchive
+__pycache__/
