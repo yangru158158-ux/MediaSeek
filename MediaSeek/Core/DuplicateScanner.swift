@@ -195,20 +195,38 @@ enum DuplicateScanner {
             }
 
             // 逐脸核验(成员级,精确优先):对簇质心相似度 <verifyFloor 的成员
-            // 移出组(见 verifyFloor 文档)。少于 2 张存活的簇整组消亡
+            // 移出组(见 verifyFloor 文档)。少于 2 张存活的簇整组消亡。
+            // 核验后重算显示分=对「幸存成员平均脸」的相似度——与核验同一标尺,
+            // 角标数字 ≥verifyFloor 一眼可验(此前显示的是对锚的相似度,
+            // 0% 的成员可能对质心 48%+,数字与核验对不上,154 用户截图实证)
             if verifyFloor > 0 {
-                out = out.compactMap { g in
-                    var c = [Float](repeating: 0, count: dim)
-                    for m in g { for d in 0..<dim { c[d] += flat[m.index * dim + d] } }
-                    var norm: Float = 0
-                    vDSP_dotpr(c, 1, c, 1, &norm, vDSP_Length(dim))
-                    norm = max(norm.squareRoot(), 1e-8)
+                out = out.compactMap { g -> [(index: Int, score: Float)]? in
+                    func centroid(_ members: [(index: Int, score: Float)]) -> [Float] {
+                        var c = [Float](repeating: 0, count: dim)
+                        for m in members {
+                            for d in 0..<dim { c[d] += flat[m.index * dim + d] }
+                        }
+                        var ss: Float = 0
+                        vDSP_dotpr(c, 1, c, 1, &ss, vDSP_Length(dim))
+                        let n = max(ss.squareRoot(), 1e-8)
+                        for d in 0..<dim { c[d] /= n }
+                        return c
+                    }
+                    let c0 = centroid(g)
                     let kept = g.filter { m -> Bool in
                         var d: Float = 0
-                        vDSP_dotpr(c, 1, base + m.index * dim, 1, &d, vDSP_Length(dim))
-                        return d / norm >= verifyFloor
+                        vDSP_dotpr(c0, 1, base + m.index * dim, 1, &d, vDSP_Length(dim))
+                        return d >= verifyFloor
                     }
-                    return kept.count >= 2 ? kept : nil
+                    guard kept.count >= 2 else { return nil }
+                    let c1 = centroid(kept)
+                    var rescored = kept.map { m -> (index: Int, score: Float) in
+                        var d: Float = 0
+                        vDSP_dotpr(c1, 1, base + m.index * dim, 1, &d, vDSP_Length(dim))
+                        return (m.index, d)
+                    }
+                    rescored.sort { $0.score > $1.score }
+                    return rescored
                 }
             }
 

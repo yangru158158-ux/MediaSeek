@@ -66,17 +66,47 @@ enum FaceKit {
 
     /// 检测人脸(带关键点)。VNDetectFaceLandmarksRequest 自带检测步,
     /// 结果同时含外接框与五官区域;一张合照最多取 maxFaces 张脸,防群照拖垮索引。
-    /// 小脸过滤:外接框宽 < minFacePx 像素的脸跳过——远景小人/文字纹理误检的
-    /// 对齐图分辨率不足,嵌入质量差只会把不同人挤成一组(135 用户实测大杂烩组)
-    static func detect(cg: CGImage, maxFaces: Int = 8, minFacePx: Int = 64) -> [VNFaceObservation] {
+    /// 三道质量闸门(154 用户实测「打印脸巨簇」的根治:截图小头像/模糊脸/大侧脸
+    /// 在嵌入空间互相相似,自己凝成内部一致的「假人物」——任何簇级统计都杀不死
+    /// 一个真紧致簇,必须在入库源头拦截;Immich 等成熟方案同款思路=嵌入前过滤):
+    /// ① 小脸:外接框宽 < minFacePx 像素跳过(对齐图分辨率不足)
+    /// ② 姿态:|yaw| > maxYawDeg 跳过(VNFaceObservation.yaw 官方姿态角,
+    ///    弧度;大侧脸对齐后 ArcFace 区分度差,只会污染真人簇;无姿态数据不拦)
+    /// ③ 质量分:VNDetectFaceCaptureQualityRequest(iOS 13+,苹果官方人脸采集
+    ///    质量分 0-1,综合清晰度/光照/姿态/遮挡)低于 minQuality 跳过;
+    ///    质量请求失败/单脸无质量值不拦(保守放行,不因闸门误杀全部)
+    static func detect(cg: CGImage, maxFaces: Int = 8, minFacePx: Int = 64,
+                       minQuality: Float = 0.35, maxYawDeg: Double = 45) -> [VNFaceObservation] {
         let request = VNDetectFaceLandmarksRequest()
         let handler = VNImageRequestHandler(cgImage: cg, options: [:])
         do {
             try handler.perform([request])
             let minW = CGFloat(minFacePx) / CGFloat(max(cg.width, 1))
-            return Array((request.results ?? [])
-                .filter { $0.boundingBox.width >= minW }
-                .prefix(maxFaces))
+            var faces = (request.results ?? []).filter { $0.boundingBox.width >= minW }
+            let maxYaw = maxYawDeg * Double.pi / 180
+            faces = faces.filter { obs in
+                guard let yaw = obs.yaw?.doubleValue else { return true }
+                return abs(yaw) <= maxYaw
+            }
+            if !faces.isEmpty, minQuality > 0 {
+                let q = VNDetectFaceCaptureQualityRequest()
+                q.inputFaceObservations = faces
+                // 质量请求的返回是新观测对象,可能不带 landmarks(对齐需要),
+                // 不能拿返回值替换原观测——按 boundingBox 回配质量值,原观测保留
+                if (try? handler.perform([q])) != nil,
+                   let scored = q.results as? [VNFaceObservation] {
+                    func sameBox(_ a: CGRect, _ b: CGRect) -> Bool {
+                        abs(a.minX - b.minX) < 1e-4 && abs(a.minY - b.minY) < 1e-4
+                            && abs(a.width - b.width) < 1e-4 && abs(a.height - b.height) < 1e-4
+                    }
+                    faces = faces.filter { obs in
+                        guard let v = scored.first(where: { sameBox($0.boundingBox, obs.boundingBox) })?
+                            .faceCaptureQuality?.floatValue else { return true }
+                        return v >= minQuality
+                    }
+                }
+            }
+            return Array(faces.prefix(maxFaces))
         } catch {
             return []
         }

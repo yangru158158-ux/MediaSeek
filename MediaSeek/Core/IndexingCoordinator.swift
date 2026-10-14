@@ -512,9 +512,13 @@ final class IndexingCoordinator: ObservableObject {
             let ocr = Self.recognizeText(in: full)
             try store.saveOCR(refKey: asset.localIdentifier, text: ocr ?? "")
 
-            // 人脸层:检测+对齐+身份向量(人物归组数据源);模型未装则跳过且不记账
+            // 人脸层:检测+对齐+身份向量(人物归组数据源);模型未装则跳过且不记账。
+            // 截图(聊天记录/转账/菜单)不做人脸索引——截图里的头像/小脸是「打印脸」
+            // 巨簇的污染源(154 用户实测鱼龙混杂组的主体),iOS 原生 photoScreenshot
+            // 标记直接排除;截图走 OCR 文字检索,不需要人脸身份
             try Self.embedFaces(full: full, assetID: asset.localIdentifier,
-                                date: asset.creationDate, face: face, store: store)
+                                date: asset.creationDate, face: face, store: store,
+                                screenshot: asset.mediaSubtypes.contains(.photoScreenshot))
 
             guard useLabels, let labels = Self.visionLabels(cg: small), !labels.isEmpty else { return 0 }
             try Task.checkCancellation()
@@ -541,7 +545,8 @@ final class IndexingCoordinator: ObservableObject {
             }
             try Task.checkCancellation()
             try Self.embedFaces(full: full, assetID: asset.localIdentifier,
-                                date: asset.creationDate, face: face, store: store)
+                                date: asset.creationDate, face: face, store: store,
+                                screenshot: asset.mediaSubtypes.contains(.photoScreenshot))
             return 0
         } catch {
             if Task.isCancelled { return 0 }
@@ -551,17 +556,20 @@ final class IndexingCoordinator: ObservableObject {
     }
 
     /// 检测人脸并对齐嵌入入库。先清旧行防残留(重处理时脸数可能变少);
-    /// 无论检出几张(含 0 张)都写 face_done 记账,防无脸照片反复重处理
+    /// 无论检出几张(含 0 张)都写 face_done 记账,防无脸照片反复重处理。
+    /// screenshot=true 时只清旧账+记账不嵌入(截图的小脸/头像只污染聚类)
     nonisolated private static func embedFaces(full: CGImage, assetID: String,
                                                date: Date?, face: FaceEmbedder?,
-                                               store: VectorStore) throws {
+                                               store: VectorStore, screenshot: Bool = false) throws {
         guard let face else { return }
         try store.removeByRef(kind: .face, refKey: assetID)
-        for (i, obs) in FaceKit.detect(cg: full).enumerated() {
-            guard let aligned = FaceKit.alignedFace(source: full, observation: obs) else { continue }
-            let vec = try face.embed(aligned: aligned)
-            try store.upsert(kind: .face, refKey: assetID, frameIndex: i, space: face.space,
-                             vector: vec, title: nil, date: date)
+        if !screenshot {
+            for (i, obs) in FaceKit.detect(cg: full).enumerated() {
+                guard let aligned = FaceKit.alignedFace(source: full, observation: obs) else { continue }
+                let vec = try face.embed(aligned: aligned)
+                try store.upsert(kind: .face, refKey: assetID, frameIndex: i, space: face.space,
+                                 vector: vec, title: nil, date: date)
+            }
         }
         try store.markFaceDone(refKey: assetID)
     }

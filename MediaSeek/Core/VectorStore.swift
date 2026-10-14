@@ -103,6 +103,16 @@ final class VectorStore {
             try? exec("DELETE FROM face_done")
             UserDefaults.standard.set(true, forKey: "face_align_v4")
         }
+        // 一次性迁移 v5:入库源头加质量闸门(截图一律不索引人脸 + 苹果官方
+        // 采集质量分 <0.35 过滤 + |yaw|>45° 侧脸过滤)。存量脸向量里混着截图
+        // 小头像/模糊脸的「打印脸」垃圾——它们在嵌入空间互相相似、自凝成内部
+        // 一致的假人物簇,任何簇级统计都杀不死(154 用户实测),只能清库按
+        // 新闸门重检;真实相机照片的好脸不受影响
+        if !UserDefaults.standard.bool(forKey: "face_gate_v5") {
+            try? exec("DELETE FROM items WHERE kind = 'face'")
+            try? exec("DELETE FROM face_done")
+            UserDefaults.standard.set(true, forKey: "face_gate_v5")
+        }
         // 「不相关」黑名单:term=归一化查询词,ref=被标记的结果(该查询下不再出现)
         try exec("CREATE TABLE IF NOT EXISTS query_block(term TEXT NOT NULL, ref_key TEXT NOT NULL, created_at REAL NOT NULL, UNIQUE(term, ref_key))")
         try exec("CREATE TABLE IF NOT EXISTS label_vocab(label TEXT PRIMARY KEY, vec BLOB)")

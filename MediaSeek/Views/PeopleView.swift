@@ -135,7 +135,7 @@ struct PeopleView: View {
             } label: {
                 Label("清除全部人名标签", systemImage: "tag.slash")
             }
-            Text("精确档:每张脸都必须与「平均脸」核验达标才归属;拿不准的一律进「不确定人物」。组内点「排除」可手动移除错误照片。命名后搜索名字即命中。")
+            Text("精确档:入库即过滤——截图、低质量脸、大侧脸一律不参与(苹果官方质量分把关);每张脸都必须与「平均脸」核验达标才归属,拿不准的一律进「不确定人物」。组内点「排除」可手动移除错误照片。命名后搜索名字即命中。")
                 .font(.caption2).foregroundStyle(.secondary)
         }
     }
@@ -166,8 +166,8 @@ struct PeopleView: View {
             Text("人物 \(totalPersons) 人 · \(groups.count) 组")
         } footer: {
             Text(unknownCount > 0
-                 ? "每张脸都与平均脸核验达标才归属;拿不准的 \(unknownCount) 张在「不确定人物」。不足 \(foldThreshold) 张的组默认折叠。组内可「排除」错误照片,命名后搜索名字即命中。"
-                 : "每张脸都与平均脸核验达标才归属,拿不准的进「不确定人物」。不足 \(foldThreshold) 张的组默认折叠。组内可「排除」错误照片,命名后搜索名字即命中。")
+                 ? "截图/低质量/大侧脸不入库;每张脸都与平均脸核验达标才归属,拿不准的 \(unknownCount) 张在「不确定人物」。角标=与平均脸的相似度。不足 \(foldThreshold) 张的组默认折叠。组内可「排除」错误照片,命名后搜索名字即命中。"
+                 : "截图/低质量/大侧脸不入库;每张脸都与平均脸核验达标才归属,拿不准的进「不确定人物」。角标=与平均脸的相似度。不足 \(foldThreshold) 张的组默认折叠。组内可「排除」错误照片,命名后搜索名字即命中。")
         }
     }
 
@@ -544,7 +544,8 @@ struct ClusterDetailView: View {
             }
         }
         .overlay(alignment: .bottomLeading) {
-            // 角标按分数判定基准(≈1),不按下标位置;不确定组没有归属分,不显示
+            // 角标=与「平均脸」的相似度(与逐脸核验同一标尺,组内成员恒 ≥48%);
+            // 不确定组没有归属分,不显示
             if members.isEmpty { EmptyView() }
             else if score < 0.999 {
                 Text(String(format: "%.0f%%", score * 100))
