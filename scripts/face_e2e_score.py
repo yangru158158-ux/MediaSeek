@@ -183,7 +183,62 @@ if got != want:
 else:
     print("分组 == 真实人物划分 ✓")
 
+# ---- 合影补认回归(165):同行者的难脸不得被「最像组内本人」回退吞进单人组 ----
+# 场景:照片已按 P 入库(key={P}),复检无闸门重检出 P 的难脸 + B 的难脸。
+# 判据与 App recoverCompanions 同规则:≥0.40 或 ≥0.32+领先0.12 → 认出;
+# 否则「最像 key 内本人 + ≥0.25 + (领先第二名≥0.08 或第二名也在 key)」→ 吞为
+# 本人难脸;其余 → 未识别(归「与其他人」)。164 的回退无地板/边距:B 的难脸
+# 只要最近邻恰是 P(大簇质心=平均脸,对糊脸捕获盆最大)就被吞掉,合影留单人组。
+from PIL import ImageFilter
+
+
+def embed_img(img):
+    x = (np.asarray(img, dtype=np.float32) - 127.5) / 128.0
+    x = x.transpose(2, 0, 1)[None]
+    out = sess.run(None, {in_name: x})[0].flatten().astype(np.float32)
+    return out / (np.linalg.norm(out) + 1e-9)
+
+
+def hard_variant(path):
+    """模拟补认里的难脸:小脸(28px)放大+高斯模糊(海滩/背光/侧脸档)"""
+    img = Image.open(path).convert("RGB")
+    img = img.resize((28, 28), Image.BILINEAR).resize((112, 112), Image.BILINEAR)
+    return img.filter(ImageFilter.GaussianBlur(1.2))
+
+
+def decide(v, key, old_rule=False):
+    sims = sorted(((float(v @ c), ci) for ci, c in cents.items()), reverse=True)
+    bs, bi = sims[0]
+    ss, si = sims[1] if len(sims) > 1 else (-2.0, -1)
+    if bs >= 0.40 or (bs >= 0.32 and bs - ss >= 0.12):
+        return bi, True        # 强匹配认出
+    if bi in key and (old_rule or (bs >= 0.25 and (bs - ss >= 0.08 or si in key))):
+        return None, True      # 吞为本人难脸
+    return None, False         # 未识别 → 「与其他人」
+
+
+cents = {p: (lambda m: m / (np.linalg.norm(m) + 1e-9))(np.stack([vecs[i] for i in idxs]).mean(axis=0))
+         for p, idxs in truth.items()}
+persons = sorted(cents)
+old_swallow = 0
+for i, f in enumerate(files):
+    hv = embed_img(hard_variant(f))
+    owner = labels[i]
+    if not decide(hv, {owner})[1]:
+        fails.append(f"本人难脸被自己组拒收:{names[i]} 在 key={{{owner}}} 下未获解释")
+    for p in persons:
+        if p == owner:
+            continue
+        m, ok = decide(hv, {p})
+        if decide(hv, {p}, old_rule=True) == (None, True):
+            old_swallow += 1
+        if ok and m != owner:
+            fails.append(f"同行者难脸被吞/误认:{names[i]}(真身 {owner})在 key={{{p}}} 下"
+                         f"被判成 {'本人难脸放行' if m is None else m}")
+print(f"合影补认回归:旧规则会吞 {old_swallow}/{len(files) * (len(persons) - 1)} "
+      f"张同行者难脸(测试牙齿对照),新规则容忍 0 张")
+
 if fails:
     print("\n".join("FAIL " + f for f in fails))
     sys.exit(1)
-print("PASS:真实照片端到端(检测→对齐→r50→聚类→合并)全部正确")
+print("PASS:真实照片端到端(检测→对齐→r50→聚类→合并→合影补认)全部正确")
