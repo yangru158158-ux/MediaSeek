@@ -1,6 +1,7 @@
 import SwiftUI
 import Photos
 import Accelerate
+import UIKit
 
 /// 人物组合分组:①人脸向量聚类确定「总共几个人」;②每张照片按检出脸
 /// 归出「主角是哪几个人」的集合;③照片归入且只归入该集合对应的组——
@@ -19,6 +20,21 @@ struct ComboGroup: Identifiable {
     /// 单人组只放真单人照(用户三轮定稿:认出的进组合组,认不出的进「与其他人」,
     /// 纯背景小脸不算)。157 教训:必须逐张分流,不能组级打标
     var withOthers: Bool = false
+}
+
+/// 归组结果快照(落库 people_results 表)。人名不存——水化时按当前标签重推,
+/// 重命名/清标签后重开面板即自动生效;指纹随快照存,人脸数据一变作废
+private struct PeopleSnapshot: Codable {
+    struct Group: Codable {
+        var members: [Int]
+        var refs: [String]
+        var scores: [Float]
+        var withOthers: Bool
+    }
+    var groups: [Group]
+    var personRefs: [Int: [String]]
+    var totalPersons: Int
+    var unknownCount: Int
 }
 
 /// 归组扫描共享状态:挂在 AppModel 一份,视图只观察。
@@ -71,10 +87,8 @@ struct PeoplePanel: View {
     /// 簇内内聚底线:成员对簇质心(平均脸)的平均相似度过低 → 整簇解散
     /// (簇级兜底;148 实测打印脸被质心连接链式串成「假人物」巨组的教训)
     private let coherenceFloor: Float = 0.45
-    /// 人名认定的标签票数门槛:≥3 张 且 过半。148 实测教训:只看覆盖率时,
-    /// 两三张的小簇带 1 张污染标签=覆盖率 100%,满屏一人组都叫程玉婷/杨如
-    /// (146 命名中断留下的错标签);有最低票数后小簇一律「未命名」
-    private func personNameCoverage(_ n: Int, _ total: Int) -> Bool { n >= 3 && n * 2 >= total }
+    /// 人名认定门槛(≥3 票且过半)在 deriveNames 里:扫描完成与快照水化
+    /// 共用同一判据。148 教训:只看覆盖率时,小簇带 1 张污染标签=覆盖率 100%
 
     var body: some View {
         NavigationStack {
@@ -100,6 +114,7 @@ struct PeoplePanel: View {
             .onAppear {
                 faceTotal = app.store.faceStats().faces
                 blockedCount = app.store.blockedFacePhotoCount()
+                hydrateIfNeeded()
             }
             .confirmationDialog("确定清除全部人名标签?", isPresented: $confirmClearTags,
                                 titleVisibility: .visible) {
@@ -286,12 +301,30 @@ struct PeoplePanel: View {
                                           centroids: [Int: [Float]], dim: Int,
                                           photo: PhotoLibraryService, assets: [String: PHAsset],
                                           face: FaceEmbedder,
+                                          cached: [String: (matched: Set<Int>, unexplained: Int)],
+                                          store: VectorStore, ver: String,
                                           progress: @escaping (Int, Int) -> Void) async -> [String: (recovered: Set<Int>, unexplained: Int)] {
         var out: [String: (recovered: Set<Int>, unexplained: Int)] = [:]
+        for (k, v) in cached { out[k] = (v.matched, v.unexplained) }
         let total = refs.count
         progress(0, total)
         var done = 0
         var idx = 0
+        var pending: [(ref: String, matched: Set<Int>, unexplained: Int)] = []
+        /// 取下一个待处理照片;命中的缓存直接算完成(被杀后重跑=秒过),
+        /// 攒满 50 张落一次盘,进程再被杀也只丢尾部几十张
+        func takeRef() -> String? {
+            while idx < refs.count {
+                let r = refs[idx]; idx += 1
+                if let c = cached[r] {
+                    done += 1
+                    if done % 50 == 0 || done == total { progress(done, total) }
+                    continue
+                }
+                return r
+            }
+            return nil
+        }
         func work(_ ref: String) async -> (String, Set<Int>, Int)? {
             guard let a = assets[ref], let key = baseKeys[ref],
                   let img = try? await photo.image(for: a, maxPixel: 2048) else { return nil }
@@ -340,10 +373,8 @@ struct PeoplePanel: View {
             }
         }
         await withTaskGroup(of: (String, Set<Int>, Int)?.self) { group in
-            let maxConcurrent = 4
-            while idx < min(maxConcurrent, refs.count) {
-                let ref = refs[idx]; idx += 1
-                group.addTask { await work(ref) }
+            for _ in 0..<4 {
+                if let ref = takeRef() { group.addTask { await work(ref) } }
             }
             while !group.isEmpty {
                 if let r = await group.next() {
@@ -351,16 +382,70 @@ struct PeoplePanel: View {
                     if done % 10 == 0 || done == total { progress(done, total) }
                     if let (ref, matched, unexplained) = r {
                         out[ref] = (matched, unexplained)
+                        pending.append((ref, matched, unexplained))
+                        if pending.count >= 50 {
+                            store.saveRecoverCache(pending, ver: ver)
+                            pending.removeAll()
+                        }
                     }
                 }
                 if Task.isCancelled { break }
-                if idx < refs.count {
-                    let ref = refs[idx]; idx += 1
+                if let ref = takeRef() {
                     group.addTask { await work(ref) }
                 }
             }
         }
+        if !pending.isEmpty { store.saveRecoverCache(pending, ver: ver) }
         return out
+    }
+
+    /// 水化:进程重启/重开面板时从库内快照直接恢复归组结果(162 前结果只在
+    /// 内存,App 退后台被系统结束进程=十分钟的活全白干,用户被迫重跑)。
+    /// 人名按当前标签重推——重命名/清标签无需重扫
+    private func hydrateIfNeeded() {
+        guard m.groups.isEmpty, !m.scanning else { return }
+        let ver = app.store.peopleFingerprint(
+            extra: "m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
+        guard let json = app.store.loadPeopleResults(ver: ver),
+              let data = json.data(using: .utf8),
+              let snap = try? JSONDecoder().decode(PeopleSnapshot.self, from: data) else {
+            // 没有可用快照却留有「扫描中」记账 = 上次归组被系统掐死在半路
+            if UserDefaults.standard.object(forKey: "peopleScanRunning") != nil {
+                app.notify("上次归组未完成(App 退后台被系统结束):点「开始归组」继续,已补认的照片会直接秒过")
+            }
+            return
+        }
+        var fetched: [String: PHAsset] = [:]
+        let allRefs = snap.groups.flatMap { $0.refs }
+        let fetch = PHAsset.fetchAssets(withLocalIdentifiers: allRefs, options: nil)
+        fetch.enumerateObjects { a, _, _ in fetched[a.localIdentifier] = a }
+        m.groups = snap.groups.enumerated().map { i, g in
+            ComboGroup(id: i, members: g.members, refs: g.refs,
+                       scores: g.scores, withOthers: g.withOthers)
+        }
+        m.personRefs = snap.personRefs
+        m.personNames = Self.deriveNames(personRefs: snap.personRefs,
+                                         tags: app.store.userTagsForRefs(allRefs))
+        m.assets = fetched
+        m.totalPersons = snap.totalPersons
+        m.unknownCount = snap.unknownCount
+        UserDefaults.standard.removeObject(forKey: "peopleScanRunning")
+    }
+
+    /// 人名推导:该人照片里 ≥3 票且过半的标签众数(148 教训,无门槛会污染)。
+    /// 扫描完成与快照水化共用同一判据,保证两条路名字一致
+    private static func deriveNames(personRefs: [Int: [String]],
+                                    tags: [String: [String]]) -> [Int: String] {
+        var names: [Int: String] = [:]
+        for (ci, refs) in personRefs where !refs.isEmpty {
+            var counts: [String: Int] = [:]
+            for r in refs { for t in tags[r] ?? [] { counts[t, default: 0] += 1 } }
+            if let best = counts.max(by: { $0.value < $1.value }),
+               best.value >= 3, best.value * 2 >= refs.count {
+                names[ci] = best.key
+            }
+        }
+        return names
     }
 
     private func start() {
@@ -380,6 +465,13 @@ struct PeoplePanel: View {
         let photoLib = app.photoLib
         let faceModel = app.models.face
         let model = app.people   // 结果写共享模型:面板关了再开不丢(160 教训)
+        // 指纹:人脸数据/排除集合/模型任一变化,快照与补认缓存自动作废
+        let ver = store.peopleFingerprint(
+            extra: "m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
+        // 「扫描中」记账 + 屏幕常亮:退后台被系统结束进程后,重开面板能明确
+        // 告知「上次未完成」;常亮防前台锁屏挂起
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "peopleScanRunning")
+        UIApplication.shared.isIdleTimerDisabled = true
         Task.detached(priority: .userInitiated) {
             do {
                 let data = try store.allFaceVectors()
@@ -444,10 +536,13 @@ struct PeoplePanel: View {
                 }
                 var recovered: [String: (recovered: Set<Int>, unexplained: Int)] = [:]
                 if let faceModel {
+                    // 先取补认进度缓存:被系统杀掉后重跑,已处理的照片秒过
+                    let cached = store.loadRecoverCache(ver: ver)
                     recovered = await Self.recoverCompanions(
                         refs: Array(baseKeys.keys), baseKeys: baseKeys,
                         centroids: centroids, dim: data.dim,
-                        photo: photoLib, assets: fetched, face: faceModel) { done, total in
+                        photo: photoLib, assets: fetched, face: faceModel,
+                        cached: cached, store: store, ver: ver) { done, total in
                         Task { @MainActor in model.progress = (done, total) }
                     }
                 }
@@ -494,18 +589,11 @@ struct PeoplePanel: View {
                 // ④ 人名:该人照片里覆盖率 ≥40% 的标签众数(无门槛众数会污染,147 教训)
                 let allRefs = Array(Set(ordered.flatMap { $0.refs }))
                 let tagMap = store.userTagsForRefs(allRefs)
-                var names: [Int: String] = [:]
                 var refsOf: [Int: [String]] = [:]
                 for ci in persons {
-                    let refs = Array(clusterRefSets[ci] ?? []).sorted()
-                    refsOf[ci] = refs
-                    var counts: [String: Int] = [:]
-                    for r in refs { for t in tagMap[r] ?? [] { counts[t, default: 0] += 1 } }
-                    if let best = counts.max(by: { $0.value < $1.value }),
-                       personNameCoverage(best.value, refs.count) {
-                        names[ci] = best.key
-                    }
+                    refsOf[ci] = Array(clusterRefSets[ci] ?? []).sorted()
                 }
+                let names = Self.deriveNames(personRefs: refsOf, tags: tagMap)
                 var outGroups: [ComboGroup] = []
                 for (i, o) in ordered.enumerated() {
                     // PHAsset 取回整体为空(授权降级/图库瞬断)时不能把全部结果
@@ -520,9 +608,23 @@ struct PeoplePanel: View {
                 }
                 let unknownAlive = outGroups.first { $0.members.isEmpty }?.refs.count ?? 0
 
+                // 结果落库(162):进程随时被杀都拿得回来,重开面板直接水化;
+                // 完成即清「扫描中」记账
+                let snap = PeopleSnapshot(
+                    groups: outGroups.map {
+                        .init(members: $0.members, refs: $0.refs,
+                              scores: $0.scores, withOthers: $0.withOthers)
+                    },
+                    personRefs: refsOf, totalPersons: persons.count, unknownCount: unknownAlive)
+                if let data = try? JSONEncoder().encode(snap) {
+                    store.savePeopleResults(json: String(decoding: data, as: UTF8.self), ver: ver)
+                }
+                UserDefaults.standard.removeObject(forKey: "peopleScanRunning")
+
                 await MainActor.run {
                     model.scanning = false
                     model.progress = nil
+                    UIApplication.shared.isIdleTimerDisabled = false
                     model.groups = outGroups
                     model.personNames = names
                     model.personRefs = refsOf
@@ -537,7 +639,12 @@ struct PeoplePanel: View {
                     }
                 }
             } catch {
-                await MainActor.run { model.scanning = false; app.fail(error) }
+                UserDefaults.standard.removeObject(forKey: "peopleScanRunning")
+                await MainActor.run {
+                    model.scanning = false
+                    UIApplication.shared.isIdleTimerDisabled = false
+                    app.fail(error)
+                }
             }
         }
     }

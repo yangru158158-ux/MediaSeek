@@ -116,6 +116,9 @@ final class VectorStore {
         // 「不相关」黑名单:term=归一化查询词,ref=被标记的结果(该查询下不再出现)
         try exec("CREATE TABLE IF NOT EXISTS query_block(term TEXT NOT NULL, ref_key TEXT NOT NULL, created_at REAL NOT NULL, UNIQUE(term, ref_key))")
         try exec("CREATE TABLE IF NOT EXISTS label_vocab(label TEXT PRIMARY KEY, vec BLOB)")
+        // 人物归组持久化(162):结果快照 + 合影补认进度缓存
+        try exec("CREATE TABLE IF NOT EXISTS people_results(id INTEGER PRIMARY KEY CHECK(id = 1), payload TEXT NOT NULL, ver TEXT NOT NULL)")
+        try exec("CREATE TABLE IF NOT EXISTS recover_cache(ref_key TEXT PRIMARY KEY, matched TEXT NOT NULL, unexplained INTEGER NOT NULL, ver TEXT NOT NULL)")
         try exec("""
         CREATE TABLE IF NOT EXISTS items(
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -990,7 +993,87 @@ final class VectorStore {
         return out
     } }
 
-    // MARK: - 图像模型更换(so400m 等在线升级)
+    // MARK: - 人物归组持久化(162:结果快照 + 补认进度缓存)
+
+    /// 归组结果有效性指纹:人脸数据/排除集合/模型任一变化,旧快照与旧补认
+    /// 缓存即作废(聚类和质心全变了)。用户三轮实测的教训:App 退后台被系统
+    /// 结束进程,内存里的归组状态全丢——结果必须落库才拿得回来
+    func peopleFingerprint(extra: String) -> String { try serialized {
+        var fp = extra
+        if let db, let stmt = try? prepare("SELECT COUNT(*), IFNULL(MAX(rowid),0) FROM items WHERE kind = 'face'") {
+            defer { sqlite3_finalize(stmt) }
+            if sqlite3_step(stmt) == SQLITE_ROW {
+                fp += "-f\(sqlite3_column_int(stmt, 0)).\(sqlite3_column_int64(stmt, 1))"
+            }
+        }
+        if let db, let stmt = try? prepare("SELECT COUNT(*), IFNULL(MAX(rowid),0) FROM face_block") {
+            defer { sqlite3_finalize(stmt) }
+            if sqlite3_step(stmt) == SQLITE_ROW {
+                fp += "-b\(sqlite3_column_int(stmt, 0)).\(sqlite3_column_int64(stmt, 1))"
+            }
+        }
+        return fp
+    } }
+
+    /// 合影补认进度缓存:照片 → (认出的人物簇集合, 未识别主角级脸数)。
+    /// 被系统杀掉后重跑,已补认的照片直接命中缓存跳过(2048px 复检是归组
+    /// 十来分钟里的大头),缓存按指纹版本隔离,人脸数据一变自动过期
+    func loadRecoverCache(ver: String) -> [String: (matched: Set<Int>, unexplained: Int)] { try serialized {
+        var out: [String: (matched: Set<Int>, unexplained: Int)] = [:]
+        try? exec("DELETE FROM recover_cache WHERE ver != '\(ver)'")
+        guard let db, let stmt = try? prepare("SELECT ref_key, matched, unexplained FROM recover_cache WHERE ver = ?")
+        else { return out }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, ver, -1, Self.transient)
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let rk = sqlite3_column_text(stmt, 0) {
+                let matched = Set(String(cString: sqlite3_column_text(stmt, 1) ?? "")
+                    .split(separator: ",").compactMap { Int($0) })
+                out[String(cString: rk)] = (matched, Int(sqlite3_column_int(stmt, 2)))
+            }
+        }
+        return out
+    } }
+
+    /// 批量写入补认缓存(扫描中每攒 N 张落一次盘,进程被杀也只丢尾部)
+    func saveRecoverCache(_ rows: [(ref: String, matched: Set<Int>, unexplained: Int)], ver: String) { try serialized {
+        guard let db else { return }
+        for row in rows {
+            guard let stmt = try? prepare("INSERT OR REPLACE INTO recover_cache(ref_key, matched, unexplained, ver) VALUES(?,?,?,?)")
+            else { continue }
+            sqlite3_bind_text(stmt, 1, row.ref, -1, Self.transient)
+            sqlite3_bind_text(stmt, 2, row.matched.sorted().map(String.init).joined(separator: ","), -1, Self.transient)
+            sqlite3_bind_int(stmt, 3, Int32(row.unexplained))
+            sqlite3_bind_text(stmt, 4, ver, -1, Self.transient)
+            sqlite3_step(stmt)
+            sqlite3_finalize(stmt)
+        }
+    } }
+
+    /// 归组结果快照(JSON)落库:完成即写,重开面板/重启 App 都直接水化,
+    /// 不必重跑十分钟的扫描
+    func savePeopleResults(json: String, ver: String) { try serialized {
+        guard let db else { return }
+        if let stmt = try? prepare("INSERT OR REPLACE INTO people_results(id, payload, ver) VALUES(1, ?, ?)") {
+            sqlite3_bind_text(stmt, 1, json, -1, Self.transient)
+            sqlite3_bind_text(stmt, 2, ver, -1, Self.transient)
+            sqlite3_step(stmt)
+            sqlite3_finalize(stmt)
+        }
+    } }
+
+    /// 读结果快照;指纹不符返回 nil(人脸数据变了,旧分组不可信,必须重扫)
+    func loadPeopleResults(ver: String) -> String? { try serialized {
+        guard let db, let stmt = try? prepare("SELECT payload FROM people_results WHERE id = 1 AND ver = ?")
+        else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, ver, -1, Self.transient)
+        return sqlite3_step(stmt) == SQLITE_ROW
+            ? String(cString: sqlite3_column_text(stmt, 0))
+            : nil
+    } }
+
+
 
     /// 库内 clip 向量的维度(任取一行;空库返回 0)。
     /// 检索端对维度不匹配的行本就跳过,这里只为「换模型后清旧向量」提供判据
