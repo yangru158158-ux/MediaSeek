@@ -387,7 +387,19 @@ struct PeoplePanel: View {
                 // keyed 照片复检未发现 ≥30px 候选脸:与 30% 主角脸过滤分开记录,
                 // 长按诊断时不会再把“未检出”和“检出后被尺寸门槛过滤”混为一谈。
                 guard !faces.isEmpty else {
-                    return (ref, [], 0, false, 3, 0, "Vision 未检出≥30px候选脸")
+                    // 零脸照片(远景/糊脸,168 实测新径)也过躯干兜底:脸检彻底
+                    // 失败但躯干可数——两人背影/远景合照连一张脸都检不出,
+                    // ≥2 主角级躯干仍是同行证据,不能默认单人
+                    let bodies = FaceKit.detectHumans(cg: img)
+                    let maxBW = bodies.map { $0.width }.max() ?? 0
+                    let significant = bodies.filter { $0.width >= maxBW * 0.3 }.count
+                    if FaceRecoveryPolicy.companionSuspectedByBody(
+                        detectedFaces: 0, significantBodies: significant) {
+                        return (ref, [], 1, false, 3, 0,
+                                "未检出≥30px候选脸;躯干\(bodies.count)个/主角级\(significant)→判有同行")
+                    }
+                    return (ref, [], 0, false, 3, 0,
+                            "未检出≥30px候选脸;躯干\(bodies.count)个/主角级\(significant)")
                 }
                 // 主角级脸 = 宽度 ≥ 最大脸 30%:纯背景小脸不参与匹配也不算“他人”。
                 // 不以显著脸数量作提前放行条件;每张显著脸仍逐一匹配。
@@ -535,11 +547,11 @@ struct PeoplePanel: View {
     /// 人名按当前标签重推——重命名/清标签无需重扫
     private func hydrateIfNeeded() {
         guard m.groups.isEmpty, !m.scanning else { return }
-        // 算法盐 a6:归组/补认逻辑变更必须升盐——旧快照与补认缓存不能复活旧裁决。
+        // 算法盐 a7:归组/补认逻辑变更必须升盐——旧快照与补认缓存不能复活旧裁决。
         // (人脸行/排除/模型)不含算法版本,163 的旧判决经快照水化+缓存命中在
         // 164 原样复活,用户看到的就是"修了没变化"
         let ver = app.store.peopleFingerprint(
-            extra: "a6-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
+            extra: "a7-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
         guard let json = app.store.loadPeopleResults(ver: ver),
               let data = json.data(using: .utf8),
               let snap = try? JSONDecoder().decode(PeopleSnapshot.self, from: data) else {
@@ -607,9 +619,9 @@ struct PeoplePanel: View {
         let faceModel = app.models.face
         let model = app.people   // 结果写共享模型:面板关了再开不丢(160 教训)
         // 指纹:人脸数据/排除集合/模型任一变化,快照与补认缓存自动作废;
-        // a6=算法盐,归组逻辑变更必须升盐(与 hydrateIfNeeded 同串)
+        // a7=算法盐,归组逻辑变更必须升盐(与 hydrateIfNeeded 同串)
         let ver = store.peopleFingerprint(
-            extra: "a6-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
+            extra: "a7-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
         // 「扫描中」记账 + 屏幕常亮:退后台被系统结束进程后,重开面板能明确
         // 告知「上次未完成」;常亮防前台锁屏挂起
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "peopleScanRunning")

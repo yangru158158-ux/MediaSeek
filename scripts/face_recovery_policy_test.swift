@@ -89,8 +89,16 @@ struct FaceRecoveryPolicyTest {
             !FaceRecoveryPolicy.companionSuspectedByBody(detectedFaces: 2, significantBodies: 2),
             "多主角脸照片不走人体兜底,由脸匹配路径裁决"
         )
+        expect(
+            FaceRecoveryPolicy.companionSuspectedByBody(detectedFaces: 0, significantBodies: 2),
+            "复检零脸+≥2 主角级躯干(两人背影/远景)应判疑似同行"
+        )
+        expect(
+            !FaceRecoveryPolicy.companionSuspectedByBody(detectedFaces: 0, significantBodies: 1),
+            "零脸+一躯干不触发人体兜底"
+        )
 
-        print("PASS: 同图双脸补认策略的 8 项确定性回归断言全部通过")
+        print("PASS: 同图双脸补认策略的 10 项确定性回归断言全部通过")
     }
 
     private static func vetoes(_ matches: [FaceRecoveryPolicy.Match]) -> Set<Int> {
