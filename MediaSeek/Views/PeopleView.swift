@@ -15,6 +15,10 @@ struct ComboGroup: Identifiable {
     let members: [Int]        // 主角人物簇 id;空 = 全是路人/未识别脸
     let refs: [String]
     let scores: [Float]       // 每张照片在其主角簇内的最高相似度
+    /// 该组照片都有「主角级但认不出是谁」的同行脸(侧脸/模糊,身份匹配不可行)。
+    /// 单人组只放真单人照(用户三轮定稿:认出的进组合组,认不出的进「与其他人」,
+    /// 纯背景小脸不算)。157 教训:必须逐张分流,不能组级打标
+    var withOthers: Bool = false
 }
 
 struct PeopleView: View {
@@ -136,7 +140,7 @@ struct PeopleView: View {
             } label: {
                 Label("清除全部人名标签", systemImage: "tag.slash")
             }
-            Text("精确档:入库即过滤——截图、低质量脸、大侧脸一律不参与(苹果官方质量分把关);每张脸都必须与「平均脸」核验达标才归属,拿不准的一律进「不确定人物」。归组时现场补认合影里的第二个人:认出是谁就进对应组合组(如 程玉婷 × 杨如),认不出的路人不算——单人组只放真单人照。重新命名会覆盖旧名。组内点「排除」可手动移除错误照片,命名后搜索名字即命中。")
+            Text("精确档:入库即过滤——截图、低质量脸、大侧脸一律不参与(苹果官方质量分把关);每张脸都必须与「平均脸」核验达标才归属,拿不准的一律进「不确定人物」。归组时现场补认合影里的第二个人:认出是谁就进对应组合组(如 程玉婷 × 杨如);有明显同行脸但认不出的(侧脸/模糊)进「某某 与其他人」;纯单人照才留在单人组。重新命名会覆盖旧名。组内点「排除」可手动移除错误照片,命名后搜索名字即命中。")
                 .font(.caption2).foregroundStyle(.secondary)
         }
     }
@@ -167,8 +171,8 @@ struct PeopleView: View {
             Text("人物 \(totalPersons) 人 · \(groups.count) 组")
         } footer: {
             Text(unknownCount > 0
-                 ? "截图/低质量/大侧脸不入库;每张脸都与平均脸核验达标才归属,拿不准的 \(unknownCount) 张在「不确定人物」。角标=与平均脸的相似度。不足 \(foldThreshold) 张的组默认折叠。归组含合影第二人现场补认(2048px 复检,约多花几分钟)。"
-                 : "截图/低质量/大侧脸不入库;每张脸都与平均脸核验达标才归属,拿不准的进「不确定人物」。角标=与平均脸的相似度。不足 \(foldThreshold) 张的组默认折叠。归组含合影第二人现场补认(2048px 复检,约多花几分钟)。")
+                 ? "截图/低质量/大侧脸不入库;每张脸都与平均脸核验达标才归属,拿不准的 \(unknownCount) 张在「不确定人物」。角标=与平均脸的相似度。不足 \(foldThreshold) 张的组默认折叠。归组含合影第二人现场补认(2048px 复检,约多花几分钟);认不出的同行人照片归「与其他人」。"
+                 : "截图/低质量/大侧脸不入库;每张脸都与平均脸核验达标才归属,拿不准的进「不确定人物」。角标=与平均脸的相似度。不足 \(foldThreshold) 张的组默认折叠。归组含合影第二人现场补认(2048px 复检,约多花几分钟);认不出的同行人照片归「与其他人」。")
         }
     }
 
@@ -185,7 +189,8 @@ struct PeopleView: View {
     private func groupTitle(_ g: ComboGroup) -> String {
         guard !g.members.isEmpty else { return "不确定人物" }
         let parts = g.members.map(personDisplay)
-        return parts.count == 1 ? parts[0] : parts.joined(separator: " × ")
+        let base = parts.count == 1 ? parts[0] : parts.joined(separator: " × ")
+        return g.withOthers ? "\(base) 与其他人" : base
     }
 
     private func row(_ g: ComboGroup) -> some View {
@@ -253,24 +258,25 @@ struct PeopleView: View {
         }
     }
 
-    /// 合影第二人现场补认(见 start() 调用处注释):对每张「主角级脸数 > 主角数」
-    /// 的照片,把主角级脸无闸门检测+对齐+嵌入,与人物质心匹配认出该人,照片的
-    /// 主角集合并入认出的人 → 进对应组合组。认不出(路人/背景脸)不算。
-    /// ⚠️ 匹配门槛必须低于入库核验线 0.48:被核验移出/闸门滤掉的第二人脸(侧/糊)
-    /// 对本人质心常在 0.32-0.47——用 0.48 认人等于逻辑死锁(158 实测程玉婷组
-    /// 仍混两人合影,永远认不回)。双判据防误认:≥0.40 直接认;0.32-0.40 需比
-    /// 第二名人物高出 0.12(跨人真实分布 ~0.16-0.30,拉开 0.12 才是明确指向)
+    /// 合影第二人现场补认(见 start() 调用处注释)。对每张「主角级脸数 > 主角数」
+    /// 的照片:主角级脸(宽度 ≥ 最大脸 30%,纯背景小脸不算)无闸门检测+对齐+
+    /// 嵌入,与人物质心按双判据匹配。返回每张照片 (认出的人物簇集合, 未识别的
+    /// 主角级脸数)。⚠️ 匹配门槛低于入库核验线 0.48:被核验移出/闸门滤掉的第二
+    /// 人脸(侧/糊)对本人质心常在 0.32-0.47——用 0.48 认人=逻辑死锁(158 实测)。
+    /// 双判据防误认:≥0.40 直接认;0.32-0.40 需比第二名人物高出 0.12(跨人真实
+    /// 分布 ~0.16-0.30)。认不出的侧/糊脸(身份匹配不可行)由调用方归「与其他人」
+    /// 桶——用户定稿:认不出的不能装作单人
     private static func recoverCompanions(refs: [String], baseKeys: [String: Set<Int>],
                                           centroids: [Int: [Float]], dim: Int,
                                           photo: PhotoLibraryService, assets: [String: PHAsset],
                                           face: FaceEmbedder,
-                                          progress: @escaping (Int, Int) -> Void) async -> [String: Set<Int>] {
-        var out: [String: Set<Int>] = [:]
+                                          progress: @escaping (Int, Int) -> Void) async -> [String: (recovered: Set<Int>, unexplained: Int)] {
+        var out: [String: (recovered: Set<Int>, unexplained: Int)] = [:]
         let total = refs.count
         progress(0, total)
         var done = 0
         var idx = 0
-        func work(_ ref: String) async -> (String, Set<Int>)? {
+        func work(_ ref: String) async -> (String, Set<Int>, Int)? {
             guard let a = assets[ref], let key = baseKeys[ref],
                   let img = try? await photo.image(for: a, maxPixel: 2048) else { return nil }
             // 无闸门检测(质量/姿态全关):补认的目的恰是找回被闸门滤掉的第二人;
@@ -279,15 +285,17 @@ struct PeopleView: View {
                                        minQuality: 0, maxYawDeg: 360)
             guard !faces.isEmpty else { return nil }
             // 主角级脸 = 宽度 ≥ 最大脸 30%:合影第二人与主脸尺寸相当;远处路人/
-            // 背景小脸不到这条线,不参与触发也不参与补认(158 前车之鉴:单人照
-            // 背景的路人/海报脸不能把照片变成「有他人」)
+            // 背景小脸不到这条线,不参与触发也不参与补认
             let maxW = faces.map { $0.boundingBox.width }.max() ?? 0
             let major = faces.filter { $0.boundingBox.width >= maxW * 0.3 }
             guard major.count > key.count else { return nil }
             var matched = Set<Int>()
+            var explained = 0
             for obs in major {
                 guard let aligned = FaceKit.alignedFace(source: img, observation: obs),
-                      let vec = try? face.embed(aligned: aligned) else { continue }
+                      let vec = try? face.embed(aligned: aligned) else {
+                    continue   // 对齐/嵌入失败的算未识别
+                }
                 var bestCi = -1
                 var bestSim: Float = -2, secondSim: Float = -2
                 for (ci, c) in centroids {
@@ -303,11 +311,14 @@ struct PeopleView: View {
                 if bestCi >= 0,
                    bestSim >= 0.40 || (bestSim >= 0.32 && bestSim - secondSim >= 0.12) {
                     matched.insert(bestCi)
+                    explained += 1
                 }
             }
-            return matched.isEmpty ? nil : (ref, matched)
+            // 未识别的主角级脸 = 检出但对不上任何人物(侧/糊/路人)。镜像/海报
+            // 同人双脸不会误报:两张脸都匹配上本人 → explained=2
+            return (ref, matched, major.count - explained)
         }
-        await withTaskGroup(of: (String, Set<Int>)?.self) { group in
+        await withTaskGroup(of: (String, Set<Int>, Int)?.self) { group in
             let maxConcurrent = 4
             while idx < min(maxConcurrent, refs.count) {
                 let ref = refs[idx]; idx += 1
@@ -317,7 +328,9 @@ struct PeopleView: View {
                 if let r = await group.next() {
                     done += 1
                     if done % 10 == 0 || done == total { progress(done, total) }
-                    if let (ref, matched) = r { out[ref] = matched }
+                    if let (ref, matched, unexplained) = r {
+                        out[ref] = (matched, unexplained)
+                    }
                 }
                 if Task.isCancelled { break }
                 if idx < refs.count {
@@ -407,38 +420,52 @@ struct PeopleView: View {
                     for d in 0..<data.dim { c[d] /= n }
                     centroids[ci] = c
                 }
-                var recovered: [String: Set<Int>] = [:]
+                var recovered: [String: (recovered: Set<Int>, unexplained: Int)] = [:]
                 if let faceModel {
                     recovered = await Self.recoverCompanions(
                         refs: Array(baseKeys.keys), baseKeys: baseKeys,
                         centroids: centroids, dim: data.dim,
                         photo: photoLib, assets: fetched, face: faceModel) { done, total in
-                        Task { @MainActor in progress = (done, total) }
+                            Task { @MainActor in progress = (done, total) }
                     }
                 }
 
                 var comboMap: [Set<Int>: (refs: [String], scores: [Float])] = [:]
+                var othersMap: [Set<Int>: (refs: [String], scores: [Float])] = [:]
                 var unknownRefs: [String] = []
                 var unknownScores: [Float] = []
+                var statRecovered = 0   // 补认出 ≥1 个新主角的照片数
+                var statOthers = 0      // 仍有认不出的主角级同行脸的照片数
                 for (r, cs) in refClusters {
-                    var key = cs.intersection(persons)
-                    if let rec = recovered[r] { key.formUnion(rec) }
+                    let libKey = cs.intersection(persons)
+                    let rec = recovered[r]
+                    var key = libKey
+                    if let rec { key.formUnion(rec.recovered) }
+                    if let rec, !rec.recovered.isSubset(of: libKey) { statRecovered += 1 }
                     let best = cs.compactMap { clusterBest[$0]?[r] }.max() ?? Float(1)
                     if key.isEmpty {
                         unknownRefs.append(r); unknownScores.append(best)
+                    } else if (rec?.unexplained ?? 0) >= 1 {
+                        // 主角认得出 + 还有认不出的主角级同行脸(侧/糊,身份匹配
+                        // 不可行)→ 「主角 与其他人」。用户三轮定稿:这批不能装作
+                        // 单人;逐张分流,不污染纯单人组(157 组级打标教训)
+                        var entry = othersMap[key] ?? ([], [])
+                        entry.refs.append(r); entry.scores.append(best)
+                        othersMap[key] = entry
+                        statOthers += 1
                     } else {
                         var entry = comboMap[key] ?? ([], [])
-                        entry.refs.append(r)
-                        entry.scores.append(best)
+                        entry.refs.append(r); entry.scores.append(best)
                         comboMap[key] = entry
                     }
                 }
-                var ordered: [(members: [Int], refs: [String], scores: [Float])] =
-                    comboMap.map { (Array($0.key).sorted(), $0.value.refs, $0.value.scores) }
+                var ordered: [(members: [Int], refs: [String], scores: [Float], withOthers: Bool)] =
+                    comboMap.map { (Array($0.key).sorted(), $0.value.refs, $0.value.scores, false) }
+                    + othersMap.map { (Array($0.key).sorted(), $0.value.refs, $0.value.scores, true) }
                 // 不确定组先入列再排序:它也是普通一组,按照片数排(153 排序 bug 教训:
                 // 排序后追加会让 44 张的不确定组落在 10 张组后面)
                 if !unknownRefs.isEmpty {
-                    ordered.append(([], unknownRefs, unknownScores))
+                    ordered.append(([], unknownRefs, unknownScores, false))
                 }
                 // 按组内照片数降序(用户指定)
                 ordered.sort { $0.refs.count > $1.refs.count }
@@ -465,7 +492,7 @@ struct PeopleView: View {
                     let scores = o.scores.enumerated()
                         .filter { aliveSet.contains(o.refs[$0.offset]) }.map(\.element)
                     outGroups.append(ComboGroup(id: i, members: o.members,
-                                                refs: alive, scores: scores))
+                                                refs: alive, scores: scores, withOthers: o.withOthers))
                 }
                 let unknownAlive = outGroups.first { $0.members.isEmpty }?.refs.count ?? 0
 
@@ -481,6 +508,9 @@ struct PeopleView: View {
                     faceTotal = data.refs.count
                     if outGroups.isEmpty {
                         app.notify("没有找到可归组的人脸")
+                    } else if statRecovered > 0 || statOthers > 0 {
+                        // 诊断口径:认出=进了对应组合组;未识别同行=进了「与其他人」
+                        app.notify("合影补认:认出 \(statRecovered) 张进对应组合组,\(statOthers) 张有认不出的同行人(侧脸/模糊)已归「与其他人」")
                     }
                 }
             } catch {
