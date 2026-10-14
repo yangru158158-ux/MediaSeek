@@ -35,6 +35,7 @@ private struct PeopleSnapshot: Codable {
     var personRefs: [Int: [String]]
     var totalPersons: Int
     var unknownCount: Int
+    var savedAt: Date?   // 旧快照无此字段,可选保证可解码
 }
 
 /// 归组扫描共享状态:挂在 AppModel 一份,视图只观察。
@@ -52,6 +53,9 @@ final class PeopleModel: ObservableObject {
     @Published var assets: [String: PHAsset] = [:]
     @Published var totalPersons = 0
     @Published var unknownCount = 0
+    /// 当前结果的产生时间(扫描完成/快照水化),结果页顶部标注——
+    /// 没有它,自动恢复的结果看起来像"凭空冒出"(163 用户反馈)
+    @Published var lastScanAt: Date?
 }
 
 struct PeopleView: View {
@@ -182,6 +186,10 @@ struct PeoplePanel: View {
 
     private var resultsSection: some View {
         Section {
+            if let t = m.lastScanAt {
+                Text("上次归组 \(Self.timeFmt.string(from: t))——结果已存库,重开不需要重扫;人脸数据变化后重扫自动生效")
+                    .font(.caption2).foregroundStyle(.tertiary)
+            }
             ForEach(majorGroups) { g in
                 row(g)
             }
@@ -211,6 +219,11 @@ struct PeoplePanel: View {
 
     /// 少于 10 张的组默认折叠隐藏(用户指定),主列表只看大组
     private let foldThreshold = 10
+    private static let timeFmt: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "MM-dd HH:mm"
+        return f
+    }()
     private var majorGroups: [ComboGroup] { m.groups.filter { $0.refs.count >= foldThreshold } }
     private var minorGroups: [ComboGroup] { m.groups.filter { $0.refs.count < foldThreshold } }
 
@@ -305,13 +318,14 @@ struct PeoplePanel: View {
                                           face: FaceEmbedder,
                                           cached: [String: (matched: Set<Int>, unexplained: Int)],
                                           store: VectorStore, ver: String,
-                                          progress: @escaping (Int, Int) -> Void) async -> [String: (recovered: Set<Int>, unexplained: Int)] {
+                                          progress: @escaping (Int, Int) -> Void) async -> (verdicts: [String: (recovered: Set<Int>, unexplained: Int)], fetchFails: Int) {
         var out: [String: (recovered: Set<Int>, unexplained: Int)] = [:]
         for (k, v) in cached { out[k] = (v.matched, v.unexplained) }
         let total = refs.count
         progress(0, total)
         var done = 0
         var idx = 0
+        var fetchFails = 0
         var pending: [(ref: String, matched: Set<Int>, unexplained: Int)] = []
         /// 取下一个待处理照片;命中的缓存直接算完成(被杀后重跑=秒过),
         /// 攒满 50 张落一次盘,进程再被杀也只丢尾部几十张
@@ -327,23 +341,35 @@ struct PeoplePanel: View {
             }
             return nil
         }
-        func work(_ ref: String) async -> (String, Set<Int>, Int)? {
-            guard let a = assets[ref], let key = baseKeys[ref],
-                  let img = try? await photo.image(for: a, maxPixel: 2048) else { return nil }
+        func work(_ ref: String) async -> (String, Set<Int>, Int, Bool)? {
+            guard let a = assets[ref], let key = baseKeys[ref] else { return nil }
+            var img: CGImage? = try? await photo.image(for: a, maxPixel: 2048)
+            if img == nil {
+                // iCloud 优化存储的老照片:2048px 要联网取回,偶发下载失败会把它
+                // 静默当"已确认单人"放行——退半秒重试一次,仍失败则计数上报
+                try? await Task.sleep(nanoseconds: 600_000_000)
+                img = try? await photo.image(for: a, maxPixel: 2048)
+            }
+            guard let img else { return (ref, [], 0, true) }
             // 协作线程没有逐任务的 autorelease pool:上千张 × 2048px 的 Vision
             // ObjC 临时对象会一路攒到内存红线被系统杀进程(扫描到末尾莫名
             // 无结果的潜在诱因)——每张处理完立即排干
-            return autoreleasepool { () -> (String, Set<Int>, Int)? in
+            return autoreleasepool { () -> (String, Set<Int>, Int, Bool)? in
                 // 无闸门检测(质量/姿态全关):补认的目的恰是找回被闸门滤掉的第二人;
                 // 2048px 与索引同级,被索引漏掉的小脸这里同样漏不掉
                 let faces = FaceKit.detect(cg: img, maxFaces: 12, minFacePx: 40,
                                            minQuality: 0, maxYawDeg: 360)
                 guard !faces.isEmpty else { return nil }
-                // 主角级脸 = 宽度 ≥ 最大脸 30%:合影第二人与主脸尺寸相当;远处路人/
-                // 背景小脸不到这条线,不参与触发也不参与补认
+                // 主角级脸 = 宽度 ≥ 最大脸 30%:远处路人/背景小脸不到这条线,
+                // 不参与匹配也不算"他人"(用户定稿:纯背景小脸不算)。
+                // ⚠️ 不能用「主角级脸数 > 主角数」提前放行(163 实测三张合照漏进
+                // 单人组的根因):已入库主角可能恰是照片里较小的脸(近景自拍里
+                // 同行者脸更大),30% 线把她滤掉后待认脸数恰等于主角数,守卫
+                // 误判"没有多余的脸"直接放行。每张显著脸一律过匹配,让
+                // "像谁/像不像任何人"自己说话
                 let maxW = faces.map { $0.boundingBox.width }.max() ?? 0
                 let major = faces.filter { $0.boundingBox.width >= maxW * 0.3 }
-                guard major.count > key.count else { return nil }
+                guard !major.isEmpty else { return nil }
                 var matched = Set<Int>()
                 var explained = 0
                 for obs in major {
@@ -367,14 +393,19 @@ struct PeoplePanel: View {
                        bestSim >= 0.40 || (bestSim >= 0.32 && bestSim - secondSim >= 0.12) {
                         matched.insert(bestCi)
                         explained += 1
+                    } else if bestCi >= 0, key.contains(bestCi) {
+                        // 对不上双判据线(无闸门重检的脸常更糊)但最像的就是
+                        // 组内本人——视作本人的难脸,不算"他人",纯单人照
+                        // 不会因重检质量差被误报进「与其他人」
+                        explained += 1
                     }
                 }
-                // 未识别的主角级脸 = 检出但对不上任何人物(侧/糊/路人)。镜像/海报
-                // 同人双脸不会误报:两张脸都匹配上本人 → explained=2
-                return (ref, matched, major.count - explained)
+                // 未识别的主角级脸 = 检出但对不上任何人物、也不像组内本人
+                // (侧/糊/路人)。镜像/海报同人双脸不会误报:两张脸都匹配上本人
+                return (ref, matched, major.count - explained, false)
             }
         }
-        await withTaskGroup(of: (String, Set<Int>, Int)?.self) { group in
+        await withTaskGroup(of: (String, Set<Int>, Int, Bool)?.self) { group in
             for _ in 0..<4 {
                 if let ref = takeRef() { group.addTask { await work(ref) } }
             }
@@ -382,12 +413,18 @@ struct PeoplePanel: View {
                 if let r = await group.next() {
                     done += 1
                     if done % 10 == 0 || done == total { progress(done, total) }
-                    if let (ref, matched, unexplained) = r {
+                    if let (ref, matched, unexplained, failed) = r {
                         out[ref] = (matched, unexplained)
-                        pending.append((ref, matched, unexplained))
-                        if pending.count >= 50 {
-                            store.saveRecoverCache(pending, ver: ver)
-                            pending.removeAll()
+                        if failed {
+                            // 取图失败不落缓存:下次扫描自动重试;先按已入库
+                            // 主角归组,完成提示里如实上报数量
+                            fetchFails += 1
+                        } else {
+                            pending.append((ref, matched, unexplained))
+                            if pending.count >= 50 {
+                                store.saveRecoverCache(pending, ver: ver)
+                                pending.removeAll()
+                            }
                         }
                     }
                 }
@@ -398,7 +435,7 @@ struct PeoplePanel: View {
             }
         }
         if !pending.isEmpty { store.saveRecoverCache(pending, ver: ver) }
-        return out
+        return (out, fetchFails)
     }
 
     /// 水化:进程重启/重开面板时从库内快照直接恢复归组结果(162 前结果只在
@@ -431,6 +468,7 @@ struct PeoplePanel: View {
         m.assets = fetched
         m.totalPersons = snap.totalPersons
         m.unknownCount = snap.unknownCount
+        m.lastScanAt = snap.savedAt
         UserDefaults.standard.removeObject(forKey: "peopleScanRunning")
     }
 
@@ -537,10 +575,11 @@ struct PeoplePanel: View {
                     centroids[ci] = c
                 }
                 var recovered: [String: (recovered: Set<Int>, unexplained: Int)] = [:]
+                var fetchFails = 0
                 if let faceModel {
                     // 先取补认进度缓存:被系统杀掉后重跑,已处理的照片秒过
                     let cached = store.loadRecoverCache(ver: ver)
-                    recovered = await Self.recoverCompanions(
+                    (recovered, fetchFails) = await Self.recoverCompanions(
                         refs: Array(baseKeys.keys), baseKeys: baseKeys,
                         centroids: centroids, dim: data.dim,
                         photo: photoLib, assets: fetched, face: faceModel,
@@ -617,7 +656,8 @@ struct PeoplePanel: View {
                         .init(members: $0.members, refs: $0.refs,
                               scores: $0.scores, withOthers: $0.withOthers)
                     },
-                    personRefs: refsOf, totalPersons: persons.count, unknownCount: unknownAlive)
+                    personRefs: refsOf, totalPersons: persons.count,
+                    unknownCount: unknownAlive, savedAt: Date())
                 if let data = try? JSONEncoder().encode(snap) {
                     store.savePeopleResults(json: String(decoding: data, as: UTF8.self), ver: ver)
                 }
@@ -626,6 +666,7 @@ struct PeoplePanel: View {
                 await MainActor.run {
                     model.scanning = false
                     model.progress = nil
+                    model.lastScanAt = Date()
                     UIApplication.shared.isIdleTimerDisabled = false
                     model.groups = outGroups
                     model.personNames = names
@@ -637,7 +678,9 @@ struct PeoplePanel: View {
                         app.notify("没有找到可归组的人脸")
                     } else if statRecovered > 0 || statOthers > 0 {
                         // 诊断口径:认出=进了对应组合组;未识别同行=进了「与其他人」
-                        app.notify("合影补认:认出 \(statRecovered) 张进对应组合组,\(statOthers) 张有认不出的同行人(侧脸/模糊)已归「与其他人」")
+                        app.notify(fetchFails > 0
+                               ? "合影补认:认出 \(statRecovered) 张进对应组合组,\(statOthers) 张有认不出的同行人(侧脸/模糊)已归「与其他人」;\(fetchFails) 张 iCloud 照片未能复检(已按入库主角归组,下次扫描自动重试)"
+                               : "合影补认:认出 \(statRecovered) 张进对应组合组,\(statOthers) 张有认不出的同行人(侧脸/模糊)已归「与其他人」")
                     }
                 }
             } catch {

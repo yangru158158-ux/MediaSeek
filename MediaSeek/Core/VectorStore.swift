@@ -473,13 +473,15 @@ final class VectorStore {
         return out.map { (refKey: $0.0, title: $0.1) }
     } }
 
-    /// 用户标签子串精确匹配(中文)
+    /// 用户标签子串精确匹配(中文)。不设小上限:命名一次写几百上千张同名标签
+    /// (程玉婷 894 张),LIMIT 80 会把名字搜索拦腰截断(163 用户实测"该 894 只回
+    /// 80 几")——与检索 topK(4000)同额
     func searchUserTags(query: String) throws -> [String] { try serialized {
         guard let db, !query.isEmpty else { return [] }
         let escaped = query
             .replacingOccurrences(of: "%", with: "\\%")
             .replacingOccurrences(of: "_", with: "\\_")
-        let stmt = try prepare("SELECT ref_key FROM items WHERE kind = 'userTag' AND title LIKE ? ESCAPE '\\' LIMIT 80")
+        let stmt = try prepare("SELECT ref_key FROM items WHERE kind = 'userTag' AND title LIKE ? ESCAPE '\\' LIMIT 4000")
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, "%\(escaped)%", -1, Self.transient)
         var out: [String] = []
