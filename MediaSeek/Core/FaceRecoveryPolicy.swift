@@ -54,6 +54,15 @@ enum FaceRecoveryPolicy {
         return vetoed
     }
 
+    /// 躯干兜底裁决:照片只认出一张主角脸、但画面里有 ≥2 个主角级躯干
+    /// (宽度 ≥ 最大躯干 30%,与脸的 30% 规则同构)→ 同行者的脸大概率被
+    /// 检测层漏检(侧脸/遮挡/动感模糊),不能按纯单人处理。
+    /// 远处路人/背景人身体小不过 30% 线,不触发;多主角脸照片不走此兜底
+    /// (由脸匹配路径裁决)。
+    static func companionSuspectedByBody(detectedFaces: Int, significantBodies: Int) -> Bool {
+        detectedFaces == 1 && significantBodies >= 2
+    }
+
     private static func cosineSimilarity(_ lhs: [Float], _ rhs: [Float]) -> Float? {
         guard !lhs.isEmpty, lhs.count == rhs.count else { return nil }
         var dot: Float = 0

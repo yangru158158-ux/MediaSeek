@@ -77,7 +77,20 @@ struct FaceRecoveryPolicyTest {
             "高于 0.48 的脸间相似度应保留同分的双脸认领"
         )
 
-        print("PASS: 同图双脸补认策略的 5 项确定性回归断言全部通过")
+        expect(
+            FaceRecoveryPolicy.companionSuspectedByBody(detectedFaces: 1, significantBodies: 2),
+            "一主角脸+≥2 主角级躯干应判疑似同行(脸被检测层漏检)"
+        )
+        expect(
+            !FaceRecoveryPolicy.companionSuspectedByBody(detectedFaces: 1, significantBodies: 1),
+            "一主角脸+一躯干=纯单人,人体兜底不触发"
+        )
+        expect(
+            !FaceRecoveryPolicy.companionSuspectedByBody(detectedFaces: 2, significantBodies: 2),
+            "多主角脸照片不走人体兜底,由脸匹配路径裁决"
+        )
+
+        print("PASS: 同图双脸补认策略的 8 项确定性回归断言全部通过")
     }
 
     private static func vetoes(_ matches: [FaceRecoveryPolicy.Match]) -> Set<Int> {

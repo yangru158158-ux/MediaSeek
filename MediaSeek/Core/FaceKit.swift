@@ -114,6 +114,19 @@ enum FaceKit {
         }
     }
 
+    /// 人体检测(躯干兜底):VNDetectHumanRectanglesRequest 全身模式,返回归一化
+    /// 人体框数组。只数身体不认身份——167 实测漏径:合影第二人被脸检整个漏检
+    /// (侧脸/遮挡/动感模糊,2048px 无闸门重检也只有 1 脸),躯干是最后一道
+    /// 证据通道;调用方按「宽度 ≥ 最大躯干 30%」筛主角级(与脸的 30% 规则
+    /// 同构,远处路人/背景人身体小不过线)。请求失败返回空(保守不判)。
+    static func detectHumans(cg: CGImage) -> [CGRect] {
+        let request = VNDetectHumanRectanglesRequest()
+        request.upperBodyOnly = false
+        let handler = VNImageRequestHandler(cgImage: cg, options: [:])
+        do { try handler.perform([request]) } catch { return [] }
+        return (request.results ?? []).map { $0.boundingBox }
+    }
+
     /// 按双眼做相似变换对齐(双眼转水平、瞳距缩放到模板值、眼中点平移到模板位)。
     /// ⚠️ 眼位按 x 坐标排序,不信任 Vision 的 leftEye/rightEye 命名——该命名是
     /// 「人自己的左右眼」还是「图像观察者左右」官方文档不明,拿反了会把脸
