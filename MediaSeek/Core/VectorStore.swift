@@ -564,6 +564,21 @@ final class VectorStore {
         return String(cString: sqlite3_column_text(stmt, 0))
     } }
 
+    /// 某照片的整图 SigLIP 向量(合影计数兜底用;与检索/查重同源)。
+    /// blob 字节数与 dim 不一致(截断/坏行)返回 nil,不越界读。
+    func clipVector(ref: String) -> [Float]? { try serialized {
+        guard let db, let stmt = try? prepare("SELECT vec, dim FROM items WHERE kind = 'photo' AND ref_key = ? AND frame_index = 0 LIMIT 1") else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, ref, -1, Self.transient)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        let dim = Int(sqlite3_column_int(stmt, 1))
+        let n = Int(sqlite3_column_bytes(stmt, 0))
+        guard dim > 0, n == dim * 4 else { return nil }
+        var vec = [Float](repeating: 0, count: dim)
+        if let base = sqlite3_column_blob(stmt, 0) { memcpy(&vec, base, n) }
+        return vec
+    } }
+
     /// 已索引照片数(空态提示用)
     func countPhotos() -> Int { try serialized {
         guard let db, let stmt = try? prepare("SELECT COUNT(*) FROM items WHERE kind = 'photo'") else { return 0 }

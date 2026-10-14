@@ -114,20 +114,67 @@ enum FaceKit {
         }
     }
 
-    /// 人体检测(躯干兜底):VNDetectHumanRectanglesRequest 上半身模式,返回归一化
-    /// 人体框数组。只数身体不认身份——167 实测漏径:合影第二人被脸检整个漏检
-    /// (侧脸/遮挡/动感模糊,2048px 无闸门重检也只有 1 脸),躯干是最后一道
-    /// 证据通道;调用方按「宽度 ≥ 最大躯干 30%」筛主角级(与脸的 30% 规则
-    /// 同构,远处路人/背景人身体小不过线)。⚠️ 168 实测教训:全身模式
-    /// (upperBodyOnly=false)对自拍/半身构图整张漏检(人只有上半身在画面里,
-    /// 全身检测器找不到完整人体)——上半身模式脸可见时头+躯干几乎必然可见,
-    /// 全身站立照同样能检出上半身框,覆盖面更广。请求失败返回空(保守不判)。
-    static func detectHumans(cg: CGImage) -> [CGRect] {
-        let request = VNDetectHumanRectanglesRequest()
-        request.upperBodyOnly = true
+    /// VNDetectFaceRectanglesRequest 无闸门脸检(与 landmarks 版是两个检测器):
+    /// 只框脸不做关键点拟合,贴脸/侧脸/边缘脸的检出率通常高于 landmarks 版。
+    /// 170 实测双人自拍『≥30px 检出 1 脸』即 landmarks 版漏检——双通道并集
+    /// 由 detectUnion 承担,这里只提供第二通道。
+    static func detectFaceRectangles(cg: CGImage, minFacePx: Int) -> [VNFaceObservation] {
+        let request = VNDetectFaceRectanglesRequest()
         let handler = VNImageRequestHandler(cgImage: cg, options: [:])
         do { try handler.perform([request]) } catch { return [] }
-        return (request.results ?? []).map { $0.boundingBox }
+        let minW = CGFloat(minFacePx) / CGFloat(max(cg.width, 1))
+        return (request.results ?? []).filter { $0.boundingBox.width >= minW }
+    }
+
+    /// 复检脸检测双通道并集:rectangles(数人头检测器)+ landmarks(关键点
+    /// 检测器),IoU>0.5 去重、保留带 landmarks 的观测;rectangles-only 的脸
+    /// 走 alignedFace 的无关键点退化对齐(外接框 1.4 倍中心方形)。返回并集
+    /// 与两通道各自计数(诊断用:下轮一张截图即知两检测器各回了几张脸)。
+    static func detectUnion(cg: CGImage, maxFaces: Int = 12, minFacePx: Int = 30)
+        -> (faces: [VNFaceObservation], rectCount: Int, landmarkCount: Int) {
+        let lm = detect(cg: cg, maxFaces: maxFaces, minFacePx: minFacePx,
+                        minQuality: 0, maxYawDeg: 360)
+        let rect = detectFaceRectangles(cg: cg, minFacePx: minFacePx)
+        var union = lm
+        for r in rect where !lm.contains(where: { iou($0.boundingBox, r.boundingBox) > 0.5 }) {
+            union.append(r)
+        }
+        // 大脸在前:主角级 30% 过滤以最大脸为基准,与既有规则一致
+        union.sort { $0.boundingBox.width > $1.boundingBox.width }
+        return (Array(union.prefix(maxFaces)), rect.count, lm.count)
+    }
+
+    /// 归一化框 IoU(并集去重用)
+    static func iou(_ a: CGRect, _ b: CGRect) -> CGFloat {
+        let i = a.intersection(b)
+        guard !i.isNull, i.width > 0, i.height > 0 else { return 0 }
+        let inter = i.width * i.height
+        return inter / (a.width * a.height + b.width * b.height - inter)
+    }
+
+    /// 人体检测(躯干兜底):VNDetectHumanRectanglesRequest 上半身+全身两种
+    /// 模式并跑,IoU>0.5 去重。只数身体不认身份——167 实测漏径:合影第二人
+    /// 被脸检整个漏检(侧脸/遮挡/动感模糊),躯干是最后的几何证据通道。
+    /// ⚠️ 单一模式各有盲区(实测互为镜像):全身模式(upperBodyOnly=false)
+    /// 对自拍/半身构图整张漏检(人只有上半身在画面里);上半身模式对
+    /// 弯腰/躺姿/身体被裁切的构图漏检(170 实测双人照『躯干1个/主角级1』=
+    /// 上半身模式也只框出一人)。并集只增不减。请求失败返回空(保守不判)。
+    /// 调用方按 FaceRecoveryPolicy.significantBodyCount 筛同伴级躯干。
+    static func detectHumans(cg: CGImage) -> [CGRect] {
+        var boxes: [CGRect] = []
+        for upper in [true, false] {
+            let request = VNDetectHumanRectanglesRequest()
+            request.upperBodyOnly = upper
+            let handler = VNImageRequestHandler(cgImage: cg, options: [:])
+            if (try? handler.perform([request])) != nil {
+                boxes.append(contentsOf: (request.results ?? []).map { $0.boundingBox })
+            }
+        }
+        var merged: [CGRect] = []
+        for b in boxes where !merged.contains(where: { iou($0, b) > 0.5 }) {
+            merged.append(b)
+        }
+        return merged
     }
 
     /// 按双眼做相似变换对齐(双眼转水平、瞳距缩放到模板值、眼中点平移到模板位)。

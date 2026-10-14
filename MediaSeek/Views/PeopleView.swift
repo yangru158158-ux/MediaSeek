@@ -340,9 +340,18 @@ struct PeoplePanel: View {
                                           centroids: [Int: [Float]], dim: Int,
                                           photo: PhotoLibraryService, assets: [String: PHAsset],
                                           face: FaceEmbedder,
+                                          siglipAnchors: (two: [Float], one: [Float])?,
                                           cached: [String: (matched: Set<Int>, unexplained: Int, reason: Int, note: Int, detail: String)],
                                           store: VectorStore, ver: String,
                                           progress: @escaping (Int, Int) -> Void) async -> (verdicts: [String: (recovered: Set<Int>, unexplained: Int, reason: Int, note: Int, detail: String)], fetchFails: Int) {
+        /// 逐躯干宽度百分比(诊断用):「[100,22,8]%」——下轮截图即知
+        /// 第二人躯干多大、18% 同伴级线卡没卡住,数据驱动调线
+        func bodyWidths(_ bodies: [CGRect]) -> String {
+            guard let hero = bodies.map({ $0.width }).max(), hero > 0 else { return "" }
+            let parts = bodies.map { Int(($0.width / hero * 100).rounded()) }
+                .sorted(by: >).map { "\($0)%" }
+            return "[" + parts.joined(separator: ",") + "]"
+        }
         var out: [String: (recovered: Set<Int>, unexplained: Int, reason: Int, note: Int, detail: String)] = [:]
         for (k, v) in cached { out[k] = (v.matched, v.unexplained, v.reason, v.note, v.detail) }
         let total = refs.count
@@ -380,26 +389,28 @@ struct PeoplePanel: View {
             // 无结果的潜在诱因)——每张处理完立即排干
             return autoreleasepool { () -> (String, Set<Int>, Int, Bool, Int, Int, String)? in
                 // 无闸门检测(质量/姿态全关):补认的目的恰是找回被闸门滤掉的第二人;
-                // 2048px 与索引同级,被索引漏掉的小脸这里同样漏不掉;下限 30px
-                // (157 数人头同款)——30% 比例线才是「纯背景小脸不算」的语义闸门
-                let faces = FaceKit.detect(cg: img, maxFaces: 12, minFacePx: 30,
-                                           minQuality: 0, maxYawDeg: 360)
+                // 2048px 与索引同级;下限 30px(157 数人头同款)——30% 比例线才是
+                // 「纯背景小脸不算」的语义闸门。⚠️ 双通道并集(170 实测漏径:
+                // landmarks 版对贴脸/侧脸双人自拍整张只回 1 脸,rectangles 版
+                // 检出率不同,并集只增不减);rectangles-only 的脸无关键点,
+                // 走 alignedFace 的外接框退化对齐
+                let union = FaceKit.detectUnion(cg: img, maxFaces: 12, minFacePx: 30)
+                let faces = union.faces
                 // keyed 照片复检未发现 ≥30px 候选脸:与 30% 主角脸过滤分开记录,
                 // 长按诊断时不会再把“未检出”和“检出后被尺寸门槛过滤”混为一谈。
                 guard !faces.isEmpty else {
                     // 零脸照片(远景/糊脸,168 实测新径)也过躯干兜底:脸检彻底
                     // 失败但躯干可数——两人背影/远景合照连一张脸都检不出,
-                    // ≥2 主角级躯干仍是同行证据,不能默认单人
+                    // ≥2 同伴级躯干仍是同行证据,不能默认单人
                     let bodies = FaceKit.detectHumans(cg: img)
-                    let maxBW = bodies.map { $0.width }.max() ?? 0
-                    let significant = bodies.filter { $0.width >= maxBW * 0.3 }.count
+                    let significant = FaceRecoveryPolicy.significantBodyCount(bodies)
                     if FaceRecoveryPolicy.companionSuspectedByBody(
                         detectedFaces: 0, significantBodies: significant) {
                         return (ref, [], 1, false, 3, 0,
-                                "未检出≥30px候选脸;躯干\(bodies.count)个/主角级\(significant)→判有同行")
+                                "未检出≥30px候选脸;躯干\(bodies.count)个\(bodyWidths(bodies))/同伴级\(significant)→判有同行")
                     }
                     return (ref, [], 0, false, 3, 0,
-                            "未检出≥30px候选脸;躯干\(bodies.count)个/主角级\(significant)")
+                            "未检出≥30px候选脸;躯干\(bodies.count)个\(bodyWidths(bodies))/同伴级\(significant)")
                 }
                 // 主角级脸 = 宽度 ≥ 最大脸 30%:纯背景小脸不参与匹配也不算“他人”。
                 // 不以显著脸数量作提前放行条件;每张显著脸仍逐一匹配。
@@ -411,7 +422,7 @@ struct PeoplePanel: View {
                     let percent = maxW > 0 ? Int((width / maxW * 100).rounded()) : 0
                     return "\(pixels)px/\(percent)%"
                 }
-                let faceSummary = "≥30px检出\(faces.count)脸,≥30%主角\(major.count)脸"
+                let faceSummary = "≥30px rect检出\(union.rectCount)/关键点\(union.landmarkCount)/并集\(faces.count),≥30%主角\(major.count)脸"
                     + (excludedFaceSizes.isEmpty ? "" : ";过滤小脸 " + excludedFaceSizes.joined(separator: ","))
                 guard !major.isEmpty else {
                     return (ref, [], 0, false, 3, 0, faceSummary)
@@ -485,22 +496,36 @@ struct PeoplePanel: View {
                 // (侧/糊/路人/veto)。镜像/海报同人双脸两张分接近,不会被 veto
                 var unexplained = major.count - explained
                 var bodyNote = ""
-                // 躯干兜底(167 实测漏径:双人照复检「≥40px检出1脸」——同行者的
-                // 脸被 Vision 检测层整个漏掉,根本没进匹配环节):纯单人判决
-                // (恰 1 张主角脸且已解释)再数人体,≥2 个主角级躯干(宽度 ≥
-                // 最大躯干 30%,与脸的 30% 规则同构,远处路人身体小不过线)
+                // 躯干兜底(167 实测漏径:双人照复检只出 1 脸——同行者的脸被
+                // Vision 检测层整个漏掉,根本没进匹配环节):纯单人判决
+                // (恰 1 张主角脸且已解释)再数人体,≥2 个同伴级躯干
+                // (宽度 ≥ 最宽躯干 18%,见 FaceRecoveryPolicy.significantBodyCount)
                 // → 同行者脸被漏检,不能装作单人
                 if major.count == 1 && unexplained == 0 {
                     let bodies = FaceKit.detectHumans(cg: img)
-                    let maxBW = bodies.map { $0.width }.max() ?? 0
-                    let significant = bodies.filter { $0.width >= maxBW * 0.3 }.count
-                    let suspected = FaceRecoveryPolicy.companionSuspectedByBody(
+                    let significant = FaceRecoveryPolicy.significantBodyCount(bodies)
+                    var suspected = FaceRecoveryPolicy.companionSuspectedByBody(
                         detectedFaces: major.count, significantBodies: significant)
+                    var extraNote = ""
+                    // SigLIP 计数兜底(第三层):脸并集与躯干都只数出 1(170 实测
+                    // 『躯干1个/同伴级1』= 贴脸/重叠构图连躯干检测器也只框出一人)
+                    // 时,问整图语义「两人 vs 一人」——照片向量已在索引库,零图像
+                    // 推理;判据保守(margin 0.025),诊断带双分数可校准
+                    if !suspected, let anchors = siglipAnchors,
+                       let pv = store.clipVector(ref: ref), pv.count == anchors.two.count {
+                        var two: Float = 0, one: Float = 0
+                        vDSP_dotpr(pv, 1, anchors.two, 1, &two, vDSP_Length(pv.count))
+                        vDSP_dotpr(pv, 1, anchors.one, 1, &one, vDSP_Length(pv.count))
+                        suspected = FaceRecoveryPolicy.companionSuspectedBySigLIP(
+                            twoScore: two, oneScore: one)
+                        extraNote = String(format: ";siglip two=%.2f/one=%.2f", two, one)
+                            + (suspected ? "→判有同行" : "")
+                    }
                     if suspected { unexplained = 1 }
-                    // 躯干证据无论是否触发都写进诊断——下轮若仍漏,一张截图即知
-                    // 检测器返回了几个躯干、几个过了主角级线,可直接定位调哪里
-                    bodyNote = ";躯干\(bodies.count)个/主角级\(significant)"
-                        + (suspected ? "→判有同行" : "")
+                    // 躯干证据无论是否触发都写进诊断(逐躯干宽度百分比:下轮
+                    // 截图即知每个躯干多大、18% 线卡没卡住第二人,直接定调线)
+                    bodyNote = ";躯干\(bodies.count)个\(bodyWidths(bodies))/同伴级\(significant)"
+                        + (suspected ? "→判有同行" : "") + extraNote
                 }
                 let swallowed = swallowedMin.isFinite
                 let reason = swallowed ? 1 : 0
@@ -547,11 +572,11 @@ struct PeoplePanel: View {
     /// 人名按当前标签重推——重命名/清标签无需重扫
     private func hydrateIfNeeded() {
         guard m.groups.isEmpty, !m.scanning else { return }
-        // 算法盐 a7:归组/补认逻辑变更必须升盐——旧快照与补认缓存不能复活旧裁决。
+        // 算法盐 a8:归组/补认逻辑变更必须升盐——旧快照与补认缓存不能复活旧裁决。
         // (人脸行/排除/模型)不含算法版本,163 的旧判决经快照水化+缓存命中在
         // 164 原样复活,用户看到的就是"修了没变化"
         let ver = app.store.peopleFingerprint(
-            extra: "a7-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
+            extra: "a8-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
         guard let json = app.store.loadPeopleResults(ver: ver),
               let data = json.data(using: .utf8),
               let snap = try? JSONDecoder().decode(PeopleSnapshot.self, from: data) else {
@@ -619,15 +644,42 @@ struct PeoplePanel: View {
         let faceModel = app.models.face
         let model = app.people   // 结果写共享模型:面板关了再开不丢(160 教训)
         // 指纹:人脸数据/排除集合/模型任一变化,快照与补认缓存自动作废;
-        // a7=算法盐,归组逻辑变更必须升盐(与 hydrateIfNeeded 同串)
+        // a8=算法盐,归组逻辑变更必须升盐(与 hydrateIfNeeded 同串)
         let ver = store.peopleFingerprint(
-            extra: "a7-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
+            extra: "a8-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
         // 「扫描中」记账 + 屏幕常亮:退后台被系统结束进程后,重开面板能明确
         // 告知「上次未完成」;常亮防前台锁屏挂起
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "peopleScanRunning")
         UIApplication.shared.isIdleTimerDisabled = true
         Task.detached(priority: .userInitiated) {
             do {
+                // SigLIP 计数兜底锚点(第八批):两人/一人各两条 prompt 取均值
+                // 再归一——脸并集与躯干都只数出 1 时,问整图语义「几个人」作
+                // 最后证据。模型未装(nil)该层静默跳过;嵌入在此一次完成,
+                // 归组全程只做向量算术
+                var siglipAnchors: (two: [Float], one: [Float])? = nil
+                if let sig = await MainActor.run({ app.models.siglip }) {
+                    func anchor(_ prompts: [String]) -> [Float]? {
+                        var acc: [Float]? = nil
+                        for p in prompts {
+                            guard let v = try? sig.embedQuery(p) else { return nil }
+                            if var a = acc { for i in v.indices { a[i] += v[i] }; acc = a }
+                            else { acc = v }
+                        }
+                        guard var a = acc else { return nil }
+                        var ss: Float = 0
+                        vDSP_dotpr(a, 1, a, 1, &ss, vDSP_Length(a.count))
+                        let n = max(ss.squareRoot(), 1e-8)
+                        for i in a.indices { a[i] /= n }
+                        return a
+                    }
+                    if let t = anchor(["This is a photo of two people.",
+                                       "This is a photo of a couple."]),
+                       let o = anchor(["This is a photo of one person.",
+                                       "This is a photo of a single person."]) {
+                        siglipAnchors = (t, o)
+                    }
+                }
                 let data = try store.allFaceVectors()
                 let raw = DuplicateScanner.scan(
                     keys: data.keys, flat: data.flat, dim: data.dim, threshold: threshold) { done, total in
@@ -697,6 +749,7 @@ struct PeoplePanel: View {
                         refs: Array(baseKeys.keys), baseKeys: baseKeys,
                         centroids: centroids, dim: data.dim,
                         photo: photoLib, assets: fetched, face: faceModel,
+                        siglipAnchors: siglipAnchors,
                         cached: cached, store: store, ver: ver) { done, total in
                         Task { @MainActor in model.progress = (done, total) }
                     }

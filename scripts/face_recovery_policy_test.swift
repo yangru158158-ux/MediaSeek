@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 
 @main
 struct FaceRecoveryPolicyTest {
@@ -98,7 +99,57 @@ struct FaceRecoveryPolicyTest {
             "零脸+一躯干不触发人体兜底"
         )
 
-        print("PASS: 同图双脸补认策略的 10 项确定性回归断言全部通过")
+        // 同伴级躯干计数(170 实测『躯干3个/主角级1』= 30% 线漏掉真同行者):
+        // 18% 线——同行者常比主角瘦小/站后半步,远处路人 <15%
+        let heroBody = CGRect(x: 0.1, y: 0.0, width: 0.40, height: 0.90)
+        expect(FaceRecoveryPolicy.significantBodyCount([]) == 0, "无躯干=0")
+        expect(FaceRecoveryPolicy.significantBodyCount([heroBody]) == 1, "单躯干=1")
+        expect(
+            FaceRecoveryPolicy.significantBodyCount([
+                heroBody, CGRect(x: 0.52, y: 0.0, width: 0.32, height: 0.85)
+            ]) == 2,
+            "≥30% 宽的第二躯干计为同伴"
+        )
+        expect(
+            FaceRecoveryPolicy.significantBodyCount([
+                heroBody, CGRect(x: 0.10, y: 0.45, width: 0.06, height: 0.18)
+            ]) == 1,
+            "<18% 宽的远处小躯干(路人)不计入"
+        )
+        expect(
+            FaceRecoveryPolicy.significantBodyCount([
+                heroBody, CGRect(x: 0.50, y: 0.0, width: 0.20, height: 0.80)
+            ]) == 2,
+            "18-30% 宽的贴身同行躯干计入(170 实测卡线漏径)"
+        )
+        expect(
+            FaceRecoveryPolicy.significantBodyCount([
+                heroBody, CGRect(x: 0.50, y: 0.0, width: 0.20, height: 0.80),
+                CGRect(x: 0.02, y: 0.50, width: 0.04, height: 0.15)
+            ]) == 2,
+            "同行者计入且背景小躯干不计入(混合场景)"
+        )
+
+        // SigLIP 计数兜底(贴脸/重叠构图连躯干检测器都只框出一人时的最后证据):
+        // two ≥ 0.10 且领先 one ≥ 0.025 才判——真余弦尺度命中带才 0.10-0.14
+        expect(
+            FaceRecoveryPolicy.companionSuspectedBySigLIP(twoScore: 0.13, oneScore: 0.08),
+            "两人解读明确胜出(two 达标且领先)应判疑似同行"
+        )
+        expect(
+            !FaceRecoveryPolicy.companionSuspectedBySigLIP(twoScore: 0.11, oneScore: 0.10),
+            "领先幅度不足 margin 的不判(单人照保护)"
+        )
+        expect(
+            !FaceRecoveryPolicy.companionSuspectedBySigLIP(twoScore: 0.09, oneScore: 0.03),
+            "two 低于 minTwo(语义不读图/怪图)不判"
+        )
+        expect(
+            !FaceRecoveryPolicy.companionSuspectedBySigLIP(twoScore: 0.12, oneScore: 0.14),
+            "一人解读反超时绝不判两人"
+        )
+
+        print("PASS: 同图双脸补认策略的 20 项确定性回归断言全部通过")
     }
 
     private static func vetoes(_ matches: [FaceRecoveryPolicy.Match]) -> Set<Int> {

@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 
 enum FaceRecoveryPolicy {
     struct Match {
@@ -54,15 +55,37 @@ enum FaceRecoveryPolicy {
         return vetoed
     }
 
-    /// 躯干兜底裁决:照片只认出 ≤1 张主角脸、但画面里有 ≥2 个主角级躯干
-    /// (宽度 ≥ 最大躯干 30%,与脸的 30% 规则同构)→ 同行者的脸大概率被
-    /// 检测层漏检(侧脸/遮挡/动感模糊/远景小脸),不能按纯单人处理。
+    /// 躯干兜底裁决:照片只认出 ≤1 张主角脸、但画面里有 ≥2 个同伴级躯干
+    /// → 同行者的脸大概率被检测层漏检(侧脸/遮挡/动感模糊/远景小脸),
+    /// 不能按纯单人处理。
     /// 0 张脸(复检零检出,168 实测新径)与 1 张脸同样适用——两人背影/
     /// 远景合照连一张脸都检不出,躯干仍可作同行证据。
-    /// 远处路人/背景人身体小不过 30% 线,不触发;多主角脸照片不走此兜底
-    /// (由脸匹配路径裁决)。
+    /// 多主角脸照片不走此兜底(由脸匹配路径裁决)。
     static func companionSuspectedByBody(detectedFaces: Int, significantBodies: Int) -> Bool {
         detectedFaces <= 1 && significantBodies >= 2
+    }
+
+    /// 同伴级躯干计数:宽度 ≥ 最宽躯干 18% 的身体框个数。
+    /// 168-170 实测 30% 线漏掉真同行者——『躯干3个/主角级1』= 第二人躯干
+    /// 被检出但卡在 30% 线下(自拍/合影同行者常比主角瘦小或站后半步)。
+    /// 18% 的依据:走到躯干层的同行者都是与主角同画面尺度的(脸若被复检
+    /// 看到早走脸路径了),躯干比例通常 ≥20%;远处路人/背景人身体小
+    /// (<15%),仍在线外。诊断带逐躯干宽度百分比,线按实测数据再校。
+    static func significantBodyCount(_ bodies: [CGRect], ratio: CGFloat = 0.18) -> Int {
+        guard let hero = bodies.max(by: { $0.width < $1.width }), hero.width > 0 else { return 0 }
+        return bodies.filter { $0.width >= hero.width * ratio }.count
+    }
+
+    /// SigLIP 计数兜底:脸检(双通道并集)与躯干(双模式+同伴级)都只数出
+    /// 1 时的最后一层证据——整图语义对「两人」vs「一人」的相对偏好
+    /// (照片向量已在索引库,零图像推理)。贴脸拥抱/两人被检测器框成一个
+    /// 整体时,脸与躯干几何通道全部失效,整图语义是唯一证据。
+    /// 判据保守:真余弦尺度上命中带才 0.10-0.14,要求 two ≥ 0.10 且领先
+    /// one ≥ 0.025(两人解读明确胜出才判);诊断必带两个分数,误伤时
+    /// 一张截图即可校准 margin。
+    static func companionSuspectedBySigLIP(twoScore: Float, oneScore: Float,
+                                           minTwo: Float = 0.10, margin: Float = 0.025) -> Bool {
+        twoScore >= minTwo && (twoScore - oneScore) >= margin
     }
 
     private static func cosineSimilarity(_ lhs: [Float], _ rhs: [Float]) -> Float? {
