@@ -20,39 +20,24 @@ struct PeopleView: View {
     @EnvironmentObject var app: AppModel
     @Environment(\.dismiss) private var dismiss
 
-    @State private var mode = "balanced"
-    @State private var scanning = false
-    @State private var progress: (done: Int, total: Int)?
-    @State private var groups: [ComboGroup] = []
-    @State private var personNames: [Int: String] = [:]   // 簇 → 显示名(标签覆盖达标)
-    @State private var personRefs: [Int: [String]] = [:]  // 簇 → 该人全部照片(命名打标签范围)
-    @State private var assets: [String: PHAsset] = [:]
-    @State private var faceTotal = 0
-    @State private var totalPersons = 0
-    @State private var unknownCount = 0
-    @State private var showingSmall = false
-    @State private var confirmClearTags = false
+    @State private var blockedCount = 0
 
-    // 阈值(与锚的余弦,r50 ArcFace 尺度)。CI 真实照片实测(3 人各 3 张含油画
-    // 肖像/不同年代):同人最低 0.484(油画×照片)、跨人最高 0.162——真实安全
-    // 带是 0.16~0.48,原先 0.68/0.58/0.45 定得过高,同人难样本够不到阈值就
-    // 自成一组(140 用户实测同一人分好几组)。阈值扫描 0.50 及以下全部正确,
-    // 取 0.48 留 3 倍于跨人上限的余量
-    private let thresholds: [String: Float] = ["exact": 0.60, "balanced": 0.48, "loose": 0.38]
-    /// 组间合并的连接阈值 = 入组阈值 − 0.14(下限 0.28)。真实数据同人最低
-    /// 0.48/跨人最高 0.16,中间 0.2~0.45 是空带——连接放空带下段(平衡 0.34):
-    /// 跨人不可能串组,同人的跨年代/跨地点子组能并拢
-    private func linkThreshold(_ t: Float) -> Float { max(t - 0.14, 0.28) }
-    /// 垃圾剔除线:合并完成后与组锚相似低于它的成员移出组(成为单例)。
-    /// 真实数据同人最低 0.48(油画×照片),0.18 远在其下,不会误剔真人;
+    // 精确档固定参数(153 用户定稿:去掉三档,只要精确;拿不准一律进不确定组)。
+    // r50 ArcFace 尺度,CI 真实照片实测:同人最低 0.484、跨人最高 0.162,
+    // 中间 0.2~0.45 是空带
+    private let threshold: Float = 0.60                     // 入组(对锚)
+    private var link: Float { max(threshold - 0.14, 0.28) } // 组间质心连接(空带下段)
+    /// 垃圾剔除线:合并完成后与组锚相似低于它的成员移出组(成为单例);
     /// 模糊/误检脸(141 的「最弱 -6%」)由此清出大组
     private let expelFloor: Float = 0.18
+    /// 逐脸核验底线(对簇质心/平均脸)= 真实同人下限 0.484 取整:
+    /// 低于它 = 比最难的真同人样本还不像,只能是别人/打印脸/误检 → 不确定组
+    private let verifyFloor: Float = 0.48
     /// 「人物」门槛:簇至少覆盖 3 张不同照片。更小的簇是一次性路人/海报误检,
     /// 不参与组合键——这是组合数不被噪声撑爆的关键(145 组合分组的教训)
     private let personMinPhotos = 3
-    /// 簇内内聚底线:成员对簇质心(平均脸)的平均相似度低于它 → 整簇解散。
-    /// 148 实测打印脸/模糊脸被质心连接链式串成「假人物」巨组(第三组 154 张
-    /// 里婴儿/明星/界面截屏全有);真人物该均值 ~0.6-0.75,假簇 ~0.3-0.45
+    /// 簇内内聚底线:成员对簇质心(平均脸)的平均相似度过低 → 整簇解散
+    /// (簇级兜底;148 实测打印脸被质心连接链式串成「假人物」巨组的教训)
     private let coherenceFloor: Float = 0.45
     /// 人名认定的标签票数门槛:≥3 张 且 过半。148 实测教训:只看覆盖率时,
     /// 两三张的小簇带 1 张污染标签=覆盖率 100%,满屏一人组都叫程玉婷/杨如
@@ -80,7 +65,10 @@ struct PeopleView: View {
             }
             .navigationTitle("人物归组")
             .navigationBarTitleDisplayMode(.inline)
-            .onAppear { faceTotal = app.store.faceStats().faces }
+            .onAppear {
+                faceTotal = app.store.faceStats().faces
+                blockedCount = app.store.blockedFacePhotoCount()
+            }
             .confirmationDialog("确定清除全部人名标签?", isPresented: $confirmClearTags,
                                 titleVisibility: .visible) {
                 Button("清除全部人名标签", role: .destructive) { clearTags() }
@@ -107,12 +95,6 @@ struct PeopleView: View {
 
     private var setupSection: some View {
         Section("归组设置") {
-            Picker("模式", selection: $mode) {
-                Text("精确").tag("exact")
-                Text("平衡").tag("balanced")
-                Text("宽松").tag("loose")
-            }
-            .pickerStyle(.segmented)
             let stats = app.store.faceStats()
             Text(faceTotal > 0
                  ? "已入库人脸 \(faceTotal) 张(\(stats.photos) 张照片)"
@@ -129,12 +111,20 @@ struct PeopleView: View {
                 }
             }
             .disabled(scanning || faceTotal < 2 || app.models.state(for: .face) != .ready)
+            if blockedCount > 0 {
+                Button {
+                    restoreBlocked()
+                } label: {
+                    Label("恢复 \(blockedCount) 张已排除照片(重新参与归组)",
+                          systemImage: "arrow.uturn.backward")
+                }
+            }
             Button(role: .destructive) {
                 confirmClearTags = true
             } label: {
                 Label("清除全部人名标签", systemImage: "tag.slash")
             }
-            Text("先聚类确定总共几个人,再按每张照片「主角是哪几个人」精确归组:abc 三个人至多 a、b、c、a×b、a×c、b×c、a×b×c 七组;合影只出现在组合组,不再算进单人组。命名后搜索名字即命中。")
+            Text("精确档:每张脸都必须与「平均脸」核验达标才归属;拿不准的一律进「不确定人物」。组内点「排除」可手动移除错误照片。命名后搜索名字即命中。")
                 .font(.caption2).foregroundStyle(.secondary)
         }
     }
@@ -165,8 +155,8 @@ struct PeopleView: View {
             Text("人物 \(totalPersons) 人 · \(groups.count) 组")
         } footer: {
             Text(unknownCount > 0
-                 ? "主角只出现一两次的路人不参与分组;全部主角都无法识别的 \(unknownCount) 张在「未识别人物」。不足 \(foldThreshold) 张的组默认折叠。命名后搜索名字即命中。"
-                 : "主角只出现一两次的路人不参与分组。不足 \(foldThreshold) 张的组默认折叠。点开组可为其中任一人物命名,命名后搜索名字即命中。")
+                 ? "每张脸都与平均脸核验达标才归属;拿不准的 \(unknownCount) 张在「不确定人物」。不足 \(foldThreshold) 张的组默认折叠。组内可「排除」错误照片,命名后搜索名字即命中。"
+                 : "每张脸都与平均脸核验达标才归属,拿不准的进「不确定人物」。不足 \(foldThreshold) 张的组默认折叠。组内可「排除」错误照片,命名后搜索名字即命中。")
         }
     }
 
@@ -181,7 +171,7 @@ struct PeopleView: View {
     }
 
     private func groupTitle(_ g: ComboGroup) -> String {
-        guard !g.members.isEmpty else { return "未识别人物" }
+        guard !g.members.isEmpty else { return "不确定人物" }
         let parts = g.members.map(personDisplay)
         return parts.count == 1 ? parts[0] : parts.joined(separator: " × ")
     }
@@ -195,7 +185,11 @@ struct PeopleView: View {
             ClusterDetailView(members: g.members,
                               refs: g.refs, scores: g.scores,
                               personNames: $personNames, personRefs: personRefs,
-                              title: groupTitle(g))
+                              title: groupTitle(g),
+                              onChanged: {
+                                  blockedCount = app.store.blockedFacePhotoCount()
+                                  start()
+                              })
         } label: {
             HStack(spacing: 12) {
                 Group {
@@ -235,6 +229,18 @@ struct PeopleView: View {
         }
     }
 
+    /// 恢复全部被排除的照片:重新参与归组并立即重扫
+    private func restoreBlocked() {
+        do {
+            try app.store.unblockAllFacePhotos()
+            blockedCount = 0
+            app.notify("已恢复全部被排除的照片,重新归组中")
+            start()
+        } catch {
+            app.fail(error)
+        }
+    }
+
     private func start() {
         guard !scanning else { return }
         // 守卫:人脸模型换了但脸数据还没按新模型重嵌——此时聚类的是旧模型向量,
@@ -248,8 +254,6 @@ struct PeopleView: View {
         }
         scanning = true
         progress = (0, 1)
-        let threshold = thresholds[mode] ?? 0.38
-        let link = linkThreshold(threshold)
         let store = app.store
         Task.detached(priority: .userInitiated) {
             do {
@@ -258,14 +262,14 @@ struct PeopleView: View {
                     keys: data.keys, flat: data.flat, dim: data.dim, threshold: threshold) { done, total in
                     Task { @MainActor in progress = (done, total) }
                 }
-                // 组间合并:贪心聚类「一锚定终身」会把同一人按角度/年代拆成多组。
-                // 组质心连接+离群照片吸收+垃圾剔除(143 定稿)
+                // 组间合并+垃圾剔除+逐脸核验+内聚解散(全部在扫描器内完成)
                 let groupedIdx = Set(raw.flatMap { $0.map(\.index) })
                 let singletons = (0..<data.keys.count).filter { !groupedIdx.contains($0) }
                 let scored = DuplicateScanner.mergeGroups(
                     raw, flat: data.flat, dim: data.dim,
                     linkThreshold: link, expelFloor: expelFloor,
-                    singletons: singletons, coherenceFloor: coherenceFloor) { done, total in
+                    singletons: singletons,
+                    coherenceFloor: coherenceFloor, verifyFloor: verifyFloor) { done, total in
                     Task { @MainActor in progress = (done, max(total, 1)) }
                 }
 
@@ -303,11 +307,13 @@ struct PeopleView: View {
                 }
                 var ordered: [(members: [Int], refs: [String], scores: [Float])] =
                     comboMap.map { (Array($0.key).sorted(), $0.value.refs, $0.value.scores) }
-                // 按组内照片数降序(用户指定);未识别组垫底
-                ordered.sort { $0.refs.count > $1.refs.count }
+                // 不确定组先入列再排序:它也是普通一组,按照片数排(153 排序 bug 教训:
+                // 排序后追加会让 44 张的不确定组落在 10 张组后面)
                 if !unknownRefs.isEmpty {
                     ordered.append(([], unknownRefs, unknownScores))
                 }
+                // 按组内照片数降序(用户指定)
+                ordered.sort { $0.refs.count > $1.refs.count }
                 // 已删除照片不出场(资产取不到的顺带剔除),空组丢弃
                 let allRefs = Array(Set(ordered.flatMap { $0.refs }))
                 var fetched: [String: PHAsset] = [:]
@@ -350,7 +356,7 @@ struct PeopleView: View {
                     unknownCount = unknownAlive
                     faceTotal = data.refs.count
                     if outGroups.isEmpty {
-                        app.notify("没有找到可归组的人脸(试试「宽松」模式)")
+                        app.notify("没有找到可归组的人脸")
                     }
                 }
             } catch {
@@ -370,6 +376,8 @@ struct ClusterDetailView: View {
     @Binding var personNames: [Int: String]
     let personRefs: [Int: [String]]
     let title: String
+    /// 排除照片后的回调(父级重新归组)
+    var onChanged: (() -> Void)?
 
     @EnvironmentObject var app: AppModel
     @State private var assets: [String: PHAsset] = [:]
@@ -378,6 +386,9 @@ struct ClusterDetailView: View {
     @State private var nameText = ""
     @State private var applying = false
     @State private var selectedHit: DisplayHit?
+    @State private var selecting = false         // 排除模式:点选照片移出本组
+    @State private var selected: Set<String> = []
+    @State private var excluding = false
 
     private let columns = [GridItem(.flexible(), spacing: 6),
                            GridItem(.flexible(), spacing: 6),
@@ -422,19 +433,47 @@ struct ClusterDetailView: View {
             }
             .padding(12)
         }
+        .safeAreaInset(edge: .bottom) {
+            if selecting {
+                HStack {
+                    Button(role: .destructive) {
+                        excludeSelected()
+                    } label: {
+                        Label(selected.isEmpty ? "点选要移出的错误照片"
+                                               : "移出所选 \(selected.count) 张(不再参与归组)",
+                              systemImage: "minus.circle")
+                            .fontWeight(.semibold)
+                    }
+                    .disabled(selected.isEmpty || excluding)
+                    Spacer()
+                    Text("移出的脸不参与聚类,可在上层恢复")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+                .padding(12)
+                .background(.bar)
+            }
+        }
         .navigationTitle(title)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            // 单人组的命名主入口放工具栏(146 同款位置,醒目);
-            // 组合组从「本组人物」逐行命名
-            if members.count == 1 {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button(applying ? "命名中…" : "命名") {
-                        nameText = personNames[members[0]] ?? ""
-                        namingMember = members[0]
-                        naming = true
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                if selecting {
+                    Button("取消") {
+                        selecting = false
+                        selected = []
                     }
-                    .disabled(applying)
+                } else {
+                    Button("排除") { selecting = true }
+                    // 单人组的命名主入口放工具栏(146 同款位置,醒目);
+                    // 组合组从「本组人物」逐行命名
+                    if members.count == 1 {
+                        Button(applying ? "命名中…" : "命名") {
+                            nameText = personNames[members[0]] ?? ""
+                            namingMember = members[0]
+                            naming = true
+                        }
+                        .disabled(applying)
+                    }
                 }
             }
         }
@@ -469,20 +508,34 @@ struct ClusterDetailView: View {
                     .frame(height: 124)
                     .clipped()
                     .onTapGesture {
-                        selectedHit = DisplayHit(
-                            id: "face-\(ref)", refKey: ref, target: .asset(a),
-                            kind: .photo,
-                            title: "人物:\(title)",
-                            score: 1, date: a.creationDate, color: nil)
+                        if selecting {
+                            if selected.contains(ref) { selected.remove(ref) } else { selected.insert(ref) }
+                        } else {
+                            selectedHit = DisplayHit(
+                                id: "face-\(ref)", refKey: ref, target: .asset(a),
+                                kind: .photo,
+                                title: "人物:\(title)",
+                                score: 1, date: a.creationDate, color: nil)
+                        }
                     }
             } else {
                 Rectangle().fill(Color(.systemGray5)).frame(height: 124)
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: 8))
+        .overlay(alignment: .topLeading) {
+            if selecting {
+                Image(systemName: selected.contains(ref) ? "checkmark.circle.fill" : "circle")
+                    .font(.title3)
+                    .foregroundStyle(selected.contains(ref) ? .blue : .white)
+                    .shadow(radius: 2)
+                    .padding(6)
+            }
+        }
         .overlay(alignment: .bottomLeading) {
-            // 角标按分数判定基准(≈1),不按下标位置
-            if score < 0.999 {
+            // 角标按分数判定基准(≈1),不按下标位置;不确定组没有归属分,不显示
+            if members.isEmpty { EmptyView() }
+            else if score < 0.999 {
                 Text(String(format: "%.0f%%", score * 100))
                     .font(.caption2).monospacedDigit()
                     .padding(.horizontal, 4).padding(.vertical, 2)
@@ -494,6 +547,27 @@ struct ClusterDetailView: View {
                     .padding(.horizontal, 4).padding(.vertical, 2)
                     .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 4))
                     .foregroundStyle(.white)
+            }
+        }
+    }
+
+    /// 移出所选:全部人脸退出聚类(face_block),父级重新归组
+    private func excludeSelected() {
+        guard !selected.isEmpty, !excluding else { return }
+        excluding = true
+        let refs = Array(selected)
+        Task {
+            do {
+                try app.store.blockFacePhotos(refs)
+                await MainActor.run {
+                    excluding = false
+                    selecting = false
+                    selected = []
+                    app.notify("已移出 \(refs.count) 张照片,重新归组中")
+                    onChanged?()
+                }
+            } catch {
+                await MainActor.run { excluding = false; app.fail(error) }
             }
         }
     }

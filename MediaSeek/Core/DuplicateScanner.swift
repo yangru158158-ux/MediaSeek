@@ -62,6 +62,12 @@ enum DuplicateScanner {
     /// - Parameters:
     ///   - linkThreshold: 两组质心相似度达到该值才合并
     ///   - expelFloor: 成员对组锚的相似度下限,低于则剔除
+    ///   - verifyFloor: 逐脸核验底线(0=关)。对簇质心(平均脸)相似度低于它
+    ///     的成员一律移出组——这是「精确优先」的核心(153 用户定稿:拿不准
+    ///     哪个人就不归属,进不确定组)。定值 = 真实同人相似度下限 0.484
+    ///     (CI 多人实测)取整 0.48:低于它 = 比最难的真同人样本还不像,
+    ///     只能是别人/打印脸/误检。中位数守卫杀不掉「扫描阶段 0.60 自凝」
+    ///     的打印脸小堆(堆核互相真像),成员级核验才救得了
     ///   - coherenceFloor: 簇内内聚底线(0=关)。合并完成后每簇计算质心
     ///     (归一化平均向量),成员对质心的**平均**相似度低于它 → 整簇解散
     ///     (成员回落单例)。148 用户实测「第三组人物众多不知为何合并一组」:
@@ -72,7 +78,7 @@ enum DuplicateScanner {
     static func mergeGroups(_ groups: [[(index: Int, score: Float)]],
                             flat: [Float], dim: Int, linkThreshold: Float, expelFloor: Float,
                             singletons: [Int] = [], absorbThreshold: Float? = nil,
-                            maxRounds: Int = 25, coherenceFloor: Float = 0,
+                            maxRounds: Int = 25, coherenceFloor: Float = 0, verifyFloor: Float = 0,
                             progress: (Int, Int) -> Void = { _, _ in }) -> [[(index: Int, score: Float)]] {
         guard groups.count > 1, dim > 0 else { return groups }
 
@@ -186,6 +192,24 @@ enum DuplicateScanner {
                 guard !scored.isEmpty else { return nil }   // 剔完只剩锚=单例,不算组
                 scored.sort { $0.score > $1.score }
                 return [(index: anchor, score: Float(1))] + scored
+            }
+
+            // 逐脸核验(成员级,精确优先):对簇质心相似度 <verifyFloor 的成员
+            // 移出组(见 verifyFloor 文档)。少于 2 张存活的簇整组消亡
+            if verifyFloor > 0 {
+                out = out.compactMap { g in
+                    var c = [Float](repeating: 0, count: dim)
+                    for m in g { for d in 0..<dim { c[d] += flat[m.index * dim + d] } }
+                    var norm: Float = 0
+                    vDSP_dotpr(c, 1, c, 1, &norm, vDSP_Length(dim))
+                    norm = max(norm.squareRoot(), 1e-8)
+                    let kept = g.filter { m -> Bool in
+                        var d: Float = 0
+                        vDSP_dotpr(c, 1, base + m.index * dim, 1, &d, vDSP_Length(dim))
+                        return d / norm >= verifyFloor
+                    }
+                    return kept.count >= 2 ? kept : nil
+                }
             }
 
             // 簇内内聚守卫:假人物簇整簇解散(见 coherenceFloor 文档)。

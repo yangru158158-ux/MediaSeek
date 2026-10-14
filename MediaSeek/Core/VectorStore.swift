@@ -75,6 +75,9 @@ final class VectorStore {
         // 人脸处理记账:该照片已按当前人脸模型做过检测/嵌入(含 0 脸照片)。
         // 没有它,无脸照片(截图/风景)会因「缺 face 行」被每轮同步反复重处理
         try exec("CREATE TABLE IF NOT EXISTS face_done(ref_key TEXT PRIMARY KEY)")
+        // 人工排除的照片:用户在人物归组里勾选「移出本组」的错误分组照片,
+        // 全部人脸不参与聚类(153 用户要求:人工排除个别错误分组)
+        try exec("CREATE TABLE IF NOT EXISTS face_block(ref_key TEXT PRIMARY KEY)")
         // 一次性迁移:132 版人脸对齐几何错误(变换顺序反+y 轴未翻转),全部对齐图
         // 是黑图、人脸嵌入彼此相同(36 张脸归一组实锤)——清空脸向量与记账,
         // 下一次同步自动全量重嵌(走修复后的对齐)
@@ -874,11 +877,15 @@ final class VectorStore {
     } }
 
     /// 全部人脸向量(归组扫描用):keys 形如 "refKey#脸序号",
-    /// refs 与 keys 一一对应指向所属照片;blob 字节数校验防截断行越界(同 allPhotoVectors)
+    /// refs 与 keys 一一对应指向所属照片;blob 字节数校验防截断行越界(同 allPhotoVectors)。
+    /// 被人工排除的照片不参与(face_block)
     func allFaceVectors() throws -> (keys: [String], refs: [String], flat: [Float], dim: Int) { try serialized {
         guard let db else { return ([], [], [], 0) }
         let stmt = try prepare("""
-        SELECT ref_key, frame_index, vec, dim FROM items WHERE kind = 'face' AND space = 'face' ORDER BY ref_key
+        SELECT ref_key, frame_index, vec, dim FROM items
+        WHERE kind = 'face' AND space = 'face'
+          AND ref_key NOT IN (SELECT ref_key FROM face_block)
+        ORDER BY ref_key
         """)
         defer { sqlite3_finalize(stmt) }
         var keys: [String] = []
@@ -907,6 +914,33 @@ final class VectorStore {
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, refKey, -1, Self.transient)
         return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int(stmt, 0)) : 0
+    } }
+
+    // MARK: - 人脸人工排除(人物归组手动纠错)
+
+    /// 排除照片的全部人脸参与聚类(用户勾选「移出本组」的错误照片)。
+    /// 幂等:重复排除无副作用;聚类在排除集合之外重新进行
+    func blockFacePhotos(_ refKeys: [String]) throws { try serialized {
+        for refKey in refKeys {
+            let stmt = try prepare("INSERT OR REPLACE INTO face_block(ref_key) VALUES(?)")
+            sqlite3_bind_text(stmt, 1, refKey, -1, Self.transient)
+            sqlite3_step(stmt)
+            sqlite3_finalize(stmt)
+        }
+    } }
+
+    /// 当前被排除的照片数(设置区显示用)
+    func blockedFacePhotoCount() -> Int { try serialized {
+        guard let db, let stmt = try? prepare("SELECT COUNT(*) FROM face_block") else { return 0 }
+        defer { sqlite3_finalize(stmt) }
+        return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int(stmt, 0)) : 0
+    } }
+
+    /// 恢复全部被排除的照片(重新参与归组)
+    func unblockAllFacePhotos() throws { try serialized {
+        let stmt = try prepare("DELETE FROM face_block")
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_step(stmt)
     } }
 
     /// 批量取照片的已有用户标签(人物归组展示组名用),IN 列表分片绑定
