@@ -658,7 +658,8 @@ struct PeoplePanel: View {
                 // 最后证据。模型未装(nil)该层静默跳过;嵌入在此一次完成,
                 // 归组全程只做向量算术
                 var siglipAnchors: (two: [Float], one: [Float])? = nil
-                if let sig = await MainActor.run({ app.models.siglip }) {
+                let siglipModel = await MainActor.run { app.models.siglip }
+                if let sig = siglipModel {
                     func anchor(_ prompts: [String]) -> [Float]? {
                         var acc: [Float]? = nil
                         for p in prompts {
