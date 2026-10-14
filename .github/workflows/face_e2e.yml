@@ -54,7 +54,8 @@ jobs:
 
       - name: 编译并运行对齐(Vision + FaceKit,与 App 同源码)
         run: |
-          swiftc -O MediaSeek/Core/FaceKit.swift scripts/face_e2e_align.swift -o /tmp/face_e2e_align
+          swiftc -O MediaSeek/Core/FaceKit.swift MediaSeek/Core/FaceRecoveryPolicy.swift \
+            scripts/face_e2e_align.swift -o /tmp/face_e2e_align
           /tmp/face_e2e_align "$RUNNER_TEMP/aligned" "$RUNNER_TEMP"/*_[0-9].jpg "$RUNNER_TEMP"/*_[0-9].png
 
       - name: r50 打分 + 聚类/合并断言
