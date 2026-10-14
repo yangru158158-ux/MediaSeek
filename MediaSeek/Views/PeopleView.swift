@@ -341,6 +341,8 @@ struct PeoplePanel: View {
                                           photo: PhotoLibraryService, assets: [String: PHAsset],
                                           face: FaceEmbedder,
                                           siglipAnchors: (two: [Float], one: [Float])?,
+                                          coOccurrence: [Int: [Int: Int]],
+                                          clusterMembers: [Int: [Int]], flat: [Float],
                                           cached: [String: (matched: Set<Int>, unexplained: Int, reason: Int, note: Int, detail: String)],
                                           store: VectorStore, ver: String,
                                           progress: @escaping (Int, Int) -> Void) async -> (verdicts: [String: (recovered: Set<Int>, unexplained: Int, reason: Int, note: Int, detail: String)], fetchFails: Int) {
@@ -351,6 +353,26 @@ struct PeoplePanel: View {
             let parts = bodies.map { Int(($0.width / hero * 100).rounded()) }
                 .sorted(by: >).map { "\($0)%" }
             return "[" + parts.joined(separator: ",") + "]"
+        }
+        /// 簇内 top-5 近邻均值(K 通道):脸向量与该簇每个库内脸逐个余弦,
+        /// 取最高 5 个平均。质心是平均脸,对糊/侧脸系统性压分;近邻对
+        /// 「同角度/同糊的历史脸」更公平(InsightFace 标准匹配即 KNN)
+        func knnMean(_ ci: Int, vec: [Float]) -> Float? {
+            guard let rows = clusterMembers[ci], !rows.isEmpty else { return nil }
+            var sims = [Float](); sims.reserveCapacity(rows.count)
+            for r in rows {
+                var d: Float = 0
+                vec.withUnsafeBufferPointer { vb in
+                    flat.withUnsafeBufferPointer { fb in
+                        vDSP_dotpr(vb.baseAddress!, 1, fb.baseAddress! + r * dim, 1,
+                                   &d, vDSP_Length(dim))
+                    }
+                }
+                sims.append(d)
+            }
+            sims.sort(by: >)
+            let k = min(5, sims.count)
+            return sims.prefix(k).reduce(0, +) / Float(k)
         }
         var out: [String: (recovered: Set<Int>, unexplained: Int, reason: Int, note: Int, detail: String)] = [:]
         for (k, v) in cached { out[k] = (v.matched, v.unexplained, v.reason, v.note, v.detail) }
@@ -485,6 +507,29 @@ struct PeoplePanel: View {
                         explained += 1
                         swallowedMin = min(swallowedMin, f.best)
                         tag = "W"
+                    } else if f.ci >= 0,
+                              FaceRecoveryPolicy.priorRecoveredByCoOccurrence(
+                                best: f.best, second: f.second,
+                                coCount: key.reduce(0) { max($0, coOccurrence[$1]?[f.ci] ?? 0) }) {
+                        // 同框先验(第九批):171 实测 rect 并集已把第二脸找回,但糊脸
+                        // 对质心只有 0.22-0.27(双判据线 0.32 下)全判 U,890 张合影堆在
+                        // 「与其他人」。未用的强证据:最像的簇与本照片主角历史高频同框
+                        // (杨如×程玉婷数百张)——陌生人成不了主角的高频同框者。
+                        // 三重门:同框≥20 + 地板 0.22 + 领先 0.06 → 认作该同行者的难脸
+                        matched.insert(f.ci)
+                        explained += 1
+                        tag = "Y"
+                    } else if f.ci >= 0, let bk = knnMean(f.ci, vec: f.embedding),
+                              FaceRecoveryPolicy.priorRecoveredByKNN(
+                                bestKNN: bk,
+                                secondKNN: f.secondCi >= 0 ? knnMean(f.secondCi, vec: f.embedding) : nil) {
+                        // 近邻复核(第九批):质心是全簇平均脸,对糊/侧脸系统性压分;
+                        // 改与簇内库内成员逐脸比 top-5 均值——糊脸对「同糊历史脸」的
+                        // 分高于对平均脸。Y 先验没接住的低领先样本(171 实测
+                        // c1@0.22>c2@0.18)由这里救
+                        matched.insert(f.ci)
+                        explained += 1
+                        tag = "K"
                     } else {
                         tag = "U"   // 对不上任何人物也不像组内本人:未识别同行脸
                     }
@@ -576,7 +621,7 @@ struct PeoplePanel: View {
         // (人脸行/排除/模型)不含算法版本,163 的旧判决经快照水化+缓存命中在
         // 164 原样复活,用户看到的就是"修了没变化"
         let ver = app.store.peopleFingerprint(
-            extra: "a8-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
+            extra: "a9-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
         guard let json = app.store.loadPeopleResults(ver: ver),
               let data = json.data(using: .utf8),
               let snap = try? JSONDecoder().decode(PeopleSnapshot.self, from: data) else {
@@ -646,7 +691,7 @@ struct PeoplePanel: View {
         // 指纹:人脸数据/排除集合/模型任一变化,快照与补认缓存自动作废;
         // a8=算法盐,归组逻辑变更必须升盐(与 hydrateIfNeeded 同串)
         let ver = store.peopleFingerprint(
-            extra: "a8-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
+            extra: "a9-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
         // 「扫描中」记账 + 屏幕常亮:退后台被系统结束进程后,重开面板能明确
         // 告知「上次未完成」;常亮防前台锁屏挂起
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "peopleScanRunning")
@@ -741,6 +786,23 @@ struct PeoplePanel: View {
                     for d in 0..<data.dim { c[d] /= n }
                     centroids[ci] = c
                 }
+                // 同框计数(第九批 Y 通道):每对人物在多少张照片里同时被认出——
+                // 杨如×程玉婷数百张;陌生人/低频路人到不了 20
+                var coOccurrence: [Int: [Int: Int]] = [:]
+                for ks in baseKeys.values {
+                    let ps = Array(ks).sorted()
+                    for i in 0..<ps.count {
+                        for j in (i + 1)..<ps.count {
+                            coOccurrence[ps[i], default: [:]][ps[j], default: 0] += 1
+                            coOccurrence[ps[j], default: [:]][ps[i], default: 0] += 1
+                        }
+                    }
+                }
+                // 簇成员行号(第九批 K 通道 KNN 用):脸向量在 flat 里的行
+                var clusterMembers: [Int: [Int]] = [:]
+                for (ci, g) in scored.enumerated() where persons.contains(ci) {
+                    clusterMembers[ci] = g.map { $0.index }
+                }
                 var recovered: [String: (recovered: Set<Int>, unexplained: Int, reason: Int, note: Int, detail: String)] = [:]
                 var fetchFails = 0
                 if let faceModel {
@@ -751,6 +813,8 @@ struct PeoplePanel: View {
                         centroids: centroids, dim: data.dim,
                         photo: photoLib, assets: fetched, face: faceModel,
                         siglipAnchors: siglipAnchors,
+                        coOccurrence: coOccurrence, clusterMembers: clusterMembers,
+                        flat: data.flat,
                         cached: cached, store: store, ver: ver) { done, total in
                         Task { @MainActor in model.progress = (done, total) }
                     }
@@ -1000,7 +1064,7 @@ struct ClusterDetailView: View {
         } message: {
             // 逐脸裁决:S=强匹配认出 W=回退判本人难脸 V=双人认领降级 U=未识别;
             // c数字=人物簇,@分数=对该簇质心/第二名质心的余弦
-            Text(debugText + "\n(S=认出 W=本人难脸 V=同认领降级 U=未识别)")
+            Text(debugText + "\n(S=认出 W=本人难脸 V=同认领降级 U=未识别 Y=同框先验 K=近邻复核)")
         }
         .sheet(item: $selectedHit) { hit in
             DetailSheet(hit: hit)

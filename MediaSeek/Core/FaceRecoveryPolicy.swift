@@ -88,6 +88,26 @@ enum FaceRecoveryPolicy {
         twoScore >= minTwo && (twoScore - oneScore) >= margin
     }
 
+    /// 同框先验(Y,第九批):171 实测 rect 并集已把合影第二脸找回,但糊/侧脸
+    /// 对质心只有 0.22-0.27(双判据线 0.32 下)全判 U,890 张堆在「与其他人」。
+    /// 未用的强证据:最像的簇与本照片已认出主角历史高频同框(杨如×程玉婷
+    /// 数百张)——陌生人/低频路人成不了主角的高频同框者。三重门:
+    /// 同框 ≥20 张 + 地板 0.22 + 领先第二名 0.06(跨人误认被同框约束+边距
+    /// 双保险)。诊断字母 Y,误伤一张截图即可校准。
+    static func priorRecoveredByCoOccurrence(best: Float, second: Float, coCount: Int,
+                                             minBest: Float = 0.22, minLead: Float = 0.06,
+                                             minCoCount: Int = 20) -> Bool {
+        coCount >= minCoCount && best >= minBest && (best - second) >= minLead
+    }
+
+    /// 近邻复核(K,第九批):质心是全簇平均脸,把糊/侧脸往簇中心拉、系统性
+    /// 压分;改与簇内库内成员逐脸比 top-5 均值——糊脸对「同角度/同糊历史脸」
+    /// 的分高于对平均脸(InsightFace 标准匹配即 KNN)。0.30 地板+领先第二名
+    /// 簇近邻 0.06;无第二簇竞争(nil)时达标即认。
+    static func priorRecoveredByKNN(bestKNN: Float, secondKNN: Float?) -> Bool {
+        bestKNN >= 0.30 && bestKNN - (secondKNN ?? -1) >= 0.06
+    }
+
     private static func cosineSimilarity(_ lhs: [Float], _ rhs: [Float]) -> Float? {
         guard !lhs.isEmpty, lhs.count == rhs.count else { return nil }
         var dot: Float = 0

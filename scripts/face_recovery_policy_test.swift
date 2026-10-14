@@ -149,7 +149,46 @@ struct FaceRecoveryPolicyTest {
             "一人解读反超时绝不判两人"
         )
 
-        print("PASS: 同图双脸补认策略的 20 项确定性回归断言全部通过")
+        // —— 同框先验(Y):质心 0.22-0.27 的糊脸 + 高频同框者身份 → 认作同行者 ——
+        expect(
+            FaceRecoveryPolicy.priorRecoveredByCoOccurrence(best: 0.27, second: 0.18, coCount: 159),
+            "171 实测样本 c1@0.27>c3@0.18 且同框 159 张应认(Y)"
+        )
+        expect(
+            !FaceRecoveryPolicy.priorRecoveredByCoOccurrence(best: 0.22, second: 0.18, coCount: 350),
+            "领先仅 0.04 太薄不认(留给 K 近邻通道裁决)"
+        )
+        expect(
+            !FaceRecoveryPolicy.priorRecoveredByCoOccurrence(best: 0.27, second: 0.18, coCount: 19),
+            "同框不足 20 张的低频同框者不认"
+        )
+        expect(
+            !FaceRecoveryPolicy.priorRecoveredByCoOccurrence(best: 0.21, second: 0.05, coCount: 200),
+            "低于 0.22 地板的噪声脸不认"
+        )
+        expect(
+            FaceRecoveryPolicy.priorRecoveredByCoOccurrence(best: 0.30, second: -2.0, coCount: 40),
+            "无第二名竞争(哨兵 -2)时领先巨大应认"
+        )
+        // —— 近邻复核(K):平均脸质心压分的糊脸,簇内 top-5 近邻过线 → 认 ——
+        expect(
+            FaceRecoveryPolicy.priorRecoveredByKNN(bestKNN: 0.34, secondKNN: 0.20),
+            "质心 0.2x 但簇内近邻 0.34 且领先 0.14 应认(K)"
+        )
+        expect(
+            !FaceRecoveryPolicy.priorRecoveredByKNN(bestKNN: 0.28, secondKNN: 0.10),
+            "近邻均值不到 0.30 地板不认"
+        )
+        expect(
+            !FaceRecoveryPolicy.priorRecoveredByKNN(bestKNN: 0.33, secondKNN: 0.30),
+            "近邻领先不足 0.06(第二簇竞争)不认"
+        )
+        expect(
+            FaceRecoveryPolicy.priorRecoveredByKNN(bestKNN: 0.31, secondKNN: nil),
+            "无第二簇竞争(nil)时达标即认"
+        )
+
+        print("PASS: 同图双脸补认策略的 29 项确定性回归断言全部通过")
     }
 
     private static func vetoes(_ matches: [FaceRecoveryPolicy.Match]) -> Set<Int> {
