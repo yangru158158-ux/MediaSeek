@@ -167,8 +167,8 @@ struct PeopleView: View {
             Text("人物 \(totalPersons) 人 · \(groups.count) 组")
         } footer: {
             Text(unknownCount > 0
-                 ? "截图/低质量/大侧脸不入库;每张脸都与平均脸核验达标才归属,拿不准的 \(unknownCount) 张在「不确定人物」。角标=与平均脸的相似度。不足 \(foldThreshold) 张的组默认折叠。归组含合影第二人现场补认(约多花 2-5 分钟)。"
-                 : "截图/低质量/大侧脸不入库;每张脸都与平均脸核验达标才归属,拿不准的进「不确定人物」。角标=与平均脸的相似度。不足 \(foldThreshold) 张的组默认折叠。归组含合影第二人现场补认(约多花 2-5 分钟)。")
+                 ? "截图/低质量/大侧脸不入库;每张脸都与平均脸核验达标才归属,拿不准的 \(unknownCount) 张在「不确定人物」。角标=与平均脸的相似度。不足 \(foldThreshold) 张的组默认折叠。归组含合影第二人现场补认(2048px 复检,约多花几分钟)。"
+                 : "截图/低质量/大侧脸不入库;每张脸都与平均脸核验达标才归属,拿不准的进「不确定人物」。角标=与平均脸的相似度。不足 \(foldThreshold) 张的组默认折叠。归组含合影第二人现场补认(2048px 复检,约多花几分钟)。")
         }
     }
 
@@ -253,10 +253,13 @@ struct PeopleView: View {
         }
     }
 
-    /// 合影第二人现场补认(见 start() 调用处注释):对每张「检出脸数 > 主角数」
-    /// 的照片,把全部脸无闸门检测+对齐+嵌入,与人物质心点积 ≥0.48 即认出该人,
-    /// 照片的主角集合并入认出的人 → 进对应组合组。认不出(路人/背景脸)不算。
-    /// 4 并发;1024px 取图(闸门滤掉的中小脸在 1024px 下仍可检出)
+    /// 合影第二人现场补认(见 start() 调用处注释):对每张「主角级脸数 > 主角数」
+    /// 的照片,把主角级脸无闸门检测+对齐+嵌入,与人物质心匹配认出该人,照片的
+    /// 主角集合并入认出的人 → 进对应组合组。认不出(路人/背景脸)不算。
+    /// ⚠️ 匹配门槛必须低于入库核验线 0.48:被核验移出/闸门滤掉的第二人脸(侧/糊)
+    /// 对本人质心常在 0.32-0.47——用 0.48 认人等于逻辑死锁(158 实测程玉婷组
+    /// 仍混两人合影,永远认不回)。双判据防误认:≥0.40 直接认;0.32-0.40 需比
+    /// 第二名人物高出 0.12(跨人真实分布 ~0.16-0.30,拉开 0.12 才是明确指向)
     private static func recoverCompanions(refs: [String], baseKeys: [String: Set<Int>],
                                           centroids: [Int: [Float]], dim: Int,
                                           photo: PhotoLibraryService, assets: [String: PHAsset],
@@ -269,24 +272,38 @@ struct PeopleView: View {
         var idx = 0
         func work(_ ref: String) async -> (String, Set<Int>)? {
             guard let a = assets[ref], let key = baseKeys[ref],
-                  let img = try? await photo.image(for: a, maxPixel: 1024) else { return nil }
-            // 无闸门检测(质量/姿态闸门全关,只留 30px 小脸下限):补认的目的
-            // 恰是找回被闸门滤掉的第二人
-            let faces = FaceKit.detect(cg: img, maxFaces: 12, minFacePx: 30,
+                  let img = try? await photo.image(for: a, maxPixel: 2048) else { return nil }
+            // 无闸门检测(质量/姿态全关):补认的目的恰是找回被闸门滤掉的第二人;
+            // 2048px 与索引同级,被索引漏掉的小脸这里同样漏不掉
+            let faces = FaceKit.detect(cg: img, maxFaces: 12, minFacePx: 40,
                                        minQuality: 0, maxYawDeg: 360)
-            guard faces.count > key.count else { return nil }
+            guard !faces.isEmpty else { return nil }
+            // 主角级脸 = 宽度 ≥ 最大脸 30%:合影第二人与主脸尺寸相当;远处路人/
+            // 背景小脸不到这条线,不参与触发也不参与补认(158 前车之鉴:单人照
+            // 背景的路人/海报脸不能把照片变成「有他人」)
+            let maxW = faces.map { $0.boundingBox.width }.max() ?? 0
+            let major = faces.filter { $0.boundingBox.width >= maxW * 0.3 }
+            guard major.count > key.count else { return nil }
             var matched = Set<Int>()
-            for obs in faces {
+            for obs in major {
                 guard let aligned = FaceKit.alignedFace(source: img, observation: obs),
                       let vec = try? face.embed(aligned: aligned) else { continue }
                 var bestCi = -1
-                var bestSim: Float = -2
+                var bestSim: Float = -2, secondSim: Float = -2
                 for (ci, c) in centroids {
                     var dot: Float = 0
                     vDSP_dotpr(vec, 1, c, 1, &dot, vDSP_Length(dim))
-                    if dot > bestSim { bestSim = dot; bestCi = ci }
+                    if dot > bestSim {
+                        secondSim = bestSim
+                        bestSim = dot; bestCi = ci
+                    } else if dot > secondSim {
+                        secondSim = dot
+                    }
                 }
-                if bestCi >= 0, bestSim >= 0.48 { matched.insert(bestCi) }
+                if bestCi >= 0,
+                   bestSim >= 0.40 || (bestSim >= 0.32 && bestSim - secondSim >= 0.12) {
+                    matched.insert(bestCi)
+                }
             }
             return matched.isEmpty ? nil : (ref, matched)
         }
@@ -369,13 +386,12 @@ struct PeopleView: View {
                 fetch.enumerateObjects { a, _, _ in fetched[a.localIdentifier] = a }
 
                 // 合影第二人现场补认:入库闸门(小脸/质量/姿态)会把合影里第二个人
-                // 的脸滤在库外 → 该照片只挂主角、混进单人组(156 实测杨如组混两人
-                // 合影)。157 曾用组级「与其他人」标记——一张背景路人脸污染整组
-                // (157 用户实测所有组全被误标,组级聚合是错的)。158 改逐张补认:
-                // 检出脸数 > 主角数的照片,对其全部脸无闸门检测+对齐+嵌入,与
-                // 人物质心(平均脸)≥0.48 匹配 → 主角集合扩为真实集合,进对应
-                // 组合组(杨如×程玉婷);认不出的(路人/背景脸)不算他人——
-                // 单人组只放真单人照,合影进组合组,没有「与其他人」桶
+                // 的脸滤在库外 → 该照片只挂主角、混进单人组(156/158 两轮实测
+                // 程玉婷/杨如合影仍挂在单人组)。逐张补认:主角级脸数 > 主角数的
+                // 照片,对其主角级脸无闸门检测+对齐+嵌入(2048px 与索引同级),
+                // 与人物质心按 158 修定的双判据(≥0.40 或 ≥0.32+领先第二名 0.12)
+                // 匹配 → 主角集合扩为真实集合,进对应组合组(杨如×程玉婷);
+                // 认不出的(路人/背景脸)不算他人——单人组只放真单人照
                 var baseKeys: [String: Set<Int>] = [:]
                 for (r, cs) in refClusters {
                     let key = cs.intersection(persons)

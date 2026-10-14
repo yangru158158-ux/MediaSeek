@@ -128,15 +128,10 @@ struct LibraryView: View {
                 statCard("照片", "\(photoCount)", "photo")
                 statCard("视频", "\(videoCount)", "video")
                 statCard("导入文件", "\(importedFiles.count)", "doc")
-                statCard("人脸", "\(faceCount)", "faceid")
+                statCard("索引总数", "\(photoCount + videoCount + importedFiles.count)",
+                         "point.3.filled.connected.trianglepath.dotted")
             }
             .listRowInsets(EdgeInsets(top: 8, leading: 12, bottom: 8, trailing: 12))
-        } footer: {
-            // 157 用户实测「总数与分项数对不上」:原「向量条目」把有人脸的照片数
-            // 混进素材合计(照片+视频+文件+人脸照片),数字合法但语义误导。
-            // 四张卡各自独立计数,不再有隐含的加总关系
-            Text("四项各自独立计数:人脸 = 识别出人脸的照片数(一张照片多张脸只计一次)。")
-                .font(.caption2)
         }
     }
 
