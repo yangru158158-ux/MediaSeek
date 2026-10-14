@@ -39,7 +39,11 @@ final class PhotoLibraryService: ObservableObject {
             PHImageManager.default().requestImage(
                 for: asset,
                 targetSize: CGSize(width: maxPixel, height: maxPixel),
-                contentMode: .aspectFill,
+                // 分析取图必须 aspectFit(完整画面):aspectFill 会把照片裁成中央
+                // 正方形——横构图左右各裁 12.5%、竖构图上下各裁,站在画面边缘的
+                // 人被裁掉,人脸索引/合影补认/OCR 全都看不见她(166 根因之一;
+                // 缩略图显示走 Components 自己的路径,不受影响)
+                contentMode: .aspectFit,
                 options: options) { image, info in
                 guard !finished else { return }
                 // 降质中间帧不结束请求,继续等最终回调。判定必须放在取图之前:

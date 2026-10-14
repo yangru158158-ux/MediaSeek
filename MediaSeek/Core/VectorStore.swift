@@ -123,6 +123,9 @@ final class VectorStore {
         // 缓存命中时原样带出——单人组详情页据此标注「为什么算单人」
         try? exec("ALTER TABLE recover_cache ADD COLUMN reason INTEGER NOT NULL DEFAULT 0")
         try? exec("ALTER TABLE recover_cache ADD COLUMN note INTEGER NOT NULL DEFAULT 0")
+        // 166 起缓存带逐脸匹配明细(如「共2脸: c3@0.65>c7@0.21S | c3@0.35>c7@0.20V」),
+        // 单人组详情页长按照片可读——合影漏进单人组的每张照片都能给出裁决依据
+        try? exec("ALTER TABLE recover_cache ADD COLUMN detail TEXT NOT NULL DEFAULT ''")
         try exec("""
         CREATE TABLE IF NOT EXISTS items(
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1024,10 +1027,10 @@ final class VectorStore {
     /// 合影补认进度缓存:照片 → (认出的人物簇集合, 未识别主角级脸数, 归类理由,
     /// 理由附注)。被系统杀掉后重跑,已补认的照片直接命中缓存跳过(2048px 复检是
     /// 归组十来分钟里的大头),缓存按指纹版本隔离,人脸数据/算法版本一变自动过期
-    func loadRecoverCache(ver: String) -> [String: (matched: Set<Int>, unexplained: Int, reason: Int, note: Int)] { try serialized {
-        var out: [String: (matched: Set<Int>, unexplained: Int, reason: Int, note: Int)] = [:]
+    func loadRecoverCache(ver: String) -> [String: (matched: Set<Int>, unexplained: Int, reason: Int, note: Int, detail: String)] { try serialized {
+        var out: [String: (matched: Set<Int>, unexplained: Int, reason: Int, note: Int, detail: String)] = [:]
         try? exec("DELETE FROM recover_cache WHERE ver != '\(ver)'")
-        guard let db, let stmt = try? prepare("SELECT ref_key, matched, unexplained, reason, note FROM recover_cache WHERE ver = ?")
+        guard let db, let stmt = try? prepare("SELECT ref_key, matched, unexplained, reason, note, detail FROM recover_cache WHERE ver = ?")
         else { return out }
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, ver, -1, Self.transient)
@@ -1035,19 +1038,20 @@ final class VectorStore {
             if let rk = sqlite3_column_text(stmt, 0) {
                 let matchedStr = sqlite3_column_text(stmt, 1).map { String(cString: $0) } ?? ""
                 let matched = Set(matchedStr.split(separator: ",").compactMap { Int($0) })
+                let detail = sqlite3_column_text(stmt, 5).map { String(cString: $0) } ?? ""
                 out[String(cString: rk)] = (matched, Int(sqlite3_column_int(stmt, 2)),
                                             Int(sqlite3_column_int(stmt, 3)),
-                                            Int(sqlite3_column_int(stmt, 4)))
+                                            Int(sqlite3_column_int(stmt, 4)), detail)
             }
         }
         return out
     } }
 
     /// 批量写入补认缓存(扫描中每攒 N 张落一次盘,进程被杀也只丢尾部)
-    func saveRecoverCache(_ rows: [(ref: String, matched: Set<Int>, unexplained: Int, reason: Int, note: Int)], ver: String) { try serialized {
+    func saveRecoverCache(_ rows: [(ref: String, matched: Set<Int>, unexplained: Int, reason: Int, note: Int, detail: String)], ver: String) { try serialized {
         guard let db else { return }
         for row in rows {
-            guard let stmt = try? prepare("INSERT OR REPLACE INTO recover_cache(ref_key, matched, unexplained, reason, note, ver) VALUES(?,?,?,?,?,?)")
+            guard let stmt = try? prepare("INSERT OR REPLACE INTO recover_cache(ref_key, matched, unexplained, reason, note, detail, ver) VALUES(?,?,?,?,?,?,?)")
             else { continue }
             let matchedText = row.matched.sorted().map(String.init).joined(separator: ",")
             sqlite3_bind_text(stmt, 1, row.ref, -1, Self.transient)
@@ -1055,7 +1059,8 @@ final class VectorStore {
             sqlite3_bind_int(stmt, 3, Int32(row.unexplained))
             sqlite3_bind_int(stmt, 4, Int32(row.reason))
             sqlite3_bind_int(stmt, 5, Int32(row.note))
-            sqlite3_bind_text(stmt, 6, ver, -1, Self.transient)
+            sqlite3_bind_text(stmt, 6, row.detail, -1, Self.transient)
+            sqlite3_bind_text(stmt, 7, ver, -1, Self.transient)
             sqlite3_step(stmt)
             sqlite3_finalize(stmt)
         }

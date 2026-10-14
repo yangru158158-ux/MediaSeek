@@ -39,6 +39,9 @@ private struct PeopleSnapshot: Codable {
     /// 每张keyed照片的归类理由 [ref: [reason, note]](165 起;旧快照无此字段=nil,
     /// 单人组详情页据此标注「为什么算单人」)
     var reasons: [String: [Int]]?
+    /// 逐脸匹配明细(166 起):ref → 「共N脸: c3@0.65>c7@0.21S | …」,
+    /// 长按照片可读,把每张合影漏进单人组的裁决依据摆到台面上
+    var details: [String: String]?
 }
 
 /// 归组扫描共享状态:挂在 AppModel 一份,视图只观察。
@@ -63,6 +66,8 @@ final class PeopleModel: ObservableObject {
     /// 0 全部强匹配 / 1 弱分回退(note=被吞脸最低分×100) / 2 iCloud取图失败 /
     /// 3 复检未检出人脸。用户报"合影还在单人组"时一眼定位到哪条路径
     @Published var reasons: [String: (reason: Int, note: Int)] = [:]
+    /// 逐脸匹配明细(166 起,与 reasons 同源):长按照片显示每张脸的匹配分与裁决
+    @Published var details: [String: String] = [:]
 }
 
 struct PeopleView: View {
@@ -265,6 +270,7 @@ struct PeoplePanel: View {
                               personNames: $m.personNames, personRefs: m.personRefs,
                               title: groupTitle(g),
                               reasons: m.reasons,
+                              details: m.details,
                               onChanged: {
                                   blockedCount = app.store.blockedFacePhotoCount()
                                   start()
@@ -334,17 +340,17 @@ struct PeoplePanel: View {
                                           centroids: [Int: [Float]], dim: Int,
                                           photo: PhotoLibraryService, assets: [String: PHAsset],
                                           face: FaceEmbedder,
-                                          cached: [String: (matched: Set<Int>, unexplained: Int, reason: Int, note: Int)],
+                                          cached: [String: (matched: Set<Int>, unexplained: Int, reason: Int, note: Int, detail: String)],
                                           store: VectorStore, ver: String,
-                                          progress: @escaping (Int, Int) -> Void) async -> (verdicts: [String: (recovered: Set<Int>, unexplained: Int, reason: Int, note: Int)], fetchFails: Int) {
-        var out: [String: (recovered: Set<Int>, unexplained: Int, reason: Int, note: Int)] = [:]
-        for (k, v) in cached { out[k] = (v.matched, v.unexplained, v.reason, v.note) }
+                                          progress: @escaping (Int, Int) -> Void) async -> (verdicts: [String: (recovered: Set<Int>, unexplained: Int, reason: Int, note: Int, detail: String)], fetchFails: Int) {
+        var out: [String: (recovered: Set<Int>, unexplained: Int, reason: Int, note: Int, detail: String)] = [:]
+        for (k, v) in cached { out[k] = (v.matched, v.unexplained, v.reason, v.note, v.detail) }
         let total = refs.count
         progress(0, total)
         var done = 0
         var idx = 0
         var fetchFails = 0
-        var pending: [(ref: String, matched: Set<Int>, unexplained: Int, reason: Int, note: Int)] = []
+        var pending: [(ref: String, matched: Set<Int>, unexplained: Int, reason: Int, note: Int, detail: String)] = []
         /// 取下一个待处理照片;命中的缓存直接算完成(被杀后重跑=秒过),
         /// 攒满 50 张落一次盘,进程再被杀也只丢尾部几十张
         func takeRef() -> String? {
@@ -359,7 +365,7 @@ struct PeoplePanel: View {
             }
             return nil
         }
-        func work(_ ref: String) async -> (String, Set<Int>, Int, Bool, Int, Int)? {
+        func work(_ ref: String) async -> (String, Set<Int>, Int, Bool, Int, Int, String)? {
             guard let a = assets[ref], let key = baseKeys[ref] else { return nil }
             var img: CGImage? = try? await photo.image(for: a, maxPixel: 2048)
             if img == nil {
@@ -368,18 +374,18 @@ struct PeoplePanel: View {
                 try? await Task.sleep(nanoseconds: 600_000_000)
                 img = try? await photo.image(for: a, maxPixel: 2048)
             }
-            guard let img else { return (ref, [], 0, true, 2, 0) }
+            guard let img else { return (ref, [], 0, true, 2, 0, "取图失败") }
             // 协作线程没有逐任务的 autorelease pool:上千张 × 2048px 的 Vision
             // ObjC 临时对象会一路攒到内存红线被系统杀进程(扫描到末尾莫名
             // 无结果的潜在诱因)——每张处理完立即排干
-            return autoreleasepool { () -> (String, Set<Int>, Int, Bool, Int, Int)? in
+            return autoreleasepool { () -> (String, Set<Int>, Int, Bool, Int, Int, String)? in
                 // 无闸门检测(质量/姿态全关):补认的目的恰是找回被闸门滤掉的第二人;
                 // 2048px 与索引同级,被索引漏掉的小脸这里同样漏不掉
                 let faces = FaceKit.detect(cg: img, maxFaces: 12, minFacePx: 40,
                                            minQuality: 0, maxYawDeg: 360)
                 // keyed 照片复检 0 脸=Vision 本次失败(索引时明明检到)——是稳定
                 // 判决(同图同结果),落缓存当单人处理,不再每轮重跑
-                guard !faces.isEmpty else { return (ref, [], 0, false, 3, 0) }
+                guard !faces.isEmpty else { return (ref, [], 0, false, 3, 0, "共0脸") }
                 // 主角级脸 = 宽度 ≥ 最大脸 30%:合影第二人与主脸尺寸相当;远处路人/
                 // 背景小脸不到这条线,不参与匹配也不算"他人"(用户定稿:纯背景小脸不算)。
                 // ⚠️ 不能用「主角级脸数 > 主角数」提前放行(163 实测三张合照漏进
@@ -389,14 +395,16 @@ struct PeoplePanel: View {
                 // "像谁/像不像任何人"自己说话
                 let maxW = faces.map { $0.boundingBox.width }.max() ?? 0
                 let major = faces.filter { $0.boundingBox.width >= maxW * 0.3 }
-                guard !major.isEmpty else { return (ref, [], 0, false, 3, 0) }
-                var matched = Set<Int>()
-                var explained = 0
-                var swallowedMin: Float = .infinity   // 被回退吞掉的脸里最低分(诊断用)
+                guard !major.isEmpty else { return (ref, [], 0, false, 3, 0, "无主角级脸") }
+                // 先算全部主角级脸的匹配分,再统一裁决(双人认领 veto 需要横向比)
+                struct FaceMatch { var ci: Int; var best: Float; var secondCi: Int; var second: Float; var strong: Bool }
+                var fms: [FaceMatch] = []
+                var embedFails = 0
                 for obs in major {
                     guard let aligned = FaceKit.alignedFace(source: img, observation: obs),
                           let vec = try? face.embed(aligned: aligned) else {
-                        continue   // 对齐/嵌入失败的算未识别
+                        embedFails += 1   // 对齐/嵌入失败的算未识别
+                        continue
                     }
                     var bestCi = -1, secondCi = -1
                     var bestSim: Float = -2, secondSim: Float = -2
@@ -410,31 +418,66 @@ struct PeoplePanel: View {
                             secondSim = dot; secondCi = ci
                         }
                     }
-                    if bestCi >= 0,
-                       bestSim >= 0.40 || (bestSim >= 0.32 && bestSim - secondSim >= 0.12) {
-                        matched.insert(bestCi)
-                        explained += 1
-                    } else if bestCi >= 0, key.contains(bestCi),
-                              bestSim >= 0.25,
-                              bestSim - secondSim >= 0.08 || key.contains(secondCi) {
-                        // 本人的难脸(重检更糊对不上线)最像组内本人→吞掉不算"他人",
-                        // 纯单人照不被误报。⚠️ 164 的教训:这个回退必须带地板+边距——
-                        // 无下限吞脸时,同行者的难脸只要最近邻恰是主角(大簇质心是
-                        // 全员平均脸,对糊脸捕获盆最大)就被当成"本人难脸",合影照样
-                        // 留单人组。边距是真假判别器:同行者的脸有她自己的质心做近身
-                        // 竞争者(边距≈0),本人难脸的第二名是无关人物(边距天然大)
-                        explained += 1
-                        swallowedMin = min(swallowedMin, bestSim)
+                    let strong = bestCi >= 0 &&
+                        (bestSim >= 0.40 || (bestSim >= 0.32 && bestSim - secondSim >= 0.12))
+                    fms.append(FaceMatch(ci: bestCi, best: bestSim,
+                                         secondCi: secondCi, second: secondSim, strong: strong))
+                }
+                // 双人认领同一主角 veto(166 实测根因:合影两张脸都"强匹配"程玉婷——
+                // 大簇质心=全员平均脸,对任何人的脸都有虚高分,0.32+领先0.12 的双判据
+                // 在稀释质心上会被同行者的脸穿过):同一张照片里已有更高分的脸认领了
+                // 某主角,另一张脸也认领同一人但分差 >0.15 或绝对分 <0.45 → 它不是
+                // "本人的第二张脸",是被质心吸进去的同行者 → 降级未识别。
+                // 镜像/海报同人双脸两张分接近(都 0.5+),不受影响
+                var topByCi: [Int: Float] = [:]
+                for f in fms where key.contains(f.ci) {
+                    topByCi[f.ci] = max(topByCi[f.ci] ?? -2, f.best)
+                }
+                var vetoed = Set<Int>()
+                for (i, f) in fms.enumerated() where key.contains(f.ci) {
+                    let top = topByCi[f.ci] ?? f.best
+                    if f.best < top && (top - f.best > 0.15 || f.best < 0.45) {
+                        vetoed.insert(i)
                     }
                 }
+                var matched = Set<Int>()
+                var explained = 0
+                var swallowedMin: Float = .infinity   // 被回退吞掉的脸里最低分(诊断用)
+                var detailParts: [String] = []
+                for (i, f) in fms.enumerated() {
+                    let tag: String
+                    if vetoed.contains(i) {
+                        tag = "V"   // 双人认领 veto:未识别
+                    } else if f.strong {
+                        matched.insert(f.ci)
+                        explained += 1
+                        tag = "S"
+                    } else if f.ci >= 0, key.contains(f.ci),
+                              f.best >= 0.25,
+                              f.best - f.second >= 0.08 || key.contains(f.secondCi) {
+                        // 本人的难脸(重检更糊对不上线)最像组内本人→吞掉不算"他人"。
+                        // 165 的教训:回退必须带地板+边距——同行者的难脸有自己质心做
+                        // 近身竞争者(边距≈0),本人难脸的第二名是无关人物(边距天然大)
+                        explained += 1
+                        swallowedMin = min(swallowedMin, f.best)
+                        tag = "W"
+                    } else {
+                        tag = "U"   // 对不上任何人物也不像组内本人:未识别同行脸
+                    }
+                    detailParts.append(String(format: "c%d@%.2f>c%d@%.2f%@",
+                                              f.ci, f.best, f.secondCi, f.second, tag))
+                }
+                for _ in 0..<embedFails { detailParts.append("嵌入失败U") }
                 // 未识别的主角级脸 = 检出但对不上任何人物、也不像组内本人
-                // (侧/糊/路人)。镜像/海报同人双脸不会误报:两张脸都匹配上本人
+                // (侧/糊/路人/veto)。镜像/海报同人双脸两张分接近,不会被 veto
                 let swallowed = swallowedMin.isFinite
-                return (ref, matched, major.count - explained, false,
-                        swallowed ? 1 : 0, swallowed ? Int(swallowedMin * 100) : 0)
+                let reason = swallowed ? 1 : 0
+                let note = swallowed ? Int(swallowedMin * 100) : major.count
+                return (ref, matched, major.count - explained, false, reason, note,
+                        "共\(major.count)脸: " + detailParts.joined(separator: " | "))
             }
         }
-        await withTaskGroup(of: (String, Set<Int>, Int, Bool, Int, Int)?.self) { group in
+        await withTaskGroup(of: (String, Set<Int>, Int, Bool, Int, Int, String)?.self) { group in
             for _ in 0..<4 {
                 if let ref = takeRef() { group.addTask { await work(ref) } }
             }
@@ -442,14 +485,14 @@ struct PeoplePanel: View {
                 if let r = await group.next() {
                     done += 1
                     if done % 10 == 0 || done == total { progress(done, total) }
-                    if let (ref, matched, unexplained, failed, reason, note) = r {
-                        out[ref] = (matched, unexplained, reason, note)
+                    if let (ref, matched, unexplained, failed, reason, note, detail) = r {
+                        out[ref] = (matched, unexplained, reason, note, detail)
                         if failed {
                             // 取图失败不落缓存:下次扫描自动重试;先按已入库
                             // 主角归组,完成提示里如实上报数量
                             fetchFails += 1
                         } else {
-                            pending.append((ref, matched, unexplained, reason, note))
+                            pending.append((ref, matched, unexplained, reason, note, detail))
                             if pending.count >= 50 {
                                 store.saveRecoverCache(pending, ver: ver)
                                 pending.removeAll()
@@ -476,7 +519,7 @@ struct PeoplePanel: View {
         // (人脸行/排除/模型)不含算法版本,163 的旧判决经快照水化+缓存命中在
         // 164 原样复活,用户看到的就是"修了没变化"
         let ver = app.store.peopleFingerprint(
-            extra: "a2-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
+            extra: "a3-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
         guard let json = app.store.loadPeopleResults(ver: ver),
               let data = json.data(using: .utf8),
               let snap = try? JSONDecoder().decode(PeopleSnapshot.self, from: data) else {
@@ -506,6 +549,7 @@ struct PeoplePanel: View {
             hydrated[k] = (v[0], v[1])
         }
         m.reasons = hydrated
+        m.details = snap.details ?? [:]
         UserDefaults.standard.removeObject(forKey: "peopleScanRunning")
     }
 
@@ -545,7 +589,7 @@ struct PeoplePanel: View {
         // 指纹:人脸数据/排除集合/模型任一变化,快照与补认缓存自动作废;
         // a2=算法盐,归组逻辑变更必须升盐(与 hydrateIfNeeded 同串)
         let ver = store.peopleFingerprint(
-            extra: "a2-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
+            extra: "a3-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
         // 「扫描中」记账 + 屏幕常亮:退后台被系统结束进程后,重开面板能明确
         // 告知「上次未完成」;常亮防前台锁屏挂起
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "peopleScanRunning")
@@ -612,7 +656,7 @@ struct PeoplePanel: View {
                     for d in 0..<data.dim { c[d] /= n }
                     centroids[ci] = c
                 }
-                var recovered: [String: (recovered: Set<Int>, unexplained: Int, reason: Int, note: Int)] = [:]
+                var recovered: [String: (recovered: Set<Int>, unexplained: Int, reason: Int, note: Int, detail: String)] = [:]
                 var fetchFails = 0
                 if let faceModel {
                     // 先取补认进度缓存:被系统杀掉后重跑,已处理的照片秒过
@@ -631,12 +675,13 @@ struct PeoplePanel: View {
                 var unknownRefs: [String] = []
                 var unknownScores: [Float] = []
                 var reasonsMap: [String: (reason: Int, note: Int)] = [:]
+                var detailsMap: [String: String] = [:]
                 var statRecovered = 0   // 补认出 ≥1 个新主角的照片数
                 var statOthers = 0      // 仍有认不出的主角级同行脸的照片数
                 for (r, cs) in refClusters {
                     let libKey = cs.intersection(persons)
                     let rec = recovered[r]
-                    if let rec { reasonsMap[r] = (rec.reason, rec.note) }
+                    if let rec { reasonsMap[r] = (rec.reason, rec.note); detailsMap[r] = rec.detail }
                     var key = libKey
                     if let rec { key.formUnion(rec.recovered) }
                     if let rec, !rec.recovered.isSubset(of: libKey) { statRecovered += 1 }
@@ -698,7 +743,8 @@ struct PeoplePanel: View {
                     },
                     personRefs: refsOf, totalPersons: persons.count,
                     unknownCount: unknownAlive, savedAt: Date(),
-                    reasons: reasonsMap.mapValues { [$0.reason, $0.note] })
+                    reasons: reasonsMap.mapValues { [$0.reason, $0.note] },
+                    details: detailsMap)
                 if let data = try? JSONEncoder().encode(snap) {
                     store.savePeopleResults(json: String(decoding: data, as: UTF8.self), ver: ver)
                 }
@@ -716,6 +762,7 @@ struct PeoplePanel: View {
                     model.totalPersons = persons.count
                     model.unknownCount = unknownAlive
                     model.reasons = reasonsMap
+                    model.details = detailsMap
                     if outGroups.isEmpty {
                         app.notify("没有找到可归组的人脸")
                     } else if statRecovered > 0 || statOthers > 0 {
@@ -749,6 +796,8 @@ struct ClusterDetailView: View {
     let title: String
     /// 每张照片的归类理由(单人组标注「为什么算单人」);空=旧快照无数据
     var reasons: [String: (reason: Int, note: Int)] = [:]
+    /// 逐脸匹配明细(长按照片弹诊断);空=旧快照/缓存无数据
+    var details: [String: String] = [:]
     /// 排除照片后的回调(父级重新归组)
     var onChanged: (() -> Void)?
 
@@ -759,6 +808,8 @@ struct ClusterDetailView: View {
     @State private var nameText = ""
     @State private var applying = false
     @State private var selectedHit: DisplayHit?
+    @State private var showingDebug = false      // 长按照片看逐脸裁决(166 诊断)
+    @State private var debugText = ""
     @State private var selecting = false         // 排除模式:点选照片移出本组
     @State private var selected: Set<String> = []
     @State private var excluding = false
@@ -858,6 +909,13 @@ struct ClusterDetailView: View {
             let n = namingMember.flatMap { personRefs[$0] }?.count ?? 0
             Text("给该人物出现的全部 \(n) 张照片(含其他合照)写入同名标签;搜索该名字即可全部找到")
         }
+        .alert("归类诊断", isPresented: $showingDebug) {
+            Button("好", role: .cancel) {}
+        } message: {
+            // 逐脸裁决:S=强匹配认出 W=回退判本人难脸 V=双人认领降级 U=未识别;
+            // c数字=人物簇,@分数=对该簇质心/第二名质心的余弦
+            Text(debugText + "\n(S=认出 W=本人难脸 V=同认领降级 U=未识别)")
+        }
         .sheet(item: $selectedHit) { hit in
             DetailSheet(hit: hit)
         }
@@ -924,18 +982,32 @@ struct ClusterDetailView: View {
             }
         }
         .overlay(alignment: .topTrailing) {
-            // 单人组标注「为什么算单人」(165 诊断):用户报"合影还在单人组"时,
-            // 一张截图即可定位是哪条路径放行的
-            if members.count == 1, let r = reasons[ref], r.reason != 0 {
-                Text(r.reason == 1 ? String(format: "弱分回退·%d%%", r.note)
-                     : r.reason == 2 ? "iCloud未取到"
-                     : "复检未检出人脸")
-                    .font(.system(size: 9))
-                    .padding(.horizontal, 3).padding(.vertical, 2)
-                    .background(.orange.opacity(0.85), in: RoundedRectangle(cornerRadius: 4))
-                    .foregroundStyle(.white)
-                    .padding(4)
+            // 单人组标注「为什么算单人」(165 诊断,166 补盲区):reason≠0 是异常
+            // 路径;reason=0 且检出多张脸全判成本人——正常只该发生在镜像/海报/
+            // 本人双脸,若用户肉眼看到别人就该长按照片看逐脸明细
+            if members.count == 1, let r = reasons[ref] {
+                if r.reason != 0 {
+                    Text(r.reason == 1 ? String(format: "弱分回退·%d%%", r.note)
+                         : r.reason == 2 ? "iCloud未取到"
+                         : "复检未检出人脸")
+                        .font(.system(size: 9))
+                        .padding(.horizontal, 3).padding(.vertical, 2)
+                        .background(.orange.opacity(0.85), in: RoundedRectangle(cornerRadius: 4))
+                        .foregroundStyle(.white)
+                        .padding(4)
+                } else if r.note >= 2 {
+                    Text("见\(r.note)脸·均判本人")
+                        .font(.system(size: 9))
+                        .padding(.horizontal, 3).padding(.vertical, 2)
+                        .background(.orange.opacity(0.85), in: RoundedRectangle(cornerRadius: 4))
+                        .foregroundStyle(.white)
+                        .padding(4)
+                }
             }
+        }
+        .onLongPressGesture {
+            debugText = details[ref] ?? "无逐脸记录(判决来自旧缓存/旧快照),重新归组一次即可生成"
+            showingDebug = true
         }
     }
 
