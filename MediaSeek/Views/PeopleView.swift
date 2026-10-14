@@ -93,14 +93,8 @@ struct PeoplePanel: View {
     var body: some View {
         NavigationStack {
             Form {
-                setupSection
-                if m.scanning, let p = m.progress, p.total > 0 {
-                    Section {
-                        ProgressView(value: Double(p.done) / Double(p.total))
-                        Text("已处理 \(p.done)/\(p.total)")
-                            .font(.caption2).foregroundStyle(.secondary)
-                    }
-                }
+                // 结果置顶:扫完当场/重开面板,第一屏就是结果列表——结果排在
+                // 设置区下面时,完成后停在设置区视角的用户会以为"没有结果"
                 if !m.groups.isEmpty {
                     resultsSection
                 } else if !m.scanning, faceTotal == 0 {
@@ -108,6 +102,14 @@ struct PeoplePanel: View {
                         Text(emptyHint).font(.footnote).foregroundStyle(.secondary)
                     }
                 }
+                if m.scanning, let p = m.progress, p.total > 0 {
+                    Section {
+                        ProgressView(value: Double(p.done) / Double(p.total))
+                        Text("已处理 \(p.done)/\(p.total)")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+                setupSection
             }
             .navigationTitle("人物归组")
             .navigationBarTitleDisplayMode(.inline)

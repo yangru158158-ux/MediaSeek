@@ -47,6 +47,9 @@ final class AppModel: ObservableObject {
         models.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &bag)
         indexing.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &bag)
         imports.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &bag)
+        // 归组状态也走同一转发通道:面板的 @ObservedObject 之外再补一条
+        // AppModel 级刷新路径,完成瞬间的列表更新双保险
+        people.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &bag)
 
         // 人脸模型指纹变化(导入/在线升级)→ 立即增量同步:同步开始时自动清空
         // 旧模型脸向量并走人脸补全重嵌。此前只在 App 启动时自动同步,导入完
