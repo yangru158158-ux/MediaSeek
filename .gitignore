@@ -12,3 +12,8 @@ MediaSeek/Resources/Models/*
 *.ipa
 *.xcarchive
 __pycache__/
+
+# local ci debug artifacts
+bc_logs/
+bc_logs.zip
+runs_check.json
