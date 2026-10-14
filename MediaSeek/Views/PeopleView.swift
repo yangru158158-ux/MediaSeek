@@ -20,6 +20,17 @@ struct PeopleView: View {
     @EnvironmentObject var app: AppModel
     @Environment(\.dismiss) private var dismiss
 
+    @State private var scanning = false
+    @State private var progress: (done: Int, total: Int)?
+    @State private var groups: [ComboGroup] = []
+    @State private var personNames: [Int: String] = [:]   // 簇 → 显示名(标签覆盖达标)
+    @State private var personRefs: [Int: [String]] = [:]  // 簇 → 该人全部照片(命名打标签范围)
+    @State private var assets: [String: PHAsset] = [:]
+    @State private var faceTotal = 0
+    @State private var totalPersons = 0
+    @State private var unknownCount = 0
+    @State private var showingSmall = false
+    @State private var confirmClearTags = false
     @State private var blockedCount = 0
 
     // 精确档固定参数(153 用户定稿:去掉三档,只要精确;拿不准一律进不确定组)。
