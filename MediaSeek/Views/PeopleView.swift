@@ -316,7 +316,7 @@ struct PeoplePanel: View {
         func takeRef() -> String? {
             while idx < refs.count {
                 let r = refs[idx]; idx += 1
-                if let c = cached[r] {
+                if cached[r] != nil {
                     done += 1
                     if done % 50 == 0 || done == total { progress(done, total) }
                     continue

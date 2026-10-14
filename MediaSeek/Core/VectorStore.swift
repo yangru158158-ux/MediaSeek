@@ -1041,8 +1041,9 @@ final class VectorStore {
         for row in rows {
             guard let stmt = try? prepare("INSERT OR REPLACE INTO recover_cache(ref_key, matched, unexplained, ver) VALUES(?,?,?,?)")
             else { continue }
+            let matchedText = row.matched.sorted().map(String.init).joined(separator: ",")
             sqlite3_bind_text(stmt, 1, row.ref, -1, Self.transient)
-            sqlite3_bind_text(stmt, 2, row.matched.sorted().map(String.init).joined(separator: ","), -1, Self.transient)
+            sqlite3_bind_text(stmt, 2, matchedText, -1, Self.transient)
             sqlite3_bind_int(stmt, 3, Int32(row.unexplained))
             sqlite3_bind_text(stmt, 4, ver, -1, Self.transient)
             sqlite3_step(stmt)
