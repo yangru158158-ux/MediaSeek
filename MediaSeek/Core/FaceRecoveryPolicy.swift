@@ -1,0 +1,71 @@
+import Foundation
+
+enum FaceRecoveryPolicy {
+    struct Match {
+        let cluster: Int
+        let score: Float
+        let strong: Bool
+        let embedding: [Float]
+    }
+
+    static func vetoedIndices(
+        in matches: [Match],
+        recognizedClusters: Set<Int>,
+        pairSimilarityFloor: Float = 0.48
+    ) -> Set<Int> {
+        var topByCluster: [Int: Float] = [:]
+        for match in matches where recognizedClusters.contains(match.cluster) {
+            topByCluster[match.cluster] = max(topByCluster[match.cluster] ?? -2, match.score)
+        }
+
+        var vetoed = Set<Int>()
+        for (index, match) in matches.enumerated() where recognizedClusters.contains(match.cluster) {
+            let top = topByCluster[match.cluster] ?? match.score
+            if match.score < top && (top - match.score > 0.15 || match.score < 0.45) {
+                vetoed.insert(index)
+            }
+        }
+
+        for cluster in recognizedClusters.sorted() {
+            let candidates = matches.indices.filter {
+                matches[$0].cluster == cluster && matches[$0].strong && !vetoed.contains($0)
+            }
+            let ordered = candidates.sorted { lhs, rhs in
+                let left = matches[lhs].score
+                let right = matches[rhs].score
+                return left == right ? lhs < rhs : left > right
+            }
+            var accepted: [Int] = []
+            for candidate in ordered {
+                let consistent = accepted.allSatisfy { prior in
+                    guard let similarity = cosineSimilarity(
+                        matches[candidate].embedding, matches[prior].embedding
+                    ) else { return true }
+                    return similarity >= pairSimilarityFloor
+                }
+                if consistent {
+                    accepted.append(candidate)
+                } else {
+                    vetoed.insert(candidate)
+                }
+            }
+        }
+
+        return vetoed
+    }
+
+    private static func cosineSimilarity(_ lhs: [Float], _ rhs: [Float]) -> Float? {
+        guard !lhs.isEmpty, lhs.count == rhs.count else { return nil }
+        var dot: Float = 0
+        var lhsNorm: Float = 0
+        var rhsNorm: Float = 0
+        for i in lhs.indices {
+            dot += lhs[i] * rhs[i]
+            lhsNorm += lhs[i] * lhs[i]
+            rhsNorm += rhs[i] * rhs[i]
+        }
+        let denominator = (lhsNorm * rhsNorm).squareRoot()
+        guard denominator.isFinite, denominator > 1e-8 else { return nil }
+        return dot / denominator
+    }
+}

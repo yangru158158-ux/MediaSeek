@@ -383,21 +383,28 @@ struct PeoplePanel: View {
                 // 2048px 与索引同级,被索引漏掉的小脸这里同样漏不掉
                 let faces = FaceKit.detect(cg: img, maxFaces: 12, minFacePx: 40,
                                            minQuality: 0, maxYawDeg: 360)
-                // keyed 照片复检 0 脸=Vision 本次失败(索引时明明检到)——是稳定
-                // 判决(同图同结果),落缓存当单人处理,不再每轮重跑
-                guard !faces.isEmpty else { return (ref, [], 0, false, 3, 0, "共0脸") }
-                // 主角级脸 = 宽度 ≥ 最大脸 30%:合影第二人与主脸尺寸相当;远处路人/
-                // 背景小脸不到这条线,不参与匹配也不算"他人"(用户定稿:纯背景小脸不算)。
-                // ⚠️ 不能用「主角级脸数 > 主角数」提前放行(163 实测三张合照漏进
-                // 单人组的根因):已入库主角可能恰是照片里较小的脸(近景自拍里
-                // 同行者脸更大),30% 线把她滤掉后待认脸数恰等于主角数,守卫
-                // 误判"没有多余的脸"直接放行。每张显著脸一律过匹配,让
-                // "像谁/像不像任何人"自己说话
+                // keyed 照片复检未发现 ≥40px 候选脸:与 30% 主角脸过滤分开记录,
+                // 长按诊断时不会再把“未检出”和“检出后被尺寸门槛过滤”混为一谈。
+                guard !faces.isEmpty else {
+                    return (ref, [], 0, false, 3, 0, "Vision 未检出≥40px候选脸")
+                }
+                // 主角级脸 = 宽度 ≥ 最大脸 30%:纯背景小脸不参与匹配也不算“他人”。
+                // 不以显著脸数量作提前放行条件;每张显著脸仍逐一匹配。
                 let maxW = faces.map { $0.boundingBox.width }.max() ?? 0
                 let major = faces.filter { $0.boundingBox.width >= maxW * 0.3 }
-                guard !major.isEmpty else { return (ref, [], 0, false, 3, 0, "无主角级脸") }
+                let excludedFaceSizes = faces.filter { $0.boundingBox.width < maxW * 0.3 }.map {
+                    let width = $0.boundingBox.width
+                    let pixels = Int((width * CGFloat(img.width)).rounded())
+                    let percent = maxW > 0 ? Int((width / maxW * 100).rounded()) : 0
+                    return "\(pixels)px/\(percent)%"
+                }
+                let faceSummary = "≥40px检出\(faces.count)脸,≥30%主角\(major.count)脸"
+                    + (excludedFaceSizes.isEmpty ? "" : ";过滤小脸 " + excludedFaceSizes.joined(separator: ","))
+                guard !major.isEmpty else {
+                    return (ref, [], 0, false, 3, 0, faceSummary)
+                }
                 // 先算全部主角级脸的匹配分,再统一裁决(双人认领 veto 需要横向比)
-                struct FaceMatch { var ci: Int; var best: Float; var secondCi: Int; var second: Float; var strong: Bool }
+                struct FaceMatch { var ci: Int; var best: Float; var secondCi: Int; var second: Float; var strong: Bool; var embedding: [Float] }
                 var fms: [FaceMatch] = []
                 var embedFails = 0
                 for obs in major {
@@ -421,25 +428,18 @@ struct PeoplePanel: View {
                     let strong = bestCi >= 0 &&
                         (bestSim >= 0.40 || (bestSim >= 0.32 && bestSim - secondSim >= 0.12))
                     fms.append(FaceMatch(ci: bestCi, best: bestSim,
-                                         secondCi: secondCi, second: secondSim, strong: strong))
+                                         secondCi: secondCi, second: secondSim,
+                                         strong: strong, embedding: vec))
                 }
-                // 双人认领同一主角 veto(166 实测根因:合影两张脸都"强匹配"程玉婷——
-                // 大簇质心=全员平均脸,对任何人的脸都有虚高分,0.32+领先0.12 的双判据
-                // 在稀释质心上会被同行者的脸穿过):同一张照片里已有更高分的脸认领了
-                // 某主角,另一张脸也认领同一人但分差 >0.15 或绝对分 <0.45 → 它不是
-                // "本人的第二张脸",是被质心吸进去的同行者 → 降级未识别。
-                // 镜像/海报同人双脸两张分接近(都 0.5+),不受影响
-                var topByCi: [Int: Float] = [:]
-                for f in fms where key.contains(f.ci) {
-                    topByCi[f.ci] = max(topByCi[f.ci] ?? -2, f.best)
+                // 同图多脸认领同一主角时,既保留原有分差 veto,也要求强匹配脸
+                // 彼此达到逐脸核验线(0.48);否则较弱的脸不能冒充该主角的第二张脸。
+                // 裁决 helper 与纯 Swift 回归测试共用,避免生产逻辑和测试漂移。
+                let policyMatches = fms.map {
+                    FaceRecoveryPolicy.Match(cluster: $0.ci, score: $0.best,
+                                             strong: $0.strong, embedding: $0.embedding)
                 }
-                var vetoed = Set<Int>()
-                for (i, f) in fms.enumerated() where key.contains(f.ci) {
-                    let top = topByCi[f.ci] ?? f.best
-                    if f.best < top && (top - f.best > 0.15 || f.best < 0.45) {
-                        vetoed.insert(i)
-                    }
-                }
+                let vetoed = FaceRecoveryPolicy.vetoedIndices(
+                    in: policyMatches, recognizedClusters: key)
                 var matched = Set<Int>()
                 var explained = 0
                 var swallowedMin: Float = .infinity   // 被回退吞掉的脸里最低分(诊断用)
@@ -474,7 +474,7 @@ struct PeoplePanel: View {
                 let reason = swallowed ? 1 : 0
                 let note = swallowed ? Int(swallowedMin * 100) : major.count
                 return (ref, matched, major.count - explained, false, reason, note,
-                        "共\(major.count)脸: " + detailParts.joined(separator: " | "))
+                        faceSummary + "; " + detailParts.joined(separator: " | "))
             }
         }
         await withTaskGroup(of: (String, Set<Int>, Int, Bool, Int, Int, String)?.self) { group in
@@ -515,11 +515,11 @@ struct PeoplePanel: View {
     /// 人名按当前标签重推——重命名/清标签无需重扫
     private func hydrateIfNeeded() {
         guard m.groups.isEmpty, !m.scanning else { return }
-        // 算法盐 a2:归组/补认逻辑每次变更必须升盐——165 的教训:指纹只含数据
+        // 算法盐 a4:归组/补认逻辑变更必须升盐——旧快照与补认缓存不能复活旧裁决。
         // (人脸行/排除/模型)不含算法版本,163 的旧判决经快照水化+缓存命中在
         // 164 原样复活,用户看到的就是"修了没变化"
         let ver = app.store.peopleFingerprint(
-            extra: "a3-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
+            extra: "a4-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
         guard let json = app.store.loadPeopleResults(ver: ver),
               let data = json.data(using: .utf8),
               let snap = try? JSONDecoder().decode(PeopleSnapshot.self, from: data) else {
@@ -587,9 +587,9 @@ struct PeoplePanel: View {
         let faceModel = app.models.face
         let model = app.people   // 结果写共享模型:面板关了再开不丢(160 教训)
         // 指纹:人脸数据/排除集合/模型任一变化,快照与补认缓存自动作废;
-        // a2=算法盐,归组逻辑变更必须升盐(与 hydrateIfNeeded 同串)
+        // a4=算法盐,归组逻辑变更必须升盐(与 hydrateIfNeeded 同串)
         let ver = store.peopleFingerprint(
-            extra: "a3-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
+            extra: "a4-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
         // 「扫描中」记账 + 屏幕常亮:退后台被系统结束进程后,重开面板能明确
         // 告知「上次未完成」;常亮防前台锁屏挂起
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "peopleScanRunning")
