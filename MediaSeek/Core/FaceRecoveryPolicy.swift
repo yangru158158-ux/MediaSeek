@@ -108,6 +108,44 @@ enum FaceRecoveryPolicy {
         bestKNN >= 0.30 && bestKNN - (secondKNN ?? -1) >= 0.06
     }
 
+    /// 聚合转正(J,第十批):单张证据不够线的 U 脸,若在 ≥8 次观测里稳定
+    /// best 指向同一簇 → 跨照片一致性即身份铁证(嵌入噪声方向随机,真
+    /// 同伴的糊脸方向稳定)。地板 0.18 排除纯噪声,领先 0.02 排除二义脸
+    /// (172 实测 c1@0.20>c2@0.19 领先 0.01 不该赌)。救 Y 的鸡生蛋盲区:
+    /// 中频同伴的合影从未有一张被认出 → 历史同框计数恒 0 → Y 永不触发
+    /// (172 实测 c9@0.27>c6@0.20U,分数边距全过 Y 门却卡在同框 0)。
+    static func aggregatedRecovered(pairCount: Int, best: Float, second: Float,
+                                    minPair: Int = 8, minBest: Float = 0.18,
+                                    minLead: Float = 0.02) -> Bool {
+        pairCount >= minPair && best >= minBest && (best - second) >= minLead
+    }
+
+    /// 从裁决 detail 解析逐脸段(第十批 J 通道二轮统计用):
+    /// 「c9@0.27>c6@0.20U」→(ci:9, best:0.27, secondCi:6, second:0.20, tag:"U")。
+    /// 与 work() 的 detailParts 生成端共同约定格式;非脸段(诊断前缀/
+    /// 嵌入失败U)解析不出自动跳过。detail 即结构化载体,聚合免改缓存表。
+    static func parseFaceSegments(_ detail: String)
+        -> [(ci: Int, best: Float, secondCi: Int, second: Float, tag: String)] {
+        var faces: [(ci: Int, best: Float, secondCi: Int, second: Float, tag: String)] = []
+        for raw in detail.components(separatedBy: " | ") {
+            // 首段可能与诊断前缀以「; 」相连,取最后一个 "; " 之后
+            let s = raw.range(of: "; ", options: .backwards).map { String(raw[$0.upperBound...]) } ?? raw
+            guard s.hasPrefix("c"), let at1 = s.firstIndex(of: "@"),
+                  let gt = s.firstIndex(of: ">") else { continue }
+            let afterGt = s[s.index(after: gt)...]
+            guard afterGt.hasPrefix("c"), let at2 = afterGt.firstIndex(of: "@") else { continue }
+            let tail = s[afterGt.index(after: at2)...]
+            guard tail.count >= 5,   // "0.20"+单字母 tag(%.2f 恒两位小数)
+                  let ci = Int(s[s.index(after: s.startIndex)..<at1]),
+                  let secondCi = Int(afterGt[afterGt.index(after: afterGt.startIndex)..<at2]),
+                  let best = Float(s[s.index(after: at1)..<gt]),
+                  let second = Float(tail.dropLast()),
+                  ["S", "W", "V", "U", "Y", "K"].contains(String(tail.suffix(1))) else { continue }
+            faces.append((ci, best, secondCi, second, String(tail.suffix(1))))
+        }
+        return faces
+    }
+
     private static func cosineSimilarity(_ lhs: [Float], _ rhs: [Float]) -> Float? {
         guard !lhs.isEmpty, lhs.count == rhs.count else { return nil }
         var dot: Float = 0

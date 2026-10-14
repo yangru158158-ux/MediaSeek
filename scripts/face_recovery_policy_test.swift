@@ -188,7 +188,47 @@ struct FaceRecoveryPolicyTest {
             "无第二簇竞争(nil)时达标即认"
         )
 
-        print("PASS: 同图双脸补认策略的 29 项确定性回归断言全部通过")
+        // —— 聚合转正(J):跨照片稳定指向同一簇 → 集体转正 ——
+        expect(
+            FaceRecoveryPolicy.aggregatedRecovered(pairCount: 8, best: 0.27, second: 0.20),
+            "172 实测样本 c9@0.27>c6@0.20 配对 ≥8 次应转正(J)"
+        )
+        expect(
+            !FaceRecoveryPolicy.aggregatedRecovered(pairCount: 7, best: 0.27, second: 0.20),
+            "配对 7 次不足 8 不转正(跨照片证据不够)"
+        )
+        expect(
+            !FaceRecoveryPolicy.aggregatedRecovered(pairCount: 30, best: 0.17, second: 0.05),
+            "低于 0.18 地板的纯噪声脸不转正"
+        )
+        expect(
+            !FaceRecoveryPolicy.aggregatedRecovered(pairCount: 30, best: 0.20, second: 0.19),
+            "领先 0.01 的二义脸不赌(172 实测 c1@0.20>c2@0.19)"
+        )
+        // —— parseFaceSegments:裁决 detail 的结构化解析(二轮统计载体) ——
+        let segs = FaceRecoveryPolicy.parseFaceSegments(
+            "≥30px rect检出 2/关键点 1/并集 2,≥30% 主角 2脸; c1@0.13>c2@0.10U | c0@0.57>c7@0.14S")
+        expect(
+            segs.count == 2 && segs[0].ci == 1 && abs(segs[0].best - 0.13) < 0.001
+                && segs[0].secondCi == 2 && segs[0].tag == "U",
+            "首段(与诊断前缀以『; 』相连)解析出 U 脸字段"
+        )
+        expect(
+            segs.count == 2 && segs[1].ci == 0 && segs[1].secondCi == 7 && segs[1].tag == "S",
+            "第二段(无前缀)解析出 S 脸"
+        )
+        expect(
+            FaceRecoveryPolicy.parseFaceSegments(
+                "未检出≥30px候选脸;躯干2个[100%,40%]/同伴级2→判有同行").isEmpty,
+            "零脸 detail 解析不出脸段"
+        )
+        expect(
+            FaceRecoveryPolicy.parseFaceSegments(
+                "≥30px rect检出 2,≥30%主角2脸; c1@0.20>c2@0.19U | 嵌入失败U").count == 1,
+            "『嵌入失败U』段被跳过,只解析出 1 个脸段"
+        )
+
+        print("PASS: 同图双脸补认策略的 37 项确定性回归断言全部通过")
     }
 
     private static func vetoes(_ matches: [FaceRecoveryPolicy.Match]) -> Set<Int> {

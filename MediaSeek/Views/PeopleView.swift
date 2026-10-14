@@ -609,6 +609,42 @@ struct PeoplePanel: View {
             }
         }
         if !pending.isEmpty { store.saveRecoverCache(pending, ver: ver) }
+        // —— 聚合转正(第十批 J 通道):二轮扫描本次运行的全部裁决 ——
+        // 单张证据不够线的 U 脸(0.18-0.27 糊脸),若在 ≥8 次观测里稳定 best
+        // 指向同一簇,跨照片一致性就是身份铁证——嵌入噪声方向随机,真同伴的
+        // 糊脸方向稳定。Y 同框先验救不了它:中频同伴的合影从未有一张被认出
+        // → 历史同框计数恒为 0(172 实测 c9@0.27>c6@0.20U,分数边距全过 Y 门)。
+        // J 只看本次运行内的 (主角,best簇) 配对频次,自闭环不依赖历史;
+        // 转正行重写 recover_cache(INSERT OR REPLACE),归组用的是改后的 out。
+        var pairCount: [Int: [Int: Int]] = [:]
+        for (ref, v) in out {
+            guard let key = baseKeys[ref] else { continue }
+            for f in FaceRecoveryPolicy.parseFaceSegments(v.detail)
+            where f.tag == "U" && f.ci >= 0 {
+                for k in key { pairCount[k, default: [:]][f.ci, default: 0] += 1 }
+            }
+        }
+        var promoted: [(ref: String, matched: Set<Int>, unexplained: Int, reason: Int, note: Int, detail: String)] = []
+        for (ref, v) in Array(out) {
+            guard let key = baseKeys[ref] else { continue }
+            var matched = v.recovered, unexplained = v.unexplained, detail = v.detail
+            for f in FaceRecoveryPolicy.parseFaceSegments(v.detail)
+            where f.tag == "U" && f.ci >= 0 {
+                let count = key.reduce(0) { max($0, pairCount[$1]?[f.ci] ?? 0) }
+                guard FaceRecoveryPolicy.aggregatedRecovered(
+                    pairCount: count, best: f.best, second: f.second) else { continue }
+                matched.insert(f.ci)
+                unexplained -= 1
+                detail = detail.replacingOccurrences(
+                    of: String(format: "c%d@%.2f>c%d@%.2fU", f.ci, f.best, f.secondCi, f.second),
+                    with: String(format: "c%d@%.2f>c%d@%.2fJ", f.ci, f.best, f.secondCi, f.second))
+            }
+            if matched != v.recovered {
+                out[ref] = (matched, unexplained, v.reason, v.note, detail)
+                promoted.append((ref, matched, unexplained, v.reason, v.note, detail))
+            }
+        }
+        if !promoted.isEmpty { store.saveRecoverCache(promoted, ver: ver) }
         return (out, fetchFails)
     }
 
@@ -617,11 +653,11 @@ struct PeoplePanel: View {
     /// 人名按当前标签重推——重命名/清标签无需重扫
     private func hydrateIfNeeded() {
         guard m.groups.isEmpty, !m.scanning else { return }
-        // 算法盐 a8:归组/补认逻辑变更必须升盐——旧快照与补认缓存不能复活旧裁决。
+        // 算法盐 a10:归组/补认逻辑变更必须升盐——旧快照与补认缓存不能复活旧裁决。
         // (人脸行/排除/模型)不含算法版本,163 的旧判决经快照水化+缓存命中在
         // 164 原样复活,用户看到的就是"修了没变化"
         let ver = app.store.peopleFingerprint(
-            extra: "a9-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
+            extra: "a10-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
         guard let json = app.store.loadPeopleResults(ver: ver),
               let data = json.data(using: .utf8),
               let snap = try? JSONDecoder().decode(PeopleSnapshot.self, from: data) else {
@@ -691,7 +727,7 @@ struct PeoplePanel: View {
         // 指纹:人脸数据/排除集合/模型任一变化,快照与补认缓存自动作废;
         // a8=算法盐,归组逻辑变更必须升盐(与 hydrateIfNeeded 同串)
         let ver = store.peopleFingerprint(
-            extra: "a9-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
+            extra: "a10-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
         // 「扫描中」记账 + 屏幕常亮:退后台被系统结束进程后,重开面板能明确
         // 告知「上次未完成」;常亮防前台锁屏挂起
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "peopleScanRunning")
@@ -1064,7 +1100,7 @@ struct ClusterDetailView: View {
         } message: {
             // 逐脸裁决:S=强匹配认出 W=回退判本人难脸 V=双人认领降级 U=未识别;
             // c数字=人物簇,@分数=对该簇质心/第二名质心的余弦
-            Text(debugText + "\n(S=认出 W=本人难脸 V=同认领降级 U=未识别 Y=同框先验 K=近邻复核)")
+            Text(debugText + "\n(S=认出 W=本人难脸 V=同认领降级 U=未识别 Y=同框先验 K=近邻复核 J=聚合转正)")
         }
         .sheet(item: $selectedHit) { hit in
             DetailSheet(hit: hit)
