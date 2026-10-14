@@ -93,16 +93,18 @@ enum FaceKit {
                 q.inputFaceObservations = faces
                 // 质量请求的返回是新观测对象,可能不带 landmarks(对齐需要),
                 // 不能拿返回值替换原观测——按 boundingBox 回配质量值,原观测保留
-                if (try? handler.perform([q])) != nil,
-                   let scored = q.results as? [VNFaceObservation] {
+                if (try? handler.perform([q])) != nil, let scored = q.results {
                     func sameBox(_ a: CGRect, _ b: CGRect) -> Bool {
                         abs(a.minX - b.minX) < 1e-4 && abs(a.minY - b.minY) < 1e-4
                             && abs(a.width - b.width) < 1e-4 && abs(a.height - b.height) < 1e-4
                     }
                     faces = faces.filter { obs in
-                        guard let v = scored.first(where: { sameBox($0.boundingBox, obs.boundingBox) })?
-                            .faceCaptureQuality?.floatValue else { return true }
-                        return v >= minQuality
+                        guard let so = scored.first(where: { sameBox($0.boundingBox, obs.boundingBox) })
+                        else { return true }   // 没匹配到质量值:不拦(保守放行)
+                        // Xcode 26 SDK 里 faceCaptureQuality 已是 Float(旧 SDK 为
+                        // NSNumber)——用桥接转型两种声明都编译通过;无质量值放行
+                        if let v = so.faceCaptureQuality as? Float, v < minQuality { return false }
+                        return true
                     }
                 }
             }
