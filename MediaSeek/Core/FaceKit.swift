@@ -64,6 +64,20 @@ enum FaceKit {
     private static let eyeMid = CGPoint(x: 55.9132, y: 51.5989)
     private static let eyeDistance: CGFloat = 35.2372
 
+    /// 无闸门人头计数(只数「照片里有几张人脸」,不做身份嵌入)。
+    /// 用途:入库闸门(小脸/质量分/姿态)会把合影里第二个人的脸滤在库外,
+    /// 库里只剩主角一张脸 → 归组时误判成单人照(156 用户实测杨如组混入
+    /// 合影)。归组完成后对单/多人组照片用本方法复查:检出人脸数 > 主角数
+    /// = 照片里还有未识别的人 → 「与其他人」。闸门管「谁的身份可信」,
+    /// 本方法管「照片里有几个人」——后者必须无闸门,宁滥勿缺
+    static func countFaces(cg: CGImage, minFacePx: Int = 30) -> Int {
+        let request = VNDetectFaceRectanglesRequest()
+        let handler = VNImageRequestHandler(cgImage: cg, options: [:])
+        guard (try? handler.perform([request])) != nil else { return 0 }
+        let minW = CGFloat(minFacePx) / CGFloat(max(cg.width, 1))
+        return (request.results ?? []).filter { $0.boundingBox.width >= minW }.count
+    }
+
     /// 检测人脸(带关键点)。VNDetectFaceLandmarksRequest 自带检测步,
     /// 结果同时含外接框与五官区域;一张合照最多取 maxFaces 张脸,防群照拖垮索引。
     /// 三道质量闸门(154 用户实测「打印脸巨簇」的根治:截图小头像/模糊脸/大侧脸

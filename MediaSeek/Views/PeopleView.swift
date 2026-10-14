@@ -65,7 +65,7 @@ struct PeopleView: View {
                 if scanning, let p = progress, p.total > 0 {
                     Section {
                         ProgressView(value: Double(p.done) / Double(p.total))
-                        Text("已处理 \(p.done)/\(p.total) 张脸")
+                        Text("已处理 \(p.done)/\(p.total)")
                             .font(.caption2).foregroundStyle(.secondary)
                     }
                 }
@@ -256,6 +256,50 @@ struct PeopleView: View {
         }
     }
 
+    /// 无闸门人头复查(见 start() 内调用处注释):对每组每张照片取 1024px
+    /// 图跑 VNDetectFaceRectanglesRequest(只数人头,不走嵌入闸门),
+    /// 检出人脸数 > 主角数的组标记 withOthers。不确定组跳过(它们本来就
+    /// 是没识别的)。返回与 groups 等长的标记数组
+    private static func presenceCheck(_ groups: [ComboGroup], photo: PhotoLibraryService,
+                                      assets: [String: PHAsset],
+                                      progress: @escaping (Int, Int) -> Void) async -> [Bool] {
+        var maxFaces = Array(repeating: 0, count: groups.count)
+        let items: [(gi: Int, ref: String)] = groups.enumerated().flatMap { gi, g in
+            g.members.isEmpty ? [] : g.refs.map { (gi, $0) }
+        }
+        let total = items.count
+        progress(0, total)
+        var done = 0
+        var idx = 0
+        func check(_ it: (gi: Int, ref: String)) async -> (Int, Int) {
+            guard let a = assets[it.ref],
+                  let img = try? await photo.image(for: a, maxPixel: 1024) else { return (it.gi, 0) }
+            return (it.gi, FaceKit.countFaces(cg: img))
+        }
+        await withTaskGroup(of: (Int, Int).self) { group in
+            let maxConcurrent = 4
+            while idx < min(maxConcurrent, items.count) {
+                let it = items[idx]; idx += 1
+                group.addTask { await check(it) }
+            }
+            while !group.isEmpty {
+                if let (gi, faces) = await group.next() {
+                    done += 1
+                    maxFaces[gi] = max(maxFaces[gi], faces)
+                    if done % 10 == 0 || done == total { progress(done, total) }
+                }
+                if Task.isCancelled { break }
+                if idx < items.count {
+                    let it = items[idx]; idx += 1
+                    group.addTask { await check(it) }
+                }
+            }
+        }
+        return groups.indices.map { i in
+            !groups[i].members.isEmpty && maxFaces[i] > groups[i].members.count
+        }
+    }
+
     private func start() {
         guard !scanning else { return }
         // 守卫:人脸模型换了但脸数据还没按新模型重嵌——此时聚类的是旧模型向量,
@@ -372,6 +416,22 @@ struct PeopleView: View {
                                                 refs: alive, scores: scores, withOthers: o.withOthers))
                 }
                 let unknownAlive = outGroups.first { $0.members.isEmpty }?.refs.count ?? 0
+
+                // 合影补检:入库闸门(小脸/质量/姿态)会把合影里第二个人的脸
+                // 滤在库外——库里只剩主角 = 单人组混进合影(156 用户实测杨如组
+                // 多张与程玉婷合影)。对每组照片做一次无闸门人头计数复查:
+                // 检出人脸数 > 主角数 → 「与其他人」。检测毫秒级,1024px 取图
+                let photo = app.photoLib
+                let flagged = await Self.presenceCheck(
+                    outGroups, photo: photo, assets: fetched) { done, total in
+                    Task { @MainActor in progress = (done, total) }
+                }
+                outGroups = outGroups.enumerated().map { i, g in
+                    var g = g
+                    g.withOthers = g.withOthers || (flagged[i] == true)
+                    return g
+                }
+                await MainActor.run { progress = nil }
 
                 await MainActor.run {
                     scanning = false
