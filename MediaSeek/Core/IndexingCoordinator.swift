@@ -190,6 +190,7 @@ final class IndexingCoordinator: ObservableObject {
             // 全量重建 = 给失败黑名单一次重试机会(iCloud 重新下载/网络恢复后)
             UserDefaults.standard.removeObject(forKey: "vidAssetFail")
             UserDefaults.standard.removeObject(forKey: "vidAssetFailCnt")
+            UserDefaults.standard.removeObject(forKey: "vidNoLabel")
             // 语音转写:只清失败记账,不清 speechDone(已转写文本独立有效,
             // 全量重建把几小时转写重跑一遍纯属浪费)
             UserDefaults.standard.removeObject(forKey: "speechFail")
@@ -234,9 +235,14 @@ final class IndexingCoordinator: ObservableObject {
             }
             // 帧标签自愈:有帧向量但缺标签行的视频原位重处理一次
             // (标签是视频侧唯一可靠召回通道,2026-10-11 马尔代夫抖音噪声实锤后补)
-            if let frameStats = try? store.videoFrameStats(), frameStats.videos > 0,
+            // ⚠️ vidNoLabel 里的跳过:整部视频所有帧 Vision 分类置信度都 <0.3
+            // (暗光/抽象内容)的视频永远写不出标签行,不跳过=每轮自愈无限重跑
+            // (155 用户实测「永远有 6 个视频一直可以索引」的根因之一)
+            if let frameStats = try? store.videoFrameStats(), stats.videos > 0,
                let labelRefs = try? store.refKeys(kinds: [.videoFrameLabel]) {
-                for key in frameStats.perVideo.keys where !labelRefs.contains(key) {
+                let noLabel = Set(UserDefaults.standard.stringArray(forKey: "vidNoLabel") ?? [])
+                for key in frameStats.perVideo.keys
+                where !labelRefs.contains(key) && !noLabel.contains(key) {
                     known.remove(key)
                 }
             }
@@ -591,12 +597,17 @@ final class IndexingCoordinator: ObservableObject {
                 markVideoAssetFail(refKey)
                 return
             }
-            try await Task.detached(priority: .utility) {
+            // 闭包返回 (抽样帧数, 入库帧行数):0 帧的失败记账要在 detached 外做
+            // (闭包内不能碰实例状态)。155 用户实测「永远有 6 个视频一直可以索引」
+            // 根因之一 = 抽帧 0 帧「不记下次重试」= 坏视频每轮同步无限空转
+            let outcome: (sampled: Int, rows: Int) =
+                try await Task.detached(priority: .utility) { () -> (Int, Int) in
                 // 先清旧帧再采新帧:重索引(如抽帧数变更)后不残留旧帧行
                 try? store.removeFrames(refKey: asset.localIdentifier)
                 // 2048px 抽帧(帧 OCR 需要照片同级的分辨率),嵌入/标签/颜色用 320 降采样
                 let frames = try await FrameSampler.sample(asset: avAsset, count: frameCount, maxPixel: 2048)
                 var rows = 0
+                var labelRows = 0
                 var ocrParts: [String] = []
                 for (i, frame) in frames.enumerated() {
                     // 近全黑帧不入索引:黑屏录音类视频没有视觉内容,入库后只会被
@@ -618,6 +629,7 @@ final class IndexingCoordinator: ObservableObject {
                         try store.upsert(kind: .videoFrameLabel, refKey: asset.localIdentifier,
                                          frameIndex: i, space: gemma.space, vector: lvec,
                                          title: labels, date: asset.creationDate)
+                        labelRows += 1
                     }
                     // 帧OCR(与照片同管线):视频画面里的文字可被 文字: 命中
                     if let t = Self.recognizeText(in: frame) {
@@ -629,24 +641,41 @@ final class IndexingCoordinator: ObservableObject {
                                   text: String(ocrParts.joined(separator: "\n").prefix(12_000)))
                 // 记账:≥1 帧入库记下当时的抽帧数(「抽帧数变更」判断的唯一依据,
                 // 直接比行数会因黑帧跳过而无限重跑);采到帧但全黑(0 行)拉黑名单,
-                // 同步直接跳过;抽帧失败(0 帧)不记,下次同步重试
-                if !frames.isEmpty {
-                    if rows > 0 {
-                        var cfg = (UserDefaults.standard.dictionary(forKey: "vidFrameCfg") as? [String: Int]) ?? [:]
-                        cfg[asset.localIdentifier] = frameCount
-                        UserDefaults.standard.set(cfg, forKey: "vidFrameCfg")
-                        // 成功落库清失败计数(此前几次失败可能是网络/时机问题)
-                        var cnt = (UserDefaults.standard.dictionary(forKey: "vidAssetFailCnt") as? [String: Int]) ?? [:]
-                        if cnt.removeValue(forKey: asset.localIdentifier) != nil {
-                            UserDefaults.standard.set(cnt, forKey: "vidAssetFailCnt")
-                        }
-                    } else {
-                        var set = Set(UserDefaults.standard.stringArray(forKey: "vidAllBlack") ?? [])
-                        set.insert(asset.localIdentifier)
-                        UserDefaults.standard.set(Array(set), forKey: "vidAllBlack")
+                // 同步直接跳过
+                if !frames.isEmpty, rows > 0 {
+                    var cfg = (UserDefaults.standard.dictionary(forKey: "vidFrameCfg") as? [String: Int]) ?? [:]
+                    cfg[asset.localIdentifier] = frameCount
+                    UserDefaults.standard.set(cfg, forKey: "vidFrameCfg")
+                    // 成功落库清失败计数(此前几次失败可能是网络/时机问题)
+                    var cnt = (UserDefaults.standard.dictionary(forKey: "vidAssetFailCnt") as? [String: Int]) ?? [:]
+                    if cnt.removeValue(forKey: asset.localIdentifier) != nil {
+                        UserDefaults.standard.set(cnt, forKey: "vidAssetFailCnt")
                     }
+                    // 标签记账:整部视频所有帧 Vision 分类都给不出标签(暗光/抽象
+                    // 内容,置信度全 <0.3)→ 记 vidNoLabel,帧标签自愈跳过它——
+                    // 否则「有帧无标签行」每轮自愈重处理,永远跑不完(6 视频根因
+                    // 之二)。gemma 未装时不记:那不是视频的错,装上后重处理补
+                    var noLabel = Set(UserDefaults.standard.stringArray(forKey: "vidNoLabel") ?? [])
+                    if gemma != nil, labelRows == 0 {
+                        noLabel.insert(asset.localIdentifier)
+                    } else {
+                        noLabel.remove(asset.localIdentifier)
+                    }
+                    UserDefaults.standard.set(Array(noLabel), forKey: "vidNoLabel")
+                } else if !frames.isEmpty {
+                    var set = Set(UserDefaults.standard.stringArray(forKey: "vidAllBlack") ?? [])
+                    set.insert(asset.localIdentifier)
+                    UserDefaults.standard.set(Array(set), forKey: "vidAllBlack")
                 }
+                return (frames.count, rows)
             }.value
+            if outcome.sampled == 0 {
+                // 抽帧 0 帧(损坏/特殊格式/超短视频):计入失败,3 次拉黑停转,
+                // 错误可见——不再走「下次重试」的无限空转
+                errors.set("视频抽帧失败(可能损坏或格式特殊):\(asset.localIdentifier)")
+                errorCount += 1
+                markVideoAssetFail(asset.localIdentifier)
+            }
         } catch is CancellationError {
             return   // 用户停止不算错误
         } catch {

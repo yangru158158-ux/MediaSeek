@@ -55,6 +55,7 @@ struct SettingsView: View {
                     UserDefaults.standard.removeObject(forKey: "vidAllBlack")
                     UserDefaults.standard.removeObject(forKey: "vidAssetFail")
                     UserDefaults.standard.removeObject(forKey: "vidAssetFailCnt")
+                    UserDefaults.standard.removeObject(forKey: "vidNoLabel")
                     // 语音转写记账:库清了转写文本也没了,记账必须一起清否则永不重转
                     UserDefaults.standard.removeObject(forKey: "speechDone")
                     UserDefaults.standard.removeObject(forKey: "speechFail")

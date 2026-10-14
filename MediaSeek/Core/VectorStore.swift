@@ -624,6 +624,20 @@ final class VectorStore {
         sqlite3_step(stmt)
     } }
 
+    /// 批量删除一组照片上的某个标签(人物重命名=覆盖:先删旧名再写新名,
+    /// 否则一个人身上累积两个名字、搜谁都命中,155 用户点名要求覆盖语义)
+    func deleteUserTag(_ tag: String, refs: [String]) throws { try serialized {
+        guard !refs.isEmpty else { return }
+        let marks = String(repeating: "?,", count: refs.count)
+        let stmt = try prepare("DELETE FROM items WHERE kind = 'userTag' AND title = ? AND ref_key IN (\(marks.dropLast()))")
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, tag, -1, Self.transient)
+        for (i, ref) in refs.enumerated() {
+            sqlite3_bind_text(stmt, Int32(i + 2), ref, -1, Self.transient)
+        }
+        sqlite3_step(stmt)
+    } }
+
     /// 清空全部人名标签(人物归组「取消命名」用):标签行连向量一起删。
     /// 聚类只看 face 向量,清标签不影响分组结构,组名回到「未命名」
     func deleteAllUserTags() throws { try serialized {

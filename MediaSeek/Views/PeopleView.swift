@@ -14,6 +14,9 @@ struct ComboGroup: Identifiable {
     let members: [Int]        // 主角人物簇 id;空 = 全是路人/未识别脸
     let refs: [String]
     let scores: [Float]       // 每张照片在其主角簇内的最高相似度
+    /// 照片里还有未识别为「人物」的其他人脸(合影/同行照):单人组只放真单人照,
+    /// 这类照片归「某某 与其他人」桶(153/155 用户三次点名合影不能混进单人组)
+    var withOthers: Bool = false
 }
 
 struct PeopleView: View {
@@ -135,7 +138,7 @@ struct PeopleView: View {
             } label: {
                 Label("清除全部人名标签", systemImage: "tag.slash")
             }
-            Text("精确档:入库即过滤——截图、低质量脸、大侧脸一律不参与(苹果官方质量分把关);每张脸都必须与「平均脸」核验达标才归属,拿不准的一律进「不确定人物」。组内点「排除」可手动移除错误照片。命名后搜索名字即命中。")
+            Text("精确档:入库即过滤——截图、低质量脸、大侧脸一律不参与(苹果官方质量分把关);每张脸都必须与「平均脸」核验达标才归属,拿不准的一律进「不确定人物」;照片里还有未识别的人(合影/同行)归「某某 与其他人」,单人组只放真单人照。重新命名会覆盖旧名。组内点「排除」可手动移除错误照片,命名后搜索名字即命中。")
                 .font(.caption2).foregroundStyle(.secondary)
         }
     }
@@ -184,7 +187,8 @@ struct PeopleView: View {
     private func groupTitle(_ g: ComboGroup) -> String {
         guard !g.members.isEmpty else { return "不确定人物" }
         let parts = g.members.map(personDisplay)
-        return parts.count == 1 ? parts[0] : parts.joined(separator: " × ")
+        let base = parts.count == 1 ? parts[0] : parts.joined(separator: " × ")
+        return g.withOthers ? "\(base) 与其他人" : base
     }
 
     private func row(_ g: ComboGroup) -> some View {
@@ -300,28 +304,41 @@ struct PeopleView: View {
                 for (ci, best) in clusterBest { clusterRefSets[ci] = Set(best.keys) }
                 // ② 谁是「人物」:簇覆盖 ≥3 张不同照片;更小簇是一次性路人/误检脸
                 let persons = Set(clusterRefSets.filter { $0.value.count >= personMinPhotos }.keys)
-                // ③ 照片按主角集合精确归组:属于且只属于「主角是哪几个人」对应组
+                // ③ 照片按主角集合精确归组:属于且只属于「主角是哪几个人」对应组。
+                // 合影判定:照片的人脸总数(blocked 已排除)减去「已达标人物」的脸数,
+                // 差 ≥1 = 还有未识别的人(同行者/未达标簇/被核验移出的脸)——
+                // 真单人照进单人组,合影进「主角 与其他人」桶;镜像/海报同人双脸
+                // (两张脸同簇)不会被误判为「有他人」
+                var faceCount: [String: Int] = [:]
+                for r in data.refs { faceCount[r, default: 0] += 1 }
+                var refPersonFaces: [String: Int] = [:]
+                for (ci, g) in scored.enumerated() where persons.contains(ci) {
+                    for m in g { refPersonFaces[data.refs[m.index], default: 0] += 1 }
+                }
                 var comboMap: [Set<Int>: (refs: [String], scores: [Float])] = [:]
+                var othersMap: [Set<Int>: (refs: [String], scores: [Float])] = [:]
                 var unknownRefs: [String] = []
                 var unknownScores: [Float] = []
                 for (r, cs) in refClusters {
                     let key = cs.intersection(persons)
                     let best = cs.compactMap { clusterBest[$0]?[r] }.max() ?? Float(1)
+                    let hasExtra = (faceCount[r] ?? 0) - (refPersonFaces[r] ?? 0) >= 1
                     if key.isEmpty {
                         unknownRefs.append(r); unknownScores.append(best)
                     } else {
-                        var entry = comboMap[key] ?? ([], [])
+                        var entry = (hasExtra ? othersMap[key] : comboMap[key]) ?? ([], [])
                         entry.refs.append(r)
                         entry.scores.append(best)
-                        comboMap[key] = entry
+                        if hasExtra { othersMap[key] = entry } else { comboMap[key] = entry }
                     }
                 }
-                var ordered: [(members: [Int], refs: [String], scores: [Float])] =
-                    comboMap.map { (Array($0.key).sorted(), $0.value.refs, $0.value.scores) }
+                var ordered: [(members: [Int], refs: [String], scores: [Float], withOthers: Bool)] =
+                    comboMap.map { (Array($0.key).sorted(), $0.value.refs, $0.value.scores, false) }
+                    + othersMap.map { (Array($0.key).sorted(), $0.value.refs, $0.value.scores, true) }
                 // 不确定组先入列再排序:它也是普通一组,按照片数排(153 排序 bug 教训:
                 // 排序后追加会让 44 张的不确定组落在 10 张组后面)
                 if !unknownRefs.isEmpty {
-                    ordered.append(([], unknownRefs, unknownScores))
+                    ordered.append(([], unknownRefs, unknownScores, false))
                 }
                 // 按组内照片数降序(用户指定)
                 ordered.sort { $0.refs.count > $1.refs.count }
@@ -352,7 +369,7 @@ struct PeopleView: View {
                     let scores = o.scores.enumerated()
                         .filter { aliveSet.contains(o.refs[$0.offset]) }.map(\.element)
                     outGroups.append(ComboGroup(id: i, members: o.members,
-                                                refs: alive, scores: scores))
+                                                refs: alive, scores: scores, withOthers: o.withOthers))
                 }
                 let unknownAlive = outGroups.first { $0.members.isEmpty }?.refs.count ?? 0
 
@@ -590,15 +607,24 @@ struct ClusterDetailView: View {
         guard !name.isEmpty else { return }
         applying = true
         let refs = personRefs[mi] ?? []
+        // 重命名=覆盖:先删该人身上的旧名标签再写新名,不能累积两个名字
+        // (155 用户点名:第二次命名要覆盖第一次)
+        let oldName = personNames[mi] ?? ""
+        let cleanup = (!oldName.isEmpty && oldName != name) ? oldName : nil
         Task {
             do {
+                if let cleanup {
+                    try app.store.deleteUserTag(cleanup, refs: refs)
+                }
                 // 批量通道:向量只嵌一次(此前逐张推理,命名两千张要几十分钟)
                 try await app.addUserTag(name, toRefs: refs)
                 await MainActor.run {
                     applying = false
                     personNames[mi] = name
                     namingMember = nil
-                    app.notify("已给 \(refs.count) 张照片打上「\(name)」标签,搜索「\(name)」即可找到")
+                    app.notify(cleanup != nil
+                               ? "已把「\(cleanup)」改名为「\(name)」(\(refs.count) 张照片)"
+                               : "已给 \(refs.count) 张照片打上「\(name)」标签,搜索「\(name)」即可找到")
                 }
             } catch {
                 await MainActor.run { applying = false; app.fail(error) }
