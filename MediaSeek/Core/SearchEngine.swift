@@ -623,17 +623,50 @@ final class SearchEngine {
                 // 天生弱(0.05-0.08 过不了地板),and:身份证 正面 恒空。每词并入
                 // OCR(含证件别名)命中再按连接词交并;同照片双命中时语义条目
                 // 优先(带真实分),OCR 只补缺口
-                let seen = Set(hits.map(\.refKey))
+                var seen = Set(hits.map(\.refKey))
                 for (rank, r) in ocrUnionHits(t, scope: scope, within: within, topK: topK)
                     .enumerated() where !seen.contains(r.refKey) {
+                    seen.insert(r.refKey)
                     hits.append(SearchHit(kind: r.kind, refKey: r.refKey, frameIndex: 0,
                                           space: "ocr", title: "含「\(t)」文字", date: nil,
                                           score: Float(1.0 / Double(rank + 1)), color: nil))
                 }
+                // 人名标签并集(第十七批):裸搜「杨如」靠用户标签(人物归组命名)
+                // 命中他的照片,and:/or: 前缀此前丢掉这条通道——中文人名不在
+                // 词典、语义通道对人名无效、核酸截图之外的照片又不含这两个字,
+                // and:杨如 男 只能出文字截图,他本人的照片一张进不了交集
+                for r in ((try? store.searchUserTags(query: t)) ?? [])
+                    .filter({ within?.contains($0) ?? true }) where !seen.contains(r) {
+                    seen.insert(r)
+                    hits.append(SearchHit(kind: .photo, refKey: r, frameIndex: 0,
+                                          space: "userTag", title: nil, date: nil,
+                                          score: 0.9, color: nil))
+                }
                 perTerm.append(hits)
             }
         }
-        let combined = combine(perTerm, connector: spec.connector)
+        var combined = combine(perTerm, connector: spec.connector)
+        // AND 模式逐照片合成标题(第十七批):combine 去重只保留第一个词的命中
+        // 条目,and:杨如 男 的卡片全部显示「含「杨如」文字」——第二个词的
+        // 命中只字不提,用户看不出交集凭什么成立(照片明明同时含「男」)。
+        // 逐照片列出每词的命中方式(文字/标签/语义)
+        if spec.connector == .and, terms.count > 1 {
+            var info: [String: [String]] = [:]
+            for (t, list) in zip(terms, perTerm) {
+                for h in list {
+                    let way = h.space == "ocr" ? "文字"
+                        : (h.space == "userTag" ? "标签" : "语义")
+                    info[h.refKey, default: []].append("\(t)·\(way)")
+                }
+            }
+            combined = combined.map { h in
+                guard let parts = info[h.refKey], parts.count > 1 else { return h }
+                return SearchHit(kind: h.kind, refKey: h.refKey, frameIndex: h.frameIndex,
+                                 space: h.space,
+                                 title: "同时命中:" + parts.joined(separator: " "),
+                                 date: h.date, score: h.score, color: h.color)
+            }
+        }
         let textIDs = Set(combined.filter { $0.space == "ocr" }
             .map { "\($0.kind.rawValue)-\($0.refKey)" })
         return (resolve(combined), textIDs)
