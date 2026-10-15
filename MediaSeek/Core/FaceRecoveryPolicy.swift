@@ -172,6 +172,19 @@ enum FaceRecoveryPolicy {
         pairCount >= minPair && best >= minBest && (best - second) >= minLead
     }
 
+    /// J 破平局(第十四批):领先不足线的二义脸,主角历史同框压倒性偏向 best
+    /// 簇才转正——176 实测 0.23>0.22 的糊脸在分数上分不出杨如与无关候选,
+    /// 但主角×杨如同框数百张、主角×无关人接近 0。minPair 稳定性与 0.18 地板
+    /// 和 J 主线一致;同框 ≥20(Y 通道同线)且 best 簇同框 ≥ 第二簇 4 倍
+    /// (压倒性优势——两个都常同框的伙伴打平时仍诚实留 U,不赌)。
+    static func aggregatedTieBreakRecovered(pairCount: Int, best: Float,
+                                            coBest: Int, coSecond: Int,
+                                            minPair: Int = 6, minBest: Float = 0.18,
+                                            minCo: Int = 20, dominance: Int = 4) -> Bool {
+        pairCount >= minPair && best >= minBest
+            && coBest >= minCo && coSecond * dominance <= coBest
+    }
+
     /// 从裁决 detail 解析逐脸段(第十批 J 通道二轮统计用):
     /// 「c9@0.27>c6@0.20U」→(ci:9, best:0.27, secondCi:6, second:0.20, tag:"U")。
     /// 与 work() 的 detailParts 生成端共同约定格式;非脸段(诊断前缀/

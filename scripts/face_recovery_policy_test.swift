@@ -272,6 +272,32 @@ struct FaceRecoveryPolicyTest {
             !FaceRecoveryPolicy.aggregatedRecovered(pairCount: 30, best: 0.20, second: 0.19),
             "领先 0.01 的二义脸不赌(172 实测 c1@0.20>c2@0.19)"
         )
+        // —— J 破平局(第十四批):二义脸借主角历史同框压倒性偏向转正 ——
+        expect(
+            FaceRecoveryPolicy.aggregatedTieBreakRecovered(
+                pairCount: 6, best: 0.23, coBest: 300, coSecond: 0),
+            "破平局:0.23>0.22 二义脸+同框 300 vs 0 压倒性偏向 best → 转正(176 实测杨如样本)"
+        )
+        expect(
+            !FaceRecoveryPolicy.aggregatedTieBreakRecovered(
+                pairCount: 6, best: 0.23, coBest: 10, coSecond: 0),
+            "破平局要求同框 ≥20(Y 通道同线):10 次历史同框不够不转正"
+        )
+        expect(
+            !FaceRecoveryPolicy.aggregatedTieBreakRecovered(
+                pairCount: 6, best: 0.23, coBest: 300, coSecond: 280),
+            "两个都常同框的伙伴打平(300 vs 280)不赌,诚实留 U"
+        )
+        expect(
+            !FaceRecoveryPolicy.aggregatedTieBreakRecovered(
+                pairCount: 5, best: 0.23, coBest: 300, coSecond: 0),
+            "破平局仍要求 ≥6 次稳定观测(minPair 与 J 主线一致)"
+        )
+        expect(
+            !FaceRecoveryPolicy.aggregatedTieBreakRecovered(
+                pairCount: 6, best: 0.17, coBest: 300, coSecond: 0),
+            "破平局仍要求 0.18 地板(纯噪声脸历史同框再强也不转)"
+        )
         // —— parseFaceSegments:裁决 detail 的结构化解析(二轮统计载体) ——
         let segs = FaceRecoveryPolicy.parseFaceSegments(
             "≥30px rect检出 2/关键点 1/并集 2,≥30% 主角 2脸; c1@0.13>c2@0.10U | c0@0.57>c7@0.14S")
@@ -339,7 +365,7 @@ struct FaceRecoveryPolicyTest {
             "种子与分配确定性:同输入两次结果一致(缓存簇 ID 稳定的前提)"
         )
 
-        print("PASS: 同图双脸补认策略的 53 项确定性回归断言全部通过")
+        print("PASS: 同图双脸补认策略的 58 项确定性回归断言全部通过")
     }
 
     private static func vetoes(_ matches: [FaceRecoveryPolicy.Match]) -> Set<Int> {

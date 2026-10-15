@@ -275,7 +275,7 @@ struct PeoplePanel: View {
             ClusterDetailView(members: g.members,
                               refs: g.refs, scores: g.scores,
                               personNames: $m.personNames, personRefs: m.personRefs,
-                              title: groupTitle(g),
+                              title: groupTitle(g), withOthers: g.withOthers,
                               reasons: m.reasons,
                               details: m.details,
                               onChanged: {
@@ -659,8 +659,17 @@ struct PeoplePanel: View {
             for f in FaceRecoveryPolicy.parseFaceSegments(v.detail)
             where f.tag == "U" && f.ci >= 0 {
                 let count = key.reduce(0) { max($0, pairCount[$1]?[f.ci] ?? 0) }
+                // 破平局(第十四批):0.23>0.22 的二义脸在分数上分不出两个候选,
+                // 借主角的历史同框破局——杨如数百张 vs 无关候选接近 0。两个都
+                // 常同框的伙伴打平时(如 300 vs 280)不赌,诚实留 U
+                let coBest = key.reduce(0) { max($0, coOccurrence[$1]?[f.ci] ?? 0) }
+                let coSecond = f.secondCi >= 0
+                    ? key.reduce(0) { max($0, coOccurrence[$1]?[f.secondCi] ?? 0) } : 0
                 guard FaceRecoveryPolicy.aggregatedRecovered(
-                    pairCount: count, best: f.best, second: f.second) else { continue }
+                    pairCount: count, best: f.best, second: f.second)
+                        || FaceRecoveryPolicy.aggregatedTieBreakRecovered(
+                            pairCount: count, best: f.best, coBest: coBest, coSecond: coSecond)
+                    else { continue }
                 matched.insert(f.ci)
                 unexplained -= 1
                 detail = detail.replacingOccurrences(
@@ -681,11 +690,12 @@ struct PeoplePanel: View {
     /// 人名按当前标签重推——重命名/清标签无需重扫
     private func hydrateIfNeeded() {
         guard m.groups.isEmpty, !m.scanning else { return }
-        // 算法盐 a13:归组/补认逻辑变更必须升盐——旧快照与补认缓存不能复活旧裁决。
+        // 算法盐 a14:归组/补认逻辑变更必须升盐——旧快照与补认缓存不能复活旧裁决。
         // (人脸行/排除/模型)不含算法版本,163 的旧判决经快照水化+缓存命中在
-        // 164 原样复活,用户看到的就是"修了没变化"
+        // 164 原样复活,用户看到的就是"修了没变化"。第十四批:J 破平局(同框
+        // 先验裁决二义脸)改变了 U→J 的转正集合,旧快照/缓存必须作废重判
         let ver = app.store.peopleFingerprint(
-            extra: "a13-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
+            extra: "a14-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
         guard let json = app.store.loadPeopleResults(ver: ver),
               let data = json.data(using: .utf8),
               let snap = try? JSONDecoder().decode(PeopleSnapshot.self, from: data) else {
@@ -753,9 +763,9 @@ struct PeoplePanel: View {
         let faceModel = app.models.face
         let model = app.people   // 结果写共享模型:面板关了再开不丢(160 教训)
         // 指纹:人脸数据/排除集合/模型任一变化,快照与补认缓存自动作废;
-        // a13=算法盐,归组逻辑变更必须升盐(与 hydrateIfNeeded 同串)
+        // a14=算法盐,归组逻辑变更必须升盐(与 hydrateIfNeeded 同串)
         let ver = store.peopleFingerprint(
-            extra: "a13-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
+            extra: "a14-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
         // 「扫描中」记账 + 屏幕常亮:退后台被系统结束进程后,重开面板能明确
         // 告知「上次未完成」;常亮防前台锁屏挂起
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "peopleScanRunning")
@@ -1009,6 +1019,10 @@ struct ClusterDetailView: View {
     @Binding var personNames: [Int: String]
     let personRefs: [Int: [String]]
     let title: String
+    /// 「主角 与其他人」组(members 也恰好是 1 个主角,但照片里有认不出的
+    /// 同行脸):单人组诊断角标不得在此组显示——第十四批实测「见N脸·均判
+    /// 本人」挂满与其他人组且文案失真(组内照片必有 U 脸,并非"全判本人")
+    var withOthers: Bool = false
     /// 每张照片的归类理由(单人组标注「为什么算单人」);空=旧快照无数据
     var reasons: [String: (reason: Int, note: Int)] = [:]
     /// 逐脸匹配明细(长按照片弹诊断);空=旧快照/缓存无数据
@@ -1197,10 +1211,12 @@ struct ClusterDetailView: View {
             }
         }
         .overlay(alignment: .topTrailing) {
-            // 单人组标注「为什么算单人」(165 诊断,166 补盲区):reason≠0 是异常
+            // 纯单人组标注「为什么算单人」(165 诊断,166 补盲区):reason≠0 是异常
             // 路径;reason=0 且检出多张脸全判成本人——正常只该发生在镜像/海报/
-            // 本人双脸,若用户肉眼看到别人就该长按照片看逐脸明细
-            if members.count == 1, let r = reasons[ref] {
+            // 本人双脸,若用户肉眼看到别人就该长按照片看逐脸明细。
+            // 第十四批:限定纯单人组——「主角 与其他人」组的主角也是 1 个,
+            // 不排除会把角标误挂到必含 U 脸的合影上,"均判本人"文案失真
+            if members.count == 1, !withOthers, let r = reasons[ref] {
                 if r.reason != 0 {
                     Text(r.reason == 1 ? String(format: "弱分回退·%d%%", r.note)
                          : r.reason == 2 ? "iCloud未取到"
