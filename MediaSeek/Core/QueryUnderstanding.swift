@@ -159,6 +159,7 @@ enum QueryUnderstanding {
         ("花", "flower"), ("玫瑰", "rose"), ("树", "tree"), ("森林", "forest"), ("草", "grass"),
         ("叶子", "leaf"), ("山", "mountain"), ("雪", "snow"), ("海", "sea"), ("海滩", "beach"),
         ("湖", "lake"), ("河", "river"), ("瀑布", "waterfall"), ("天空", "sky"),
+        ("沙滩", "beach"), ("海边", "beach seaside"),   // 口语变体:只有「海滩」在册,搜「沙滩」语义通道空转(第十九批)
         ("日出", "sunrise"), ("日落", "sunset"), ("月亮", "moon"), ("星星", "stars"),
         ("云", "clouds"), ("彩虹", "rainbow"), ("田野", "field"), ("草地", "lawn"),
         // 城市/场所

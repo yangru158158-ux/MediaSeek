@@ -45,7 +45,9 @@ enum QueryUnderstandingTest {
                "「地图」词典命中 map(第十五批语义通道恢复的前提)")
         expect(QueryUnderstanding.english(for: "地") == nil,
                "单字「地」不是词典条目,裸「地」查不到英文(事故时的语义空根因)")
+        expect(QueryUnderstanding.english(for: "沙滩")?.contains("beach") == true,
+               "口语变体「沙滩」入册(第十九批:此前只有「海滩」,搜沙滩语义空转)")
 
-        print("PASS: 查询理解 13 项确定性回归断言全部通过")
+        print("PASS: 查询理解 14 项确定性回归断言全部通过")
     }
 }
