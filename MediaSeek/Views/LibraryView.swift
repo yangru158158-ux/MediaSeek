@@ -35,8 +35,8 @@ struct LibraryView: View {
                 permissionSection
                 statsSection
                 indexingSection
-                dedupSection
                 peopleSection
+                dedupSection
                 importSection
                 if !importedFiles.isEmpty {
                     importedSection
