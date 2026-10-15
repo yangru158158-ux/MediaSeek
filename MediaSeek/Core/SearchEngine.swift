@@ -296,10 +296,10 @@ final class SearchEngine {
                                placeLabel: String?, among: Set<String>? = nil) async throws -> SearchOutcome {
         // among = 结果内基数(第一次搜索的结果集合):非 nil 时所有通道只在此集合内
         // 取命中,管线其余部分(通道权重/RRF 排名/三维度切分)与全局搜索完全一致
-        // 多词查询:「2026 电脑屏幕」→ 含数字的词走 OCR 文字匹配,
-        // 其余词走视觉/标签;「或」语义:照片满足任一条件(像/含字)即显示
+        // 多词查询:「2026 电脑屏幕」→ 每个词独立走自己的通道(数字词天然
+        // 只会命中文字;中文词 视觉/标签/OCR 三路都试),「或」语义:照片
+        // 满足任一条件(像/含字)即显示(第二十一批恢复逐词,见 OCR 层注释)
         let terms = Self.splitTerms(query)
-        let textTerms = terms.filter(Self.containsDigit)
         let visualTerms = terms.filter { !Self.containsDigit($0) }
         let concept = visualTerms.isEmpty ? query : visualTerms.joined(separator: " ")
 
@@ -418,8 +418,13 @@ final class SearchEngine {
 
         // 用户标签通道:中文子串精确匹配(文字: 排他,不参与)
         if spec.channel != .text, imageKinds.contains(.photo) {
-            let tagRefs = ((try? store.searchUserTags(query: concept)) ?? [])
-                .filter { among?.contains($0) ?? true }
+            // 第二十一批:多词按「或」逐词命中标签——整串「杨如 男」永远匹配
+            // 不到标签「杨如」,他本人的照片在裸搜多词下一张出不来
+            var tagRefs = Set<String>()
+            for t in (terms.isEmpty ? [concept] : terms) {
+                for r in ((try? store.searchUserTags(query: t)) ?? [])
+                where among?.contains(r) ?? true { tagRefs.insert(r) }
+            }
             if !tagRefs.isEmpty {
                 channels.append((1.6, tagRefs.map {
                     SearchHit(kind: .photo, refKey: $0, frameIndex: 0,
@@ -490,7 +495,12 @@ final class SearchEngine {
             }
             var seen = Set<String>()
             var rank = 0
-            for t in (textTerms.isEmpty ? [query] : textTerms) where !t.isEmpty {
+            // 第二十一批:恢复「每词独立命中」(build 32 的「或」语义在 CI 88
+            // 重构时窄化成了「只有含数字的词走 OCR」)——纯中文多词(杨如 男)
+            // 整串带空格当子串查,健康码印的是「杨如，男」永远 miss,用户实测
+            // 裸搜搜不出、and: 反而搜得出。逐词并集,与 and:/or: 通道同构
+            let ocrTerms = terms.isEmpty ? [query] : terms
+            for t in ocrTerms where !t.isEmpty {
                 // 证件类 OCR 别名:人像面不印证件名(身份证正面只有「公民身份号码」等字段),
                 // 只搜证件名会漏掉全部正面照——补字段级别名并集保召回
                 let variants = [t] + (QueryUnderstanding.ocrAliases[t] ?? [])
@@ -507,8 +517,9 @@ final class SearchEngine {
                 }
 
                 // 长中文词整句 LIKE 会因语序漏匹配(搜「医学出生证明」,证书上印的
-                // 是「出生医学证明」)→ 二字滑窗片段 OR,≥2 个片段命中才算,按数排序
-                if textTerms.isEmpty, query.count >= 4 {
+                // 是「出生医学证明」)→ 二字滑窗片段 OR,≥2 个片段命中才算,按数排序。
+                // 第二十一批:限定单词查询——多词已逐词独立命中,整串滑窗只会造噪声
+                if terms.count <= 1, query.count >= 4 {
                     var grams: [String] = []
                     var seenGram = Set<String>()
                     let chars = Array(query)
