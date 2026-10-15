@@ -1041,6 +1041,9 @@ struct ClusterDetailView: View {
     @State private var debugText = ""
     @State private var selecting = false         // 排除模式:点选照片移出本组
     @State private var selected: Set<String> = []
+    // 划选(第二十批):排除模式下横划过一排即批量勾选;竖向移动让给滚动
+    @State private var swipe = SwipeSelectState()
+    @State private var swipeFrames: [String: CGRect] = [:]
     @State private var excluding = false
 
     private let columns = [GridItem(.flexible(), spacing: 6),
@@ -1083,6 +1086,8 @@ struct ClusterDetailView: View {
                              score: scores.indices.contains(i) ? scores[i] : 1)
                     }
                 }
+                .coordinateSpace(name: "peopleGrid")
+                .onPreferenceChange(SwipeCellFramesKey.self) { swipeFrames = $0 }
             }
             .padding(12)
         }
@@ -1183,6 +1188,14 @@ struct ClusterDetailView: View {
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: 8))
+        .swipeSelectable(id: ref, space: "peopleGrid", enabled: selecting,
+                         onSweep: { v in
+                             swipe.handle(v, frames: swipeFrames,
+                                          isSelected: { selected.contains($0) },
+                                          apply: { id, on in
+                                              if on { selected.insert(id) } else { selected.remove(id) }
+                                          })
+                         }, onEnd: { swipe.reset() })
         .overlay(alignment: .topLeading) {
             if selecting {
                 Image(systemName: selected.contains(ref) ? "checkmark.circle.fill" : "circle")

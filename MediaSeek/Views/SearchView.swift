@@ -22,6 +22,9 @@ struct SearchView: View {
     @State private var exporting = false
     @State private var selectionMode = false
     @State private var selected = Set<String>()
+    // 划选(第二十批):横划过一排结果卡即批量勾选;竖向移动让给滚动
+    @State private var swipe = SwipeSelectState()
+    @State private var swipeFrames: [String: CGRect] = [:]
     @State private var refineMode = false
     @State private var refineBaseIDs = Set<String>()  // 拨动「结果内」瞬间锁定的搜索范围(清空输入框/改词不丢)
     @State private var lastRoundCount = 0   // 结果内搜索的上一轮结果数(计数行展示/refine 校验)
@@ -397,6 +400,14 @@ struct SearchView: View {
                             HitCell(hit: hit, selectionMode: selectionMode, isSelected: selected.contains(hit.id))
                         }
                         .buttonStyle(.plain)
+                        .swipeSelectable(id: hit.id, space: "resultGrid", enabled: selectionMode,
+                                         onSweep: { v in
+                                            swipe.handle(v, frames: swipeFrames,
+                                                         isSelected: { selected.contains($0) },
+                                                         apply: { id, on in
+                                                             if on { selected.insert(id) } else { selected.remove(id) }
+                                                         })
+                                         }, onEnd: { swipe.reset() })
                         .opacity(blockedRefs.contains(hit.refKey) ? 0.35 : 1)
                         .overlay(alignment: .topLeading) {
                             if blockedRefs.contains(hit.refKey) {
@@ -424,6 +435,8 @@ struct SearchView: View {
                         }
                     }
                 }
+                .coordinateSpace(name: "resultGrid")
+                .onPreferenceChange(SwipeCellFramesKey.self) { swipeFrames = $0 }
                 .padding(.horizontal)
             }
         }
