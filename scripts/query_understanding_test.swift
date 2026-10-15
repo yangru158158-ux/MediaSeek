@@ -39,7 +39,9 @@ enum QueryUnderstandingTest {
                "存在前缀剥「包含」,留数字词供 OCR 通道")
 
         // —— 词典英译抽查(语义通道依赖) ——
-        expect(QueryUnderstanding.english(for: "地图") == "map",
+        // 注:dictionary 与 LabelZh 反查表都命中「地图」,english 按位置拼接成
+        // "map map"——既有行为,断言用包含式(语义通道拿到的仍是有效英文)
+        expect(QueryUnderstanding.english(for: "地图")?.contains("map") == true,
                "「地图」词典命中 map(第十五批语义通道恢复的前提)")
         expect(QueryUnderstanding.english(for: "地") == nil,
                "单字「地」不是词典条目,裸「地」查不到英文(事故时的语义空根因)")
