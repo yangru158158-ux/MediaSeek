@@ -26,11 +26,22 @@ enum QueryUnderstanding {
             t = String(t.dropFirst(p.count)); break
         }
 
-        // 3) 去载体后缀
+        // 3) 去载体后缀。两重护栏(第十五批:用户实测搜「地图」被砍成「地」,
+        //    OCR 按单字「地」灌入 1,891 张、语义通道拿不到词典条目全空):
+        //    ① 整词恰是词典条目(「地图」→map)——真概念词不做后缀手术;
+        //    ② 裸「图」是高危后缀(地图/拼图/企图/意图都以它结尾),只在剩余
+        //       词干 ≥2 字(美女图→美女)或词干本身是词典单字(猫图→猫)时才剥
         let suffixes = ["的图片", "的照片", "的相片", "的截图", "的影片", "的图",
                         "图片", "照片", "相片", "截图", "影片", "图"]
-        for s in suffixes where t.hasSuffix(s) {
-            t = String(t.dropLast(s.count)); break
+        let exactEntry = dictionary.contains { $0.0 == t }
+        if !exactEntry {
+            for s in suffixes where t.hasSuffix(s) {
+                let stemLen = t.count - s.count
+                if stemLen == 0 { continue }   // 整词即后缀(查询就是「照片」)不动
+                if s == "图", stemLen == 1,
+                   !dictionary.contains(where: { $0.0 == String(t.dropLast()) }) { continue }
+                t = String(t.dropLast(s.count)); break
+            }
         }
 
         // 4) 「有猫」「包含猫」这类存在前缀

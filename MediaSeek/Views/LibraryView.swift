@@ -16,6 +16,11 @@ struct LibraryView: View {
     @State private var previewFile: ImportedFile?
     @State private var fileSelectionMode = false
     @State private var selectedFileIDs: Set<String> = []
+    /// 删除确认弹窗的目标快照:按下「删除」那一刻锁定。弹窗存续期间选择集
+    /// 可能被清空(索引进度触发的刷新/取消选择/上一次删除的收尾),标题与
+    /// 动作都以快照为准——用户实测弹窗开着却显示「删除 0 个导入文件」、
+    /// 按钮按了没反应(guard targets.isEmpty 静默返回)
+    @State private var pendingDeleteIDs: Set<String> = []
     @State private var showFileDeleteDialog = false
     @State private var showDupResults = false
     @State private var showDupScan = false
@@ -71,7 +76,7 @@ struct LibraryView: View {
             .sheet(isPresented: $showPeople) {
                 PeopleView()
             }
-            .confirmationDialog("删除 \(selectedFileIDs.count) 个导入文件", isPresented: $showFileDeleteDialog,
+            .confirmationDialog("删除 \(pendingDeleteIDs.count) 个导入文件", isPresented: $showFileDeleteDialog,
                                 titleVisibility: .visible) {
                 Button("删除记录(保留原文件)", role: .destructive) { deleteSelectedFiles(deleteOriginal: false) }
                 Button("删除记录+原文件(原文件将被移除)", role: .destructive) { deleteSelectedFiles(deleteOriginal: true) }
@@ -179,7 +184,7 @@ struct LibraryView: View {
     /// 批量删除选中的导入文件:记录+全类型向量+OCR 原文;
     /// deleteOriginal=true 时连书签指向的实体文件一并移除
     private func deleteSelectedFiles(deleteOriginal: Bool) {
-        let targets = importedFiles.filter { selectedFileIDs.contains($0.id) }
+        let targets = importedFiles.filter { pendingDeleteIDs.contains($0.id) }
         guard !targets.isEmpty else { return }
         var ok = 0
         var originals = 0
@@ -194,6 +199,7 @@ struct LibraryView: View {
             do { try app.imports.remove(f); ok += 1 } catch { app.fail(error) }
         }
         selectedFileIDs.removeAll()
+        pendingDeleteIDs.removeAll()
         fileSelectionMode = false
         refresh()
         app.notify(deleteOriginal
@@ -289,6 +295,7 @@ struct LibraryView: View {
                             selectedFileIDs.removeAll()
                         }
                         Button("删除(\(selectedFileIDs.count))", role: .destructive) {
+                            pendingDeleteIDs = selectedFileIDs   // 弹窗存续期以快照为准
                             showFileDeleteDialog = true
                         }
                         .disabled(selectedFileIDs.isEmpty)

@@ -1,0 +1,31 @@
+name: Query Understanding Tests
+# 查询清洗回归:core() 的指令/否定/载体后缀清洗出过「地图→地」截肢事故
+# (第十五批:OCR 按单字灌 1,891 张、语义通道词典全空)。纯 Foundation
+# 逻辑,macOS runner 直接编译源文件运行,防清洗规则回归。
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "MediaSeek/Core/QueryUnderstanding.swift"
+      - "scripts/query_understanding_test.swift"
+      - ".github/workflows/query_test.yml"
+  push:
+    branches: [main]
+    paths:
+      - "MediaSeek/Core/QueryUnderstanding.swift"
+      - "scripts/query_understanding_test.swift"
+      - ".github/workflows/query_test.yml"
+
+jobs:
+  test:
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 编译并运行查询清洗回归
+        run: |
+          swiftc -O MediaSeek/Core/QueryUnderstanding.swift \
+            scripts/query_understanding_test.swift -o /tmp/qtest
+          /tmp/qtest

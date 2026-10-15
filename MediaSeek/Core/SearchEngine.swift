@@ -275,9 +275,10 @@ final class SearchEngine {
                                            among: within)
         }
         if spec.channel == .text || spec.connector != .none {
-            return SearchOutcome(hits: try await searchScoped(spec: spec, scope: scope,
-                                   topK: topK, siglip: siglip, within: nil),
-                                 textIDs: [], timeLabel: nil, placeLabel: nil)
+            let scoped = try await searchScoped(spec: spec, scope: scope,
+                                                topK: topK, siglip: siglip, within: within)
+            return SearchOutcome(hits: scoped.hits, textIDs: scoped.textIDs,
+                                 timeLabel: nil, placeLabel: nil)
         }
         return try await runMainSearch(query: query, spec: spec, semanticOnly: semanticOnly,
                                        scope: scope, topK: topK, siglip: siglip,
@@ -566,9 +567,12 @@ final class SearchEngine {
     }
 
 
-    /// 显式语法流程:通道(文字/语义/自动)× 连接词(and/or)自由组合
+    /// 显式语法流程:通道(文字/语义/自动)× 连接词(and/or)自由组合。
+    /// 返回 hits + textIDs(文字维度命中集,第十五批:此前调用方写死空集,
+    /// 「文字:」前缀的全部命中被三维度切换栏归进语义栏——用户实测
+    /// 文字:地图 189 个全挂语义、文字 0)
     private func searchScoped(spec: QuerySpec, scope: SearchScope,
-                              topK: Int, siglip: SigLIPEmbedder?, within: Set<String>? = nil) async throws -> [DisplayHit] {
+                              topK: Int, siglip: SigLIPEmbedder?, within: Set<String>? = nil) async throws -> (hits: [DisplayHit], textIDs: Set<String>) {
         guard scope == .all || scope == .photo else { return [] }   // v1 只作用于照片
         let terms = Self.splitTerms(spec.body)
         guard !terms.isEmpty else { return [] }
@@ -602,7 +606,10 @@ final class SearchEngine {
                               date: nil, score: Float(1.0 / Double(rank + 1)), color: nil)
                 })
             }
-            return resolve(combine(perTerm, connector: spec.connector))
+            let combined = combine(perTerm, connector: spec.connector)
+            let textIDs = Set(combined.filter { $0.space == "ocr" }
+                .map { "\($0.kind.rawValue)-\($0.refKey)" })
+            return (resolve(combined), textIDs)
         }
 
         // 语义/自动通道:数字词→文字,其余词→视觉
@@ -624,7 +631,10 @@ final class SearchEngine {
                 perTerm.append(hits)
             }
         }
-        return resolve(combine(perTerm, connector: spec.connector))
+        let combined = combine(perTerm, connector: spec.connector)
+        let textIDs = Set(combined.filter { $0.space == "ocr" }
+            .map { "\($0.kind.rawValue)-\($0.refKey)" })
+        return (resolve(combined), textIDs)
     }
 
     /// SigLIP2 官方零样本模板("This is a photo of X.")对短语类查询更友好;
