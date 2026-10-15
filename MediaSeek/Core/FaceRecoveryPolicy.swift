@@ -185,6 +185,24 @@ enum FaceRecoveryPolicy {
             && coBest >= minCo && coSecond * dominance <= coBest
     }
 
+    /// 同名簇合并计划(第二十二批):聚类把一个真人撕成多个碎片簇时
+    /// (用户实测程玉婷被撕成 3+:「程玉婷 与其他人」434/25/21 三组并存,
+    /// 「程玉婷 × 未命名」332 张混满单人照——镜像双脸各命中一个碎片),
+    /// 只要多个簇从用户标签推导出同一个人名,就并回代表簇。
+    /// 代表=簇号最小(确定性);返回 碎片簇号 → 代表簇号。
+    static func sameNameMergePlan(clusterNames: [Int: String]) -> [Int: Int] {
+        var byName: [String: [Int]] = [:]
+        for (ci, n) in clusterNames where !n.isEmpty {
+            byName[n, default: []].append(ci)
+        }
+        var out: [Int: Int] = [:]
+        for (_, cis) in byName where cis.count > 1 {
+            guard let rep = cis.min() else { continue }
+            for c in cis where c != rep { out[c] = rep }
+        }
+        return out
+    }
+
     /// 从裁决 detail 解析逐脸段(第十批 J 通道二轮统计用):
     /// 「c9@0.27>c6@0.20U」→(ci:9, best:0.27, secondCi:6, second:0.20, tag:"U")。
     /// 与 work() 的 detailParts 生成端共同约定格式;非脸段(诊断前缀/

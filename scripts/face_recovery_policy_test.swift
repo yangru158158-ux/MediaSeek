@@ -298,6 +298,25 @@ struct FaceRecoveryPolicyTest {
                 pairCount: 6, best: 0.17, coBest: 300, coSecond: 0),
             "破平局仍要求 0.18 地板(纯噪声脸历史同框再强也不转)"
         )
+        // —— 同名簇合并(第二十二批):聚类撕人后按用户标签同名并回代表簇 ——
+        expect(
+            FaceRecoveryPolicy.sameNameMergePlan(clusterNames: [0: "程玉婷", 3: "程玉婷", 7: "杨如"])
+                == [3: 0],
+            "两个程玉婷碎片并回簇号最小的代表(0),杨如不受影响"
+        )
+        expect(
+            FaceRecoveryPolicy.sameNameMergePlan(clusterNames: [2: "程玉婷", 5: "程玉婷", 9: "程玉婷"])
+                == [5: 2, 9: 2],
+            "三个碎片全部并回代表(簇号最小)"
+        )
+        expect(
+            FaceRecoveryPolicy.sameNameMergePlan(clusterNames: [1: "", 2: "杨如"]).isEmpty,
+            "未命名簇不参与合并(无名可同)"
+        )
+        expect(
+            FaceRecoveryPolicy.sameNameMergePlan(clusterNames: [:]).isEmpty,
+            "空命名表出空计划"
+        )
         // —— parseFaceSegments:裁决 detail 的结构化解析(二轮统计载体) ——
         let segs = FaceRecoveryPolicy.parseFaceSegments(
             "≥30px rect检出 2/关键点 1/并集 2,≥30% 主角 2脸; c1@0.13>c2@0.10U | c0@0.57>c7@0.14S")
@@ -365,7 +384,7 @@ struct FaceRecoveryPolicyTest {
             "种子与分配确定性:同输入两次结果一致(缓存簇 ID 稳定的前提)"
         )
 
-        print("PASS: 同图双脸补认策略的 58 项确定性回归断言全部通过")
+        print("PASS: 同图双脸补认策略的 62 项确定性回归断言全部通过")
     }
 
     private static func vetoes(_ matches: [FaceRecoveryPolicy.Match]) -> Set<Int> {

@@ -106,10 +106,11 @@ struct PeoplePanel: View {
     /// 簇内双峰拆分线(第十二批):两个长相相近的人(实测两个从未同框的
     /// 小孩)被质心连接并成一簇,混合质心落在两人中间、verify/coherence
     /// 全放行——对每簇做余弦 2-均值,两半质心相似度低于该线才拆。
-    /// 同人按姿态/年代分的两半质心都逼近本人平均脸(≥0.65+);两个相近
-    /// 的人各为一半约 0.5——0.58 取在中间。误拆(一个真人被撕成两簇)→
-    /// 升 0.60~0.62;相近的人仍并在一起 → 降 0.55
-    private let splitFloor: Float = 0.58
+    /// 同人按姿态/年代分的两半质心都逼近本人平均脸(≥0.65+);两个相近的
+    /// 人各为一半约 0.5。误拆(一个真人被撕成两簇)→升 0.60~0.62;相近的
+    /// 人仍并在一起 → 降 0.55。**第二十二批 0.58→0.62:用户实测程玉婷被
+    /// 撕成 3+ 碎片(三个「程玉婷 与其他人」组并存 434/25/21),收紧**
+    private let splitFloor: Float = 0.62
     /// 人名认定门槛(≥3 票且过半)在 deriveNames 里:扫描完成与快照水化
     /// 共用同一判据。148 教训:只看覆盖率时,小簇带 1 张污染标签=覆盖率 100%
 
@@ -665,10 +666,16 @@ struct PeoplePanel: View {
                 let coBest = key.reduce(0) { max($0, coOccurrence[$1]?[f.ci] ?? 0) }
                 let coSecond = f.secondCi >= 0
                     ? key.reduce(0) { max($0, coOccurrence[$1]?[f.secondCi] ?? 0) } : 0
+                // 第二名是主角自己的簇(第二十二批护栏):这张脸在「某同伴 vs
+                // 本人」之间撕扯(镜像/糊脸对大质心虚高)——程玉婷的糊脸 best
+                // 落到高频同框的杨如簇、second 落回她自己,同框先验会把它判给
+                // 杨如,单人照凭空多出一个"同伴"。此况不赌,诚实留 U
+                let secondIsProtagonist = f.secondCi >= 0 && key.contains(f.secondCi)
                 guard FaceRecoveryPolicy.aggregatedRecovered(
                     pairCount: count, best: f.best, second: f.second)
-                        || FaceRecoveryPolicy.aggregatedTieBreakRecovered(
-                            pairCount: count, best: f.best, coBest: coBest, coSecond: coSecond)
+                        || (!secondIsProtagonist
+                            && FaceRecoveryPolicy.aggregatedTieBreakRecovered(
+                                pairCount: count, best: f.best, coBest: coBest, coSecond: coSecond))
                     else { continue }
                 matched.insert(f.ci)
                 unexplained -= 1
@@ -690,12 +697,12 @@ struct PeoplePanel: View {
     /// 人名按当前标签重推——重命名/清标签无需重扫
     private func hydrateIfNeeded() {
         guard m.groups.isEmpty, !m.scanning else { return }
-        // 算法盐 a14:归组/补认逻辑变更必须升盐——旧快照与补认缓存不能复活旧裁决。
+        // 算法盐 a15:归组/补认逻辑变更必须升盐——旧快照与补认缓存不能复活旧裁决。
         // (人脸行/排除/模型)不含算法版本,163 的旧判决经快照水化+缓存命中在
         // 164 原样复活,用户看到的就是"修了没变化"。第十四批:J 破平局(同框
         // 先验裁决二义脸)改变了 U→J 的转正集合,旧快照/缓存必须作废重判
         let ver = app.store.peopleFingerprint(
-            extra: "a14-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
+            extra: "a15-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
         guard let json = app.store.loadPeopleResults(ver: ver),
               let data = json.data(using: .utf8),
               let snap = try? JSONDecoder().decode(PeopleSnapshot.self, from: data) else {
@@ -763,9 +770,9 @@ struct PeoplePanel: View {
         let faceModel = app.models.face
         let model = app.people   // 结果写共享模型:面板关了再开不丢(160 教训)
         // 指纹:人脸数据/排除集合/模型任一变化,快照与补认缓存自动作废;
-        // a14=算法盐,归组逻辑变更必须升盐(与 hydrateIfNeeded 同串)
+        // a15=算法盐,归组逻辑变更必须升盐(与 hydrateIfNeeded 同串)
         let ver = store.peopleFingerprint(
-            extra: "a14-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
+            extra: "a15-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
         // 「扫描中」记账 + 屏幕常亮:退后台被系统结束进程后,重开面板能明确
         // 告知「上次未完成」;常亮防前台锁屏挂起
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "peopleScanRunning")
@@ -808,13 +815,45 @@ struct PeoplePanel: View {
                 // 组间合并+垃圾剔除+逐脸核验+内聚解散+双峰拆分(全部在扫描器内完成)
                 let groupedIdx = Set(raw.flatMap { $0.map(\.index) })
                 let singletons = (0..<data.keys.count).filter { !groupedIdx.contains($0) }
-                let scored = DuplicateScanner.mergeGroups(
+                var scored = DuplicateScanner.mergeGroups(
                     raw, flat: data.flat, dim: data.dim,
                     linkThreshold: link, expelFloor: expelFloor,
                     singletons: singletons,
                     coherenceFloor: coherenceFloor, verifyFloor: verifyFloor,
                     splitFloor: splitFloor) { done, total in
                     Task { @MainActor in model.progress = (done, max(total, 1)) }
+                }
+
+                // 同名簇合并(第二十二批):聚类撕人时,同一真人会留下多个
+                // 碎片簇——每个碎片各自成组(用户实测「程玉婷 与其他人」
+                // 434/25/21 三组并存),碎片间还互相组合出「程玉婷 × 未命名」
+                // (332 张混满单人照:镜像双脸各命中一个碎片)。只要多个簇从
+                // 用户标签推出同一个人名,成员并回代表簇(簇号最小,确定性);
+                // 在路由/质心/同框统计之前合并,下游全部看到合并后的簇
+                do {
+                    var earlyRefs: [Int: [String]] = [:]
+                    for (ci, g) in scored.enumerated() {
+                        var s = Set<String>()
+                        for m in g { s.insert(data.refs[m.index]) }
+                        earlyRefs[ci] = Array(s)
+                    }
+                    let earlyTags = store.userTagsForRefs(
+                        Array(Set(earlyRefs.values.flatMap { $0 })))
+                    let plan = FaceRecoveryPolicy.sameNameMergePlan(
+                        clusterNames: Self.deriveNames(personRefs: earlyRefs, tags: earlyTags))
+                    if !plan.isEmpty {
+                        var repIdx: [Int: Int] = [:]
+                        var out: [[(index: Int, score: Float)]] = []
+                        for (ci, g) in scored.enumerated() {
+                            guard plan[ci] == nil else { continue }   // 碎片:成员并入代表
+                            repIdx[ci] = out.count
+                            out.append(g)
+                        }
+                        for (frag, rep) in plan.sorted(by: { $0.key < $1.key }) {
+                            if let i = repIdx[rep] { out[i].append(contentsOf: scored[frag]) }
+                        }
+                        scored = out
+                    }
                 }
 
                 // ① 簇 → 照片集合(同照片多脸去重)与每照片最高分
