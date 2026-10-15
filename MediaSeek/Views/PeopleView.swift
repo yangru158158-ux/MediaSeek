@@ -1126,6 +1126,14 @@ struct ClusterDetailView: View {
                     }
                 }
                 .coordinateSpace(name: "peopleGrid")
+                .swipeSelectContainer(space: "peopleGrid", enabled: selecting,
+                                      onSweep: { v in
+                                          swipe.handle(v, frames: swipeFrames,
+                                                       isSelected: { selected.contains($0) },
+                                                       apply: { id, on in
+                                                           if on { selected.insert(id) } else { selected.remove(id) }
+                                                       })
+                                      }, onEnd: { swipe.reset() })
                 .onPreferenceChange(SwipeCellFramesKey.self) { swipeFrames = $0 }
             }
             .padding(12)
@@ -1227,14 +1235,7 @@ struct ClusterDetailView: View {
             }
         }
         .clipShape(RoundedRectangle(cornerRadius: 8))
-        .swipeSelectable(id: ref, space: "peopleGrid", enabled: selecting,
-                         onSweep: { v in
-                             swipe.handle(v, frames: swipeFrames,
-                                          isSelected: { selected.contains($0) },
-                                          apply: { id, on in
-                                              if on { selected.insert(id) } else { selected.remove(id) }
-                                          })
-                         }, onEnd: { swipe.reset() })
+        .swipeCellFrame(id: ref, space: "peopleGrid", enabled: selecting)
         .overlay(alignment: .topLeading) {
             if selecting {
                 Image(systemName: selected.contains(ref) ? "checkmark.circle.fill" : "circle")

@@ -31,26 +31,34 @@ struct SwipeCellFramesKey: PreferenceKey {
 }
 
 extension View {
-    /// 条目侧:上报自身 frame + 挂划选手势。enabled=false 时手势静默。
-    /// onSweep 把 DragGesture.Value 交给容器统一裁决(方向门/命中测试/
-    /// 模式判定都在容器层,条目只负责报 frame 和转发)
-    func swipeSelectable(id: String, space: String, enabled: Bool,
-                         onSweep: @escaping (DragGesture.Value) -> Void,
-                         onEnd: @escaping () -> Void = {}) -> some View {
-        background(
-            GeometryReader { g in
-                Color.clear.preference(key: SwipeCellFramesKey.self,
-                                       value: [id: g.frame(in: .named(space))])
-            }
-        )
-        .simultaneousGesture(
-            DragGesture(minimumDistance: 12, coordinateSpace: .named(space))
-                .onChanged { v in
-                    guard enabled else { return }
-                    onSweep(v)
+    /// 条目侧:选择模式时上报自身 frame(划选命中测试用)。第二十三批修正:
+    /// 逐条目挂 simultaneousGesture 会把 ScrollView 滚动整个堵死(组详情
+    /// 只能看到首屏)——手势集中到容器一个(swipeSelectContainer),
+    /// 条目只负责报 frame;非选择模式连 frame 都不报,视图树零改动
+    @ViewBuilder
+    func swipeCellFrame(id: String, space: String, enabled: Bool) -> some View {
+        if enabled {
+            background(
+                GeometryReader { g in
+                    Color.clear.preference(key: SwipeCellFramesKey.self,
+                                           value: [id: g.frame(in: .named(space))])
                 }
-                .onEnded { _ in onEnd() }
-        )
+            )
+        } else {
+            self
+        }
+    }
+
+    /// 容器侧:整个网格挂一个划选手势。enabled=false 时用手势掩码彻底
+    /// 关闭(.none)——不识别、不拦截,ScrollView 滚动不受任何影响
+    func swipeSelectContainer(space: String, enabled: Bool,
+                              onSweep: @escaping (DragGesture.Value) -> Void,
+                              onEnd: @escaping () -> Void) -> some View {
+        simultaneousGesture(
+            DragGesture(minimumDistance: 12, coordinateSpace: .named(space))
+                .onChanged { v in onSweep(v) }
+                .onEnded { _ in onEnd() },
+            including: enabled ? .all : .none)
     }
 }
 

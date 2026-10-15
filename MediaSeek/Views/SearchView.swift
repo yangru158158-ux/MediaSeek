@@ -400,14 +400,7 @@ struct SearchView: View {
                             HitCell(hit: hit, selectionMode: selectionMode, isSelected: selected.contains(hit.id))
                         }
                         .buttonStyle(.plain)
-                        .swipeSelectable(id: hit.id, space: "resultGrid", enabled: selectionMode,
-                                         onSweep: { v in
-                                            swipe.handle(v, frames: swipeFrames,
-                                                         isSelected: { selected.contains($0) },
-                                                         apply: { id, on in
-                                                             if on { selected.insert(id) } else { selected.remove(id) }
-                                                         })
-                                         }, onEnd: { swipe.reset() })
+                        .swipeCellFrame(id: hit.id, space: "resultGrid", enabled: selectionMode)
                         .opacity(blockedRefs.contains(hit.refKey) ? 0.35 : 1)
                         .overlay(alignment: .topLeading) {
                             if blockedRefs.contains(hit.refKey) {
@@ -436,6 +429,14 @@ struct SearchView: View {
                     }
                 }
                 .coordinateSpace(name: "resultGrid")
+                .swipeSelectContainer(space: "resultGrid", enabled: selectionMode,
+                                      onSweep: { v in
+                                          swipe.handle(v, frames: swipeFrames,
+                                                       isSelected: { selected.contains($0) },
+                                                       apply: { id, on in
+                                                           if on { selected.insert(id) } else { selected.remove(id) }
+                                                       })
+                                      }, onEnd: { swipe.reset() })
                 .onPreferenceChange(SwipeCellFramesKey.self) { swipeFrames = $0 }
                 .padding(.horizontal)
             }
