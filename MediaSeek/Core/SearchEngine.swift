@@ -581,27 +581,17 @@ final class SearchEngine {
         // and 模式标题列出全部命中词(交集里每张都含全部词,不能只显示第一个)
         // 结果内模式:只在这些照片的文字索引里查
         if spec.channel == .text {
-            let fileIds = (try? store.fileIds()) ?? []
-            let videoRefs = (try? store.refKeys(kinds: [.videoFrame])) ?? []
-            // OCR 命中的 ref 可能是 照片/文件/视频(视频帧 OCR):按库内身份归类
-            func ocrKind(_ ref: String) -> ItemKind {
-                if scope == .all, fileIds.contains(ref) { return .file }
-                if videoRefs.contains(ref) { return .videoFrame }
-                return .photo
-            }
             var perTerm: [[SearchHit]] = []
             for t in terms {
-                let refs: [(refKey: String, text: String)] = within.map { among in
-                    ((try? store.searchOCR(query: t, among: Array(among))) ?? []).map { ($0, "") }
-                } ?? (((try? store.searchOCR(query: t)) ?? []).prefix(topK).map { ($0.refKey, $0.text) })
+                let rows = ocrUnionHits(t, scope: scope, within: within, topK: topK)
                 let connectorIsAnd = (spec.connector == .and)
-                perTerm.append(refs.enumerated().map { rank, ref in
+                perTerm.append(rows.enumerated().map { rank, ref in
                     let base = within != nil
                         ? "结果内文字命中「\(t)」"
                         : (connectorIsAnd
                            ? "文字全含:\(terms.joined(separator: " ")) —「\(t)」\(Self.ocrSnippet(ref.text, t))"
                            : "文字命中「\(t)」:\(Self.ocrSnippet(ref.text, t))")
-                    return SearchHit(kind: ocrKind(ref.refKey), refKey: ref.refKey, frameIndex: 0, space: "ocr",
+                    return SearchHit(kind: ref.kind, refKey: ref.refKey, frameIndex: 0, space: "ocr",
                               title: base,
                               date: nil, score: Float(1.0 / Double(rank + 1)), color: nil)
                 })
@@ -628,6 +618,18 @@ final class SearchEngine {
                 // 结果内时语义分数限定在基数集合内算(同 searchWithin 的修正)
                 var hits = semanticHits(t, siglip: siglip, topK: topK, within: within)
                 if let within { hits = hits.filter { within.contains($0.refKey) } }
+                // 「像或含字」同构(第十六批):裸搜模式里每个词 = OCR∪视觉任一
+                // 命中即算,and:/or: 自动通道此前只送语义——证件/文件类词语义
+                // 天生弱(0.05-0.08 过不了地板),and:身份证 正面 恒空。每词并入
+                // OCR(含证件别名)命中再按连接词交并;同照片双命中时语义条目
+                // 优先(带真实分),OCR 只补缺口
+                let seen = Set(hits.map(\.refKey))
+                for (rank, r) in ocrUnionHits(t, scope: scope, within: within, topK: topK)
+                    .enumerated() where !seen.contains(r.refKey) {
+                    hits.append(SearchHit(kind: r.kind, refKey: r.refKey, frameIndex: 0,
+                                          space: "ocr", title: "含「\(t)」文字", date: nil,
+                                          score: Float(1.0 / Double(rank + 1)), color: nil))
+                }
                 perTerm.append(hits)
             }
         }
@@ -635,6 +637,39 @@ final class SearchEngine {
         let textIDs = Set(combined.filter { $0.space == "ocr" }
             .map { "\($0.kind.rawValue)-\($0.refKey)" })
         return (resolve(combined), textIDs)
+    }
+
+    /// OCR 命中并集(词本身+证件类字段别名,第十六批):与主流程 OCR 层同口径。
+    /// 此前只有主流程做别名扩展,前缀路径(文字:身份证 / and:身份证)漏掉
+    /// 正面照(正面不印「身份证」,只有「公民身份号码」等字段)。OCR 命中的
+    /// ref 按 files/videoFrame 表归类身份;结果内模式只在基数集合里查
+    private func ocrUnionHits(_ t: String, scope: SearchScope,
+                              within: Set<String>?, topK: Int)
+        -> [(kind: ItemKind, refKey: String, text: String)] {
+        let fileIds = (try? store.fileIds()) ?? []
+        let videoRefs = (try? store.refKeys(kinds: [.videoFrame])) ?? []
+        func ocrKind(_ ref: String) -> ItemKind {
+            if scope == .all, fileIds.contains(ref) { return .file }
+            if videoRefs.contains(ref) { return .videoFrame }
+            return .photo
+        }
+        var out: [(kind: ItemKind, refKey: String, text: String)] = []
+        var seen = Set<String>()
+        for term in [t] + (QueryUnderstanding.ocrAliases[t] ?? []) {
+            let rows: [(String, String)]
+            if let among = within {
+                rows = ((try? store.searchOCR(query: term, among: Array(among))) ?? [])
+                    .map { ($0, "") }
+            } else {
+                rows = ((try? store.searchOCR(query: term)) ?? [])
+                    .prefix(topK).map { ($0.refKey, $0.text) }
+            }
+            for r in rows where !seen.contains(r.0) {
+                seen.insert(r.0)
+                out.append((ocrKind(r.0), r.0, r.1))
+            }
+        }
+        return out
     }
 
     /// SigLIP2 官方零样本模板("This is a photo of X.")对短语类查询更友好;
