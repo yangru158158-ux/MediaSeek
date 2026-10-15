@@ -5,6 +5,7 @@
 // 纯 Foundation 逻辑,与 App 共用同一源文件,CI 上直接编译运行。
 import Foundation
 
+@main
 enum QueryUnderstandingTest {
     private static func expect(_ condition: @autoclosure () -> Bool, _ message: String) {
         guard condition() else { fatalError("FAIL: \(message)") }
@@ -46,5 +47,3 @@ enum QueryUnderstandingTest {
         print("PASS: 查询理解 13 项确定性回归断言全部通过")
     }
 }
-
-QueryUnderstandingTest.main()

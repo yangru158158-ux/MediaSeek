@@ -27,5 +27,6 @@ jobs:
       - name: 编译并运行查询清洗回归
         run: |
           swiftc -O MediaSeek/Core/QueryUnderstanding.swift \
+            MediaSeek/Core/LabelZh.swift MediaSeek/Core/LabelZhExtra.swift \
             scripts/query_understanding_test.swift -o /tmp/qtest
           /tmp/qtest

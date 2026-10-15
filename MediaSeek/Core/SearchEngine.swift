@@ -573,9 +573,9 @@ final class SearchEngine {
     /// 文字:地图 189 个全挂语义、文字 0)
     private func searchScoped(spec: QuerySpec, scope: SearchScope,
                               topK: Int, siglip: SigLIPEmbedder?, within: Set<String>? = nil) async throws -> (hits: [DisplayHit], textIDs: Set<String>) {
-        guard scope == .all || scope == .photo else { return [] }   // v1 只作用于照片
+        guard scope == .all || scope == .photo else { return ([], []) }   // v1 只作用于照片
         let terms = Self.splitTerms(spec.body)
-        guard !terms.isEmpty else { return [] }
+        guard !terms.isEmpty else { return ([], []) }
 
         // 文字通道:每个词独立查 OCR,连接词决定 AND/OR。
         // and 模式标题列出全部命中词(交集里每张都含全部词,不能只显示第一个)
