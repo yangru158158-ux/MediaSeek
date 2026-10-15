@@ -279,7 +279,51 @@ struct FaceRecoveryPolicyTest {
             "『嵌入失败U』段被跳过,只解析出 1 个脸段"
         )
 
-        print("PASS: 同图双脸补认策略的 44 项确定性回归断言全部通过")
+        // —— 双峰拆分(第十二批):两个相近的人并成一簇(混合质心落在两人
+        // 中间,verify/coherence 免疫),2-均值找出两半、两半质心相似度决断 ——
+        // 174 实测:28 张「未命名」组里两个从未同框的小孩
+        let kidA = [
+            [Float(1), 0.10, 0], [Float(1), -0.10, 0], [Float(0.90), 0.15, 0.05],
+            [Float(1), 0, -0.06], [Float(0.95), -0.12, 0.03]
+        ]
+        let kidB = [
+            [Float(0.50), 0.87, 0.02], [Float(0.52), 0.85, -0.01], [Float(0.48), 0.88, 0],
+            [Float(0.55), 0.83, 0.03], [Float(0.50), 0.86, -0.02]
+        ]
+        let twoKids = FaceRecoveryPolicy.bimodalHalves(kidA + kidB)
+        expect(
+            twoKids != nil && Set(twoKids!.a) == Set(0...4) && Set(twoKids!.b) == Set(5...9),
+            "两个方向相近的人(质心 cos≈0.53)应精确拆成两半"
+        )
+        expect(
+            twoKids != nil && twoKids!.centroidSim < 0.58,
+            "两半质心相似度低于拆分线 0.58(调用方据此拆簇)"
+        )
+        let poseSpread = [
+            [Float(1), 0.30, 0], [Float(1), -0.30, 0], [Float(0.90), 0, 0.40],
+            [Float(1), 0, -0.35], [Float(0.95), 0.20, 0.10], [Float(1), -0.10, -0.20]
+        ]
+        let single = FaceRecoveryPolicy.bimodalHalves(poseSpread)
+        expect(
+            single != nil && single!.centroidSim >= 0.58,
+            "单人按姿态分散的簇:无论 2-均值怎么分,两半质心都逼近本人平均脸,不拆"
+        )
+        expect(
+            FaceRecoveryPolicy.bimodalHalves(Array(poseSpread.prefix(3))) == nil,
+            "不足 4 个向量不判双峰"
+        )
+        let onePeak = Array(repeating: [Float(1), Float(0), Float(0)], count: 6)
+        expect(
+            FaceRecoveryPolicy.bimodalHalves(onePeak) == nil,
+            "同方向紧致簇(无第二峰,一半吞光)返回 nil"
+        )
+        let rerun = FaceRecoveryPolicy.bimodalHalves(kidA + kidB)
+        expect(
+            rerun != nil && twoKids != nil && rerun!.a == twoKids!.a && rerun!.b == twoKids!.b,
+            "种子与分配确定性:同输入两次结果一致(缓存簇 ID 稳定的前提)"
+        )
+
+        print("PASS: 同图双脸补认策略的 50 项确定性回归断言全部通过")
     }
 
     private static func vetoes(_ matches: [FaceRecoveryPolicy.Match]) -> Set<Int> {

@@ -186,6 +186,80 @@ enum FaceRecoveryPolicy {
         return faces
     }
 
+    /// 簇内双峰拆分(第十二批):两个长相相近的人(用户实测:两个从未同框的
+    /// 小孩)被质心连接并成一簇——混合质心落在两人中间,各自的脸对它都有
+    /// 0.5-0.65,verify/coherence 全放行(均值类守卫对「两个相近的人」
+    /// 天然免疫;小孩脸跨人相似度天然比成人高,link 空带的成人标定不适用)。
+    /// 拆法:余弦 2-均值,种子=组内最不相似的一对(>320 成员时按步长采样
+    /// 选种,确定性保持),迭代分配→重算质心到稳定。返回两半成员下标与
+    /// 两半质心的相似度——同人按姿态/年代分的两半,质心都逼近本人平均脸,
+    /// 相似度 ≥0.65+;两个相近的人各为一半,质心相似度 ~0.5。调用方以
+    /// splitFloor(0.58) 决断。<4 个向量或一半吞光(无第二峰)返回 nil。
+    static func bimodalHalves(_ vectors: [[Float]]) -> (a: [Int], b: [Int], centroidSim: Float)? {
+        let n = vectors.count
+        guard n >= 4, !vectors.isEmpty,
+              vectors.allSatisfy({ $0.count == vectors[0].count }) else { return nil }
+        let dim = vectors[0].count
+        guard dim > 0 else { return nil }
+
+        func unitCos(_ x: [Float], _ y: [Float]) -> Float {
+            var dot: Float = 0, nx: Float = 0, ny: Float = 0
+            for i in 0..<dim {
+                dot += x[i] * y[i]; nx += x[i] * x[i]; ny += y[i] * y[i]
+            }
+            let denom = (nx * ny).squareRoot()
+            return denom > 1e-8 ? dot / denom : 0
+        }
+
+        // 种子:最不相似的一对(大簇按步长采样选种,确定性:下标小者优先)
+        let stride = max(1, n / 320)
+        let sample = stride == 1 ? Array(0..<n) : Array(strideFrom0(stride: stride, n: n))
+        var worst: Float = 2, seedA = 0, seedB = min(1, n - 1)
+        for si in sample.indices {
+            for sj in (si + 1)..<sample.count {
+                let c = unitCos(vectors[sample[si]], vectors[sample[sj]])
+                if c < worst { worst = c; seedA = sample[si]; seedB = sample[sj] }
+            }
+        }
+
+        var centroidA = vectors[seedA]   // 均值质心,每轮归一化后比较
+        var centroidB = vectors[seedB]
+        var assign = [Int](repeating: -1, count: n)
+        for _ in 0..<10 {
+            var sumA = [Float](repeating: 0, count: dim)
+            var sumB = [Float](repeating: 0, count: dim)
+            var newAssign = [Int](repeating: 0, count: n)
+            for i in 0..<n {
+                newAssign[i] = unitCos(vectors[i], centroidA) >= unitCos(vectors[i], centroidB) ? 0 : 1
+                if newAssign[i] == 0 {
+                    for d in 0..<dim { sumA[d] += vectors[i][d] }
+                } else {
+                    for d in 0..<dim { sumB[d] += vectors[i][d] }
+                }
+            }
+            var normA: Float = 0, normB: Float = 0
+            for d in 0..<dim { normA += sumA[d] * sumA[d]; normB += sumB[d] * sumB[d] }
+            normA = max(normA.squareRoot(), 1e-8); normB = max(normB.squareRoot(), 1e-8)
+            centroidA = sumA.map { $0 / normA }
+            centroidB = sumB.map { $0 / normB }
+            if newAssign == assign { assign = newAssign; break }
+            assign = newAssign
+        }
+        var a: [Int] = [], b: [Int] = []
+        for i in 0..<n {
+            if assign[i] == 0 { a.append(i) } else { b.append(i) }
+        }
+        guard a.count >= 2, b.count >= 2 else { return nil }   // 一半吞光=无第二峰
+        return (a, b, unitCos(centroidA, centroidB))
+    }
+
+    private static func strideFrom0(stride: Int, n: Int) -> [Int] {
+        var out: [Int] = []
+        var i = 0
+        while i < n { out.append(i); i += stride }
+        return out
+    }
+
     private static func cosineSimilarity(_ lhs: [Float], _ rhs: [Float]) -> Float? {
         guard !lhs.isEmpty, lhs.count == rhs.count else { return nil }
         var dot: Float = 0

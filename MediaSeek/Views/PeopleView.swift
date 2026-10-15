@@ -103,6 +103,13 @@ struct PeoplePanel: View {
     /// 簇内内聚底线:成员对簇质心(平均脸)的平均相似度过低 → 整簇解散
     /// (簇级兜底;148 实测打印脸被质心连接链式串成「假人物」巨组的教训)
     private let coherenceFloor: Float = 0.45
+    /// 簇内双峰拆分线(第十二批):两个长相相近的人(实测两个从未同框的
+    /// 小孩)被质心连接并成一簇,混合质心落在两人中间、verify/coherence
+    /// 全放行——对每簇做余弦 2-均值,两半质心相似度低于该线才拆。
+    /// 同人按姿态/年代分的两半质心都逼近本人平均脸(≥0.65+);两个相近
+    /// 的人各为一半约 0.5——0.58 取在中间。误拆(一个真人被撕成两簇)→
+    /// 升 0.60~0.62;相近的人仍并在一起 → 降 0.55
+    private let splitFloor: Float = 0.58
     /// 人名认定门槛(≥3 票且过半)在 deriveNames 里:扫描完成与快照水化
     /// 共用同一判据。148 教训:只看覆盖率时,小簇带 1 张污染标签=覆盖率 100%
 
@@ -655,11 +662,11 @@ struct PeoplePanel: View {
     /// 人名按当前标签重推——重命名/清标签无需重扫
     private func hydrateIfNeeded() {
         guard m.groups.isEmpty, !m.scanning else { return }
-        // 算法盐 a11:归组/补认逻辑变更必须升盐——旧快照与补认缓存不能复活旧裁决。
+        // 算法盐 a12:归组/补认逻辑变更必须升盐——旧快照与补认缓存不能复活旧裁决。
         // (人脸行/排除/模型)不含算法版本,163 的旧判决经快照水化+缓存命中在
         // 164 原样复活,用户看到的就是"修了没变化"
         let ver = app.store.peopleFingerprint(
-            extra: "a11-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
+            extra: "a12-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
         guard let json = app.store.loadPeopleResults(ver: ver),
               let data = json.data(using: .utf8),
               let snap = try? JSONDecoder().decode(PeopleSnapshot.self, from: data) else {
@@ -727,9 +734,9 @@ struct PeoplePanel: View {
         let faceModel = app.models.face
         let model = app.people   // 结果写共享模型:面板关了再开不丢(160 教训)
         // 指纹:人脸数据/排除集合/模型任一变化,快照与补认缓存自动作废;
-        // a11=算法盐,归组逻辑变更必须升盐(与 hydrateIfNeeded 同串)
+        // a12=算法盐,归组逻辑变更必须升盐(与 hydrateIfNeeded 同串)
         let ver = store.peopleFingerprint(
-            extra: "a11-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
+            extra: "a12-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
         // 「扫描中」记账 + 屏幕常亮:退后台被系统结束进程后,重开面板能明确
         // 告知「上次未完成」;常亮防前台锁屏挂起
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "peopleScanRunning")
@@ -769,14 +776,15 @@ struct PeoplePanel: View {
                     keys: data.keys, flat: data.flat, dim: data.dim, threshold: threshold) { done, total in
                     Task { @MainActor in model.progress = (done, total) }
                 }
-                // 组间合并+垃圾剔除+逐脸核验+内聚解散(全部在扫描器内完成)
+                // 组间合并+垃圾剔除+逐脸核验+内聚解散+双峰拆分(全部在扫描器内完成)
                 let groupedIdx = Set(raw.flatMap { $0.map(\.index) })
                 let singletons = (0..<data.keys.count).filter { !groupedIdx.contains($0) }
                 let scored = DuplicateScanner.mergeGroups(
                     raw, flat: data.flat, dim: data.dim,
                     linkThreshold: link, expelFloor: expelFloor,
                     singletons: singletons,
-                    coherenceFloor: coherenceFloor, verifyFloor: verifyFloor) { done, total in
+                    coherenceFloor: coherenceFloor, verifyFloor: verifyFloor,
+                    splitFloor: splitFloor) { done, total in
                     Task { @MainActor in model.progress = (done, max(total, 1)) }
                 }
 

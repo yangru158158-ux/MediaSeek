@@ -79,6 +79,7 @@ enum DuplicateScanner {
                             flat: [Float], dim: Int, linkThreshold: Float, expelFloor: Float,
                             singletons: [Int] = [], absorbThreshold: Float? = nil,
                             maxRounds: Int = 25, coherenceFloor: Float = 0, verifyFloor: Float = 0,
+                            splitFloor: Float = 0,
                             progress: (Int, Int) -> Void = { _, _ in }) -> [[(index: Int, score: Float)]] {
         guard groups.count > 1, dim > 0 else { return groups }
 
@@ -254,6 +255,79 @@ enum DuplicateScanner {
                     let mean = sims.reduce(0, +) / Float(sims.count)
                     let median = sims[sims.count / 2]
                     return mean >= coherenceFloor && median >= coherenceFloor + 0.10
+                }
+            }
+
+            // 簇内双峰拆分(splitFloor>0 时,第十二批):两个长相相近的人
+            // (174 用户实测:28 张「未命名」组里两个从未同框的小孩)被质心
+            // 连接并成一簇——混合质心落在两人中间,各自的脸对它都有
+            // 0.5-0.65,verify/coherence 全放行(均值类守卫对「两个相近的
+            // 人」天然免疫;小孩脸跨人相似度比成人高,link 空带的成人标定
+            // 不适用)。对每簇(≥6 张脸)做余弦 2-均值:两半质心相似度
+            // < splitFloor 且两半各 ≥3 张脸 → 拆成两簇,各自重核验+重算分
+            // (对各自质心 <verifyFloor 的成员移出;半簇 <2 张存活则消亡,
+            // 成员回落未识别)。循环到无拆分(≤3 轮,防三人混合簇拆不完)。
+            // 同人簇不受影响:按姿态/年代分的两半质心都逼近本人平均脸
+            // (相似度 ≥0.65+),到不了 0.58 线。
+            if splitFloor > 0 {
+                func centroidOf(_ members: [(index: Int, score: Float)]) -> [Float] {
+                    var c = [Float](repeating: 0, count: dim)
+                    for m in members {
+                        for d in 0..<dim { c[d] += flat[m.index * dim + d] }
+                    }
+                    var ss: Float = 0
+                    vDSP_dotpr(c, 1, c, 1, &ss, vDSP_Length(dim))
+                    let n = max(ss.squareRoot(), 1e-8)
+                    for d in 0..<dim { c[d] /= n }
+                    return c
+                }
+                func reverified(_ members: [(index: Int, score: Float)])
+                    -> [(index: Int, score: Float)]? {
+                    let c0 = centroidOf(members)
+                    let kept = verifyFloor > 0
+                        ? members.filter { m -> Bool in
+                            var d: Float = 0
+                            vDSP_dotpr(c0, 1, base + m.index * dim, 1, &d, vDSP_Length(dim))
+                            return d >= verifyFloor
+                        }
+                        : members
+                    guard kept.count >= 2 else { return nil }
+                    let c1 = centroidOf(kept)
+                    var rescored = kept.map { m -> (index: Int, score: Float) in
+                        var d: Float = 0
+                        vDSP_dotpr(c1, 1, base + m.index * dim, 1, &d, vDSP_Length(dim))
+                        return (m.index, d)
+                    }
+                    rescored.sort { $0.score > $1.score }
+                    return rescored
+                }
+                for _ in 0..<3 {
+                    var splitAgain = false
+                    var next: [[(index: Int, score: Float)]] = []
+                    next.reserveCapacity(out.count + 4)
+                    for g in out {
+                        var didSplit = false
+                        if g.count >= 6 {
+                            var vectors: [[Float]] = []
+                            vectors.reserveCapacity(g.count)
+                            for m in g {
+                                vectors.append(Array(flat[(m.index * dim)..<m.index * dim + dim]))
+                            }
+                            if let halves = FaceRecoveryPolicy.bimodalHalves(vectors),
+                               halves.centroidSim < splitFloor,
+                               halves.a.count >= 3, halves.b.count >= 3 {
+                                for halfIdx in [halves.a, halves.b] {
+                                    let members = halfIdx.map { g[$0] }
+                                    if let verified = reverified(members) { next.append(verified) }
+                                }
+                                didSplit = true
+                                splitAgain = true
+                            }
+                        }
+                        if !didSplit { next.append(g) }
+                    }
+                    out = next
+                    if !splitAgain { break }
                 }
             }
         }
