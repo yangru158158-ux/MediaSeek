@@ -149,6 +149,18 @@ struct FaceRecoveryPolicyTest {
             ]) == 2,
             "同行者计入且背景小躯干不计入(混合场景)"
         )
+        expect(
+            FaceRecoveryPolicy.significantBodyCount([
+                heroBody, CGRect(x: 0.60, y: 0.55, width: 0.12, height: 0.30)
+            ]) == 1,
+            "宽度过线(30%)但整体很小(面积 10%)的远景路人不计入(第十三批面积门)"
+        )
+        expect(
+            FaceRecoveryPolicy.significantBodyCount([
+                heroBody, CGRect(x: 0.52, y: 0.0, width: 0.088, height: 0.85)
+            ]) == 2,
+            "171 瘦小同行者(宽 22% 高相近,面积 21%)仍计入——面积门不误伤"
+        )
 
         // —— 躯干去重(第十一批):上半身+全身双模式同框各框一次,上半身框
         // 嵌套在全身框上部(IoU 0.35-0.5 卡 0.5 线下),单人照被数成 2 躯干 ——
@@ -245,8 +257,12 @@ struct FaceRecoveryPolicyTest {
             "172 实测样本 c9@0.27>c6@0.20 配对 ≥8 次应转正(J)"
         )
         expect(
-            !FaceRecoveryPolicy.aggregatedRecovered(pairCount: 7, best: 0.27, second: 0.20),
-            "配对 7 次不足 8 不转正(跨照片证据不够)"
+            FaceRecoveryPolicy.aggregatedRecovered(pairCount: 6, best: 0.27, second: 0.20),
+            "172 实测样本 c9@0.27>c6@0.20 配对 ≥6 次应转正(J,第十三批 8→6)"
+        )
+        expect(
+            !FaceRecoveryPolicy.aggregatedRecovered(pairCount: 5, best: 0.27, second: 0.20),
+            "配对 5 次不足 6 不转正(跨照片证据不够)"
         )
         expect(
             !FaceRecoveryPolicy.aggregatedRecovered(pairCount: 30, best: 0.17, second: 0.05),
@@ -323,7 +339,7 @@ struct FaceRecoveryPolicyTest {
             "种子与分配确定性:同输入两次结果一致(缓存簇 ID 稳定的前提)"
         )
 
-        print("PASS: 同图双脸补认策略的 50 项确定性回归断言全部通过")
+        print("PASS: 同图双脸补认策略的 53 项确定性回归断言全部通过")
     }
 
     private static func vetoes(_ matches: [FaceRecoveryPolicy.Match]) -> Set<Int> {

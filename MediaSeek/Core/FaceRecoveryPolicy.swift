@@ -77,15 +77,25 @@ enum FaceRecoveryPolicy {
         detectedFaces <= 1 && significantBodies >= 2
     }
 
-    /// 同伴级躯干计数:宽度 ≥ 最宽躯干 18% 的身体框个数。
+    /// 同伴级躯干计数:宽度 ≥ 最宽躯干 18% 且面积 ≥ 其 15%。
     /// 168-170 实测 30% 线漏掉真同行者——『躯干3个/主角级1』= 第二人躯干
     /// 被检出但卡在 30% 线下(自拍/合影同行者常比主角瘦小或站后半步)。
     /// 18% 的依据:走到躯干层的同行者都是与主角同画面尺度的(脸若被复检
     /// 看到早走脸路径了),躯干比例通常 ≥20%;远处路人/背景人身体小
     /// (<15%),仍在线外。诊断带逐躯干宽度百分比,线按实测数据再校。
-    static func significantBodyCount(_ bodies: [CGRect], ratio: CGFloat = 0.18) -> Int {
+    /// 面积门(第十三批):175 实测「很远很小」的远景路人宽度能过 18% 线
+    /// 但整体很小(高也矮,30%宽×35%高=面积10%);171 的瘦小同行者是
+    /// 「窄但高相近」(22%宽→面积 ~20%)——面积把两者分开,已知同行
+    /// 案例(22%/27%/35%宽)全部保住。诊断带逐躯干 宽%/面% 可校准。
+    static func significantBodyCount(_ bodies: [CGRect], ratio: CGFloat = 0.18,
+                                     areaRatio: CGFloat = 0.15) -> Int {
         guard let hero = bodies.max(by: { $0.width < $1.width }), hero.width > 0 else { return 0 }
-        return bodies.filter { $0.width >= hero.width * ratio }.count
+        let heroArea = hero.width * hero.height
+        return bodies.filter { b in
+            guard b.width >= hero.width * ratio else { return false }
+            guard heroArea > 0 else { return true }
+            return b.width * b.height >= heroArea * areaRatio
+        }.count
     }
 
     /// 躯干框去重(第十一批):上半身+全身双模式并跑时,同一个人常被两种
@@ -148,14 +158,16 @@ enum FaceRecoveryPolicy {
         bestKNN >= 0.30 && bestKNN - (secondKNN ?? -1) >= 0.06
     }
 
-    /// 聚合转正(J,第十批):单张证据不够线的 U 脸,若在 ≥8 次观测里稳定
+    /// 聚合转正(J,第十批):单张证据不够线的 U 脸,若在 ≥6 次观测里稳定
     /// best 指向同一簇 → 跨照片一致性即身份铁证(嵌入噪声方向随机,真
     /// 同伴的糊脸方向稳定)。地板 0.18 排除纯噪声,领先 0.02 排除二义脸
     /// (172 实测 c1@0.20>c2@0.19 领先 0.01 不该赌)。救 Y 的鸡生蛋盲区:
     /// 中频同伴的合影从未有一张被认出 → 历史同框计数恒 0 → Y 永不触发
     /// (172 实测 c9@0.27>c6@0.20U,分数边距全过 Y 门却卡在同框 0)。
+    /// 第十三批 minPair 8→6:175 实测杨如合影仍有多张 U 未转正,一致性
+    /// 要求不变(稳定指向同一簇),观测次数放宽到 6。
     static func aggregatedRecovered(pairCount: Int, best: Float, second: Float,
-                                    minPair: Int = 8, minBest: Float = 0.18,
+                                    minPair: Int = 6, minBest: Float = 0.18,
                                     minLead: Float = 0.02) -> Bool {
         pairCount >= minPair && best >= minBest && (best - second) >= minLead
     }

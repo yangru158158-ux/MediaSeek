@@ -353,12 +353,16 @@ struct PeoplePanel: View {
                                           cached: [String: (matched: Set<Int>, unexplained: Int, reason: Int, note: Int, detail: String)],
                                           store: VectorStore, ver: String,
                                           progress: @escaping (Int, Int) -> Void) async -> (verdicts: [String: (recovered: Set<Int>, unexplained: Int, reason: Int, note: Int, detail: String)], fetchFails: Int) {
-        /// 逐躯干宽度百分比(诊断用):「[100,22,8]%」——下轮截图即知
-        /// 第二人躯干多大、18% 同伴级线卡没卡住,数据驱动调线
+        /// 逐躯干 宽%/面% 对(诊断用):「[100%/100%,81%/42%]」——下轮截图
+        /// 即知第二人躯干多大、18% 宽线+15% 面积线卡没卡住,数据驱动调线
         func bodyWidths(_ bodies: [CGRect]) -> String {
-            guard let hero = bodies.map({ $0.width }).max(), hero > 0 else { return "" }
-            let parts = bodies.map { Int(($0.width / hero * 100).rounded()) }
-                .sorted(by: >).map { "\($0)%" }
+            guard let hero = bodies.max(by: { $0.width < $1.width }), hero.width > 0 else { return "" }
+            let heroArea = hero.width * hero.height
+            let parts = bodies.map { b -> (w: Int, s: String) in
+                let w = Int((b.width / hero.width * 100).rounded())
+                let a = heroArea > 0 ? Int((b.width * b.height / heroArea * 100).rounded()) : 100
+                return (w, "\(w)%/\(a)%")
+            }.sorted { $0.w > $1.w }.map { $0.s }
             return "[" + parts.joined(separator: ",") + "]"
         }
         /// 簇内 top-5 近邻均值(K 通道):脸向量与该簇每个库内脸逐个余弦,
@@ -457,13 +461,14 @@ struct PeoplePanel: View {
                     return (ref, [], 0, false, 3, 0, faceSummary)
                 }
                 // 先算全部主角级脸的匹配分,再统一裁决(双人认领 veto 需要横向比)
-                struct FaceMatch { var ci: Int; var best: Float; var secondCi: Int; var second: Float; var strong: Bool; var embedding: [Float] }
+                struct FaceMatch { var ci: Int; var best: Float; var secondCi: Int; var second: Float; var strong: Bool; var embedding: [Float]; var width: CGFloat }
                 var fms: [FaceMatch] = []
-                var embedFails = 0
+                var embedFailWidths: [CGFloat] = []
                 for obs in major {
                     guard let aligned = FaceKit.alignedFace(source: img, observation: obs),
                           let vec = try? face.embed(aligned: aligned) else {
-                        embedFails += 1   // 对齐/嵌入失败的算未识别
+                        // 对齐/嵌入失败的算未识别(按宽度过背景路人间)
+                        embedFailWidths.append(obs.boundingBox.width)
                         continue
                     }
                     var bestCi = -1, secondCi = -1
@@ -482,7 +487,8 @@ struct PeoplePanel: View {
                         (bestSim >= 0.40 || (bestSim >= 0.32 && bestSim - secondSim >= 0.12))
                     fms.append(FaceMatch(ci: bestCi, best: bestSim,
                                          secondCi: secondCi, second: secondSim,
-                                         strong: strong, embedding: vec))
+                                         strong: strong, embedding: vec,
+                                         width: obs.boundingBox.width))
                 }
                 // 同图多脸认领同一主角时,既保留原有分差 veto,也要求强匹配脸
                 // 彼此达到逐脸核验线(0.48);否则较弱的脸不能冒充该主角的第二张脸。
@@ -494,16 +500,25 @@ struct PeoplePanel: View {
                 let vetoed = FaceRecoveryPolicy.vetoedIndices(
                     in: policyMatches, recognizedClusters: key)
                 var matched = Set<Int>()
-                var explained = 0
+                var unexplainedCount = 0   // 只有「同伴尺寸」的未解释脸才算他人(第十三批)
                 var swallowedMin: Float = .infinity   // 被回退吞掉的脸里最低分(诊断用)
                 var detailParts: [String] = []
+                // 背景路人线:脸宽 < 主脸 45% 且认不出/被降级的 = 远处路人不
+                // 算他人(175 实测大量「看起来就是单人」的照片被 30-45% 的
+                // 远小路人推进「与其他人」)。≥30% 仍参与匹配——真同伴的
+                // 小脸照常能被 S/W/Y/K/J 认出进组合组,识别路径不受影响。
+                let strangerFloor = maxW * 0.45
                 for (i, f) in fms.enumerated() {
                     let tag: String
                     if vetoed.contains(i) {
-                        tag = "V"   // 双人认领 veto:未识别
+                        if f.width >= strangerFloor {
+                            tag = "V"   // 双人认领 veto:未识别
+                            unexplainedCount += 1
+                        } else {
+                            tag = "B"   // 背景路人:认领被降级但脸小,不算他人
+                        }
                     } else if f.strong {
                         matched.insert(f.ci)
-                        explained += 1
                         tag = "S"
                     } else if f.ci >= 0, key.contains(f.ci),
                               f.best >= 0.25,
@@ -511,7 +526,6 @@ struct PeoplePanel: View {
                         // 本人的难脸(重检更糊对不上线)最像组内本人→吞掉不算"他人"。
                         // 165 的教训:回退必须带地板+边距——同行者的难脸有自己质心做
                         // 近身竞争者(边距≈0),本人难脸的第二名是无关人物(边距天然大)
-                        explained += 1
                         swallowedMin = min(swallowedMin, f.best)
                         tag = "W"
                     } else if f.ci >= 0,
@@ -524,7 +538,6 @@ struct PeoplePanel: View {
                         // (杨如×程玉婷数百张)——陌生人成不了主角的高频同框者。
                         // 三重门:同框≥20 + 地板 0.22 + 领先 0.06 → 认作该同行者的难脸
                         matched.insert(f.ci)
-                        explained += 1
                         tag = "Y"
                     } else if f.ci >= 0, let bk = knnMean(f.ci, vec: f.embedding),
                               FaceRecoveryPolicy.priorRecoveredByKNN(
@@ -535,20 +548,26 @@ struct PeoplePanel: View {
                         // 分高于对平均脸。Y 先验没接住的低领先样本(171 实测
                         // c1@0.22>c2@0.18)由这里救
                         matched.insert(f.ci)
-                        explained += 1
                         tag = "K"
                     } else {
-                        tag = "U"   // 对不上任何人物也不像组内本人:未识别同行脸
+                        if f.width >= strangerFloor {
+                            tag = "U"   // 对不上任何人物也不像组内本人:未识别同行脸
+                            unexplainedCount += 1
+                        } else {
+                            tag = "B"   // 背景路人:远小脸认不出,不算他人
+                        }
                     }
                     detailParts.append(String(format: "c%d@%.2f>c%d@%.2f%@",
                                               f.ci, f.best, f.secondCi, f.second, tag))
                 }
-                for _ in 0..<embedFails { detailParts.append("嵌入失败U") }
-                // 未识别的主角级脸 = 检出但对不上任何人物、也不像组内本人
-                // (侧/糊/路人)。镜像/海报同人双脸:嵌入一致(≥0.48)豁免
-                // 分差 veto(第十一批)——第二脸分数天然更低,降级会凭空造出
-                // 「未识别同行脸」把单人照推进「与其他人」
-                var unexplained = major.count - explained
+                for w in embedFailWidths {
+                    detailParts.append(w >= strangerFloor ? "嵌入失败U" : "嵌入失败B")
+                    if w >= strangerFloor { unexplainedCount += 1 }
+                }
+                // 未识别的同伴尺寸脸 = 认不出/被降级 且宽 ≥ 主脸 45%
+                // (侧/糊同伴的脸)。<45% 的远小路人是 B,不算他人(第十三批)。
+                // 镜像/海报同人双脸:嵌入一致(≥0.48)豁免分差 veto(第十一批)
+                var unexplained = unexplainedCount
                 var bodyNote = ""
                 // 躯干兜底(167 实测漏径:双人照复检只出 1 脸——同行者的脸被
                 // Vision 检测层整个漏掉,根本没进匹配环节):纯单人判决
@@ -662,11 +681,11 @@ struct PeoplePanel: View {
     /// 人名按当前标签重推——重命名/清标签无需重扫
     private func hydrateIfNeeded() {
         guard m.groups.isEmpty, !m.scanning else { return }
-        // 算法盐 a12:归组/补认逻辑变更必须升盐——旧快照与补认缓存不能复活旧裁决。
+        // 算法盐 a13:归组/补认逻辑变更必须升盐——旧快照与补认缓存不能复活旧裁决。
         // (人脸行/排除/模型)不含算法版本,163 的旧判决经快照水化+缓存命中在
         // 164 原样复活,用户看到的就是"修了没变化"
         let ver = app.store.peopleFingerprint(
-            extra: "a12-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
+            extra: "a13-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
         guard let json = app.store.loadPeopleResults(ver: ver),
               let data = json.data(using: .utf8),
               let snap = try? JSONDecoder().decode(PeopleSnapshot.self, from: data) else {
@@ -734,9 +753,9 @@ struct PeoplePanel: View {
         let faceModel = app.models.face
         let model = app.people   // 结果写共享模型:面板关了再开不丢(160 教训)
         // 指纹:人脸数据/排除集合/模型任一变化,快照与补认缓存自动作废;
-        // a12=算法盐,归组逻辑变更必须升盐(与 hydrateIfNeeded 同串)
+        // a13=算法盐,归组逻辑变更必须升盐(与 hydrateIfNeeded 同串)
         let ver = store.peopleFingerprint(
-            extra: "a12-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
+            extra: "a13-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
         // 「扫描中」记账 + 屏幕常亮:退后台被系统结束进程后,重开面板能明确
         // 告知「上次未完成」;常亮防前台锁屏挂起
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "peopleScanRunning")
@@ -1110,7 +1129,7 @@ struct ClusterDetailView: View {
         } message: {
             // 逐脸裁决:S=强匹配认出 W=回退判本人难脸 V=双人认领降级 U=未识别;
             // c数字=人物簇,@分数=对该簇质心/第二名质心的余弦
-            Text(debugText + "\n(S=认出 W=本人难脸 V=同认领降级 U=未识别 Y=同框先验 K=近邻复核 J=聚合转正)")
+            Text(debugText + "\n(S=认出 W=本人难脸 V=同认领降级 U=未识别 Y=同框先验 K=近邻复核 J=聚合转正 B=背景路人)")
         }
         .sheet(item: $selectedHit) { hit in
             DetailSheet(hit: hit)
