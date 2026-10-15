@@ -68,7 +68,11 @@ final class SearchEngine {
     }
 
     static func parseQuery(_ raw: String) -> QuerySpec {
-        var s = raw
+        // 全角符号归一(第十八批):中文输入法打 and：/文字：/全角空格是常态。
+        // 此前 and:/or: 只认半角冒号——全角版本整个前缀失效,「and：」三个
+        // 字被当进查询词去做语义检索,结果自然是垃圾;全角空格也不分词
+        var s = raw.replacingOccurrences(of: "：", with: ":")
+            .replacingOccurrences(of: "\u{3000}", with: " ")
         var connector = QuerySpec.Connector.none
         let lower = s.lowercased()
         // and:/or:(冒号,40 版写法)与 and /or:(空格)都支持
@@ -122,7 +126,7 @@ final class SearchEngine {
     }
 
     static func splitTerms(_ query: String) -> [String] {
-        query.components(separatedBy: CharacterSet(charactersIn: " ,,、,/"))
+        query.components(separatedBy: CharacterSet(charactersIn: " ,,、,，；/"))
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
     }
