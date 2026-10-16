@@ -591,12 +591,24 @@ struct PeoplePanel: View {
                 var unexplained = unexplainedCount
                 var bodyNote = ""
                 var soloConfirmed = false   // 纯单人四重确认过(单脸+已解释+躯干+SigLIP)
+                // 单脸存货兜底(第二十七批):唯一检出的脸未识别(U/嵌入失败),
+                // 但入库聚类说这张照片只属于一个人物簇(key 唯一)——风景照里
+                // 的小脸嵌入质量差,复检向量漂向证件脸捕获盆(实测 c8@0.24,
+                // 本人簇连前二都没进),库存身份是权威证据,不被复检烂嵌入推翻。
+                // 躯干/SigLIP 也无同行证据时认作该人的难脸(W),按本人路由
+                var soleFaceU = false
+                if major.count == 1, unexplained == 1, key.count == 1,
+                   (fms.count == 1 && embedFailWidths.isEmpty
+                       && matched.isEmpty && !swallowedMin.isFinite
+                    || fms.count == 0 && embedFailWidths.count == 1) {
+                    soleFaceU = true
+                }
                 // 躯干兜底(167 实测漏径:双人照复检只出 1 脸——同行者的脸被
                 // Vision 检测层整个漏掉,根本没进匹配环节):纯单人判决
                 // (恰 1 张主角脸且已解释)再数人体,≥2 个同伴级躯干
                 // (宽度 ≥ 最宽躯干 18%,见 FaceRecoveryPolicy.significantBodyCount)
                 // → 同行者脸被漏检,不能装作单人
-                if major.count == 1 && unexplained == 0 {
+                if major.count == 1 && (unexplained == 0 || soleFaceU) {
                     let bodies = FaceKit.detectHumans(cg: img)
                     let significant = FaceRecoveryPolicy.significantBodyCount(bodies)
                     var suspected = FaceRecoveryPolicy.companionSuspectedByBody(
@@ -616,7 +628,33 @@ struct PeoplePanel: View {
                         extraNote = String(format: ";siglip two=%.2f/one=%.2f", two, one)
                             + (suspected ? "→判有同行" : "")
                     }
-                    if suspected { unexplained = 1 } else { soloConfirmed = true }
+                    if suspected {
+                        unexplained = 1
+                    } else {
+                        soloConfirmed = true
+                        if soleFaceU, let soleCi = key.first {
+                            // 认作该人的难脸:补认领+清未解释,并把裁决段 U→W
+                            // 重写——J 二轮解析 detail 只认 U 段,不重写会被再次转正
+                            matched.insert(soleCi)
+                            unexplained = 0
+                            if fms.count == 1 {
+                                let f0 = fms[0]
+                                let oldSeg = String(format: "c%d@%.2f>c%d@%.2fU",
+                                                    f0.ci, f0.best, f0.secondCi, f0.second)
+                                let newSeg = String(format: "c%d@%.2f>c%d@%.2fW",
+                                                    f0.ci, f0.best, f0.secondCi, f0.second)
+                                for i in detailParts.indices where detailParts[i] == oldSeg {
+                                    detailParts[i] = newSeg
+                                }
+                            } else {
+                                for i in detailParts.indices
+                                where detailParts[i].hasPrefix("嵌入失败") {
+                                    detailParts[i] = "嵌入失败W(存货身份\(soleCi))"
+                                }
+                            }
+                            bodyNote += ";唯一脸未识别→存货身份c\(soleCi)W"
+                        }
+                    }
                     // 躯干证据无论是否触发都写进诊断(逐躯干宽度百分比:下轮
                     // 截图即知每个躯干多大、18% 线卡没卡住第二人,直接定调线)
                     bodyNote = ";躯干\(bodies.count)个\(bodyWidths(bodies))/同伴级\(significant)"
