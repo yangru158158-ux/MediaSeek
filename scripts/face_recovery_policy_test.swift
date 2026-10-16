@@ -317,6 +317,30 @@ struct FaceRecoveryPolicyTest {
             FaceRecoveryPolicy.sameNameMergePlan(clusterNames: [:]).isEmpty,
             "空命名表出空计划"
         )
+        // —— 同人双脸去重(第二十五批):嵌入一致=同一人,保留认领更强的 ——
+        do {
+            // 三维单位向量(手算夹角):a-b cos=0.80, a-c cos=0.90, b-c cos=0.72(均同人≥0.48);
+            // d 与 a/b/c 的 cos 分别 -0.30/-0.24/0.15(均跨人<0.48)
+            let a: [Float] = [1, 0, 0]
+            let b: [Float] = [0.8, 0.6, 0]
+            let c: [Float] = [0.9, 0, 0.43589]
+            let d: [Float] = [-0.3, 0, 0.95394]
+            let m = [
+                FaceRecoveryPolicy.Match(cluster: 0, score: 0.85, strong: true, embedding: a),
+                FaceRecoveryPolicy.Match(cluster: 8, score: 0.60, strong: true, embedding: b),
+                FaceRecoveryPolicy.Match(cluster: 3, score: 0.30, strong: false, embedding: c),
+                FaceRecoveryPolicy.Match(cluster: 5, score: 0.90, strong: true, embedding: d),
+            ]
+            let drop = FaceRecoveryPolicy.samePersonDuplicateIndices(m)
+            expect(drop == [1, 2],
+                   "实测样本:c0@0.85 与 c8@0.60 嵌入一致(同人)丢低分 1;c 同人但非 strong 丢 2;跨人的 3 保留")
+            let solo = [
+                FaceRecoveryPolicy.Match(cluster: 0, score: 0.80, strong: true, embedding: a),
+                FaceRecoveryPolicy.Match(cluster: 4, score: 0.20, strong: false, embedding: d),
+            ]
+            expect(FaceRecoveryPolicy.samePersonDuplicateIndices(solo).isEmpty,
+                   "跨人的两张脸(cos<0.48)互不去重——真同伴路径不受影响")
+        }
         // —— parseFaceSegments:裁决 detail 的结构化解析(二轮统计载体) ——
         let segs = FaceRecoveryPolicy.parseFaceSegments(
             "≥30px rect检出 2/关键点 1/并集 2,≥30% 主角 2脸; c1@0.13>c2@0.10U | c0@0.57>c7@0.14S")
@@ -384,7 +408,7 @@ struct FaceRecoveryPolicyTest {
             "种子与分配确定性:同输入两次结果一致(缓存簇 ID 稳定的前提)"
         )
 
-        print("PASS: 同图双脸补认策略的 62 项确定性回归断言全部通过")
+        print("PASS: 同图双脸补认策略的 66 项确定性回归断言全部通过")
     }
 
     private static func vetoes(_ matches: [FaceRecoveryPolicy.Match]) -> Set<Int> {

@@ -158,6 +158,27 @@ enum FaceRecoveryPolicy {
         bestKNN >= 0.30 && bestKNN - (secondKNN ?? -1) >= 0.06
     }
 
+    /// 同人双脸去重(第二十五批):同照片两张脸嵌入一致(cos≥0.48,同人
+    /// 下限 0.484/跨人上限 0.16 的 CI 标定带,与 veto 豁免同线)=同一人
+    /// ——双通道对同一张脸各框一次(IoU 卡 0.5 线下)或镜像/倒影的两张脸
+    /// 各自认领到不同簇时(实测 c0@0.85 与 c8@0.60),单人照凭空多出
+    /// "第二个人"进组合组。返回应丢弃的低位脸下标:同人对中保留认领更强
+    /// 的(strong 优先,同强比分数);被丢的标 M 不算他人也不算未解释
+    static func samePersonDuplicateIndices(_ matches: [Match],
+                                            pairFloor: Float = 0.48) -> Set<Int> {
+        var drop = Set<Int>()
+        for i in matches.indices {
+            for j in matches.indices where j > i {
+                guard let sim = cosineSimilarity(matches[i].embedding, matches[j].embedding),
+                      sim >= pairFloor else { continue }
+                let iBetter = matches[i].strong
+                    || (!matches[j].strong && matches[i].score >= matches[j].score)
+                if iBetter { drop.insert(j) } else { drop.insert(i) }
+            }
+        }
+        return drop
+    }
+
     /// 聚合转正(J,第十批):单张证据不够线的 U 脸,若在 ≥6 次观测里稳定
     /// best 指向同一簇 → 跨照片一致性即身份铁证(嵌入噪声方向随机,真
     /// 同伴的糊脸方向稳定)。地板 0.18 排除纯噪声,领先 0.02 排除二义脸

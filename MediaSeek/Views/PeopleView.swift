@@ -500,6 +500,11 @@ struct PeoplePanel: View {
                 }
                 let vetoed = FaceRecoveryPolicy.vetoedIndices(
                     in: policyMatches, recognizedClusters: key)
+                // 同人双脸去重(第二十五批):双通道对同一张脸各框一次(IoU 卡
+                // 0.5 线下)或镜像/倒影,两张脸各自认领不同簇(实测 c0@0.85 与
+                // c8@0.60)——单人照凭空多出"第二个人"进「程玉婷×未命名」。
+                // 嵌入一致(≥0.48 同人线)=同一人,保留认领更强的,低分脸标 M
+                let samePerson = FaceRecoveryPolicy.samePersonDuplicateIndices(policyMatches)
                 var matched = Set<Int>()
                 var unexplainedCount = 0   // 只有「同伴尺寸」的未解释脸才算他人(第十三批)
                 var swallowedMin: Float = .infinity   // 被回退吞掉的脸里最低分(诊断用)
@@ -511,7 +516,9 @@ struct PeoplePanel: View {
                 let strangerFloor = maxW * 0.45
                 for (i, f) in fms.enumerated() {
                     let tag: String
-                    if vetoed.contains(i) {
+                    if samePerson.contains(i) {
+                        tag = "M"   // 同人双脸:双通道双框/镜像,低分认领丢弃,不算他人
+                    } else if vetoed.contains(i) {
                         if f.width >= strangerFloor {
                             tag = "V"   // 双人认领 veto:未识别
                             unexplainedCount += 1
@@ -697,12 +704,12 @@ struct PeoplePanel: View {
     /// 人名按当前标签重推——重命名/清标签无需重扫
     private func hydrateIfNeeded() {
         guard m.groups.isEmpty, !m.scanning else { return }
-        // 算法盐 a15:归组/补认逻辑变更必须升盐——旧快照与补认缓存不能复活旧裁决。
+        // 算法盐 a16:归组/补认逻辑变更必须升盐——旧快照与补认缓存不能复活旧裁决。
         // (人脸行/排除/模型)不含算法版本,163 的旧判决经快照水化+缓存命中在
         // 164 原样复活,用户看到的就是"修了没变化"。第十四批:J 破平局(同框
         // 先验裁决二义脸)改变了 U→J 的转正集合,旧快照/缓存必须作废重判
         let ver = app.store.peopleFingerprint(
-            extra: "a15-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
+            extra: "a16-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
         guard let json = app.store.loadPeopleResults(ver: ver),
               let data = json.data(using: .utf8),
               let snap = try? JSONDecoder().decode(PeopleSnapshot.self, from: data) else {
@@ -770,9 +777,9 @@ struct PeoplePanel: View {
         let faceModel = app.models.face
         let model = app.people   // 结果写共享模型:面板关了再开不丢(160 教训)
         // 指纹:人脸数据/排除集合/模型任一变化,快照与补认缓存自动作废;
-        // a15=算法盐,归组逻辑变更必须升盐(与 hydrateIfNeeded 同串)
+        // a16=算法盐,归组逻辑变更必须升盐(与 hydrateIfNeeded 同串)
         let ver = store.peopleFingerprint(
-            extra: "a15-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
+            extra: "a16-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
         // 「扫描中」记账 + 屏幕常亮:退后台被系统结束进程后,重开面板能明确
         // 告知「上次未完成」;常亮防前台锁屏挂起
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "peopleScanRunning")
@@ -1196,7 +1203,7 @@ struct ClusterDetailView: View {
         } message: {
             // 逐脸裁决:S=强匹配认出 W=回退判本人难脸 V=双人认领降级 U=未识别;
             // c数字=人物簇,@分数=对该簇质心/第二名质心的余弦
-            Text(debugText + "\n(S=认出 W=本人难脸 V=同认领降级 U=未识别 Y=同框先验 K=近邻复核 J=聚合转正 B=背景路人)")
+            Text(debugText + "\n(S=认出 W=本人难脸 V=同认领降级 U=未识别 Y=同框先验 K=近邻复核 J=聚合转正 B=背景路人 M=同人双脸)")
         }
         .sheet(item: $selectedHit) { hit in
             DetailSheet(hit: hit)

@@ -135,8 +135,38 @@ enum FaceKit {
         let lm = detect(cg: cg, maxFaces: maxFaces, minFacePx: minFacePx,
                         minQuality: 0, maxYawDeg: 360)
         let rect = detectFaceRectangles(cg: cg, minFacePx: minFacePx)
-        var union = lm
-        for r in rect where !lm.contains(where: { iou($0.boundingBox, r.boundingBox) > 0.5 }) {
+        // landmarks-only 幻觉脸闸门(第二十五批):rect(数人头检测器)没看见、
+        // 只有关键点检测器单独"看见"的脸,大多是树皮/纹理/图案上的幻觉拟合
+        // ——实测程玉婷单人+树被并出第二张脸(rect 1/关键点 2)、以 0.60 强认
+        // 到未命名簇,单人照进「程玉婷×未命名」。这类脸过一遍入库同款质量
+        // 闸门(≥0.35;无质量值保守放行,与 detect 同规)。rect-only 与双通道
+        // 脸保持无闸门(168 起的糊脸同伴救援路径,一步不让)
+        func rectSaw(_ f: VNFaceObservation) -> Bool {
+            rect.contains { iou($0.boundingBox, f.boundingBox) > 0.5 }
+        }
+        var kept = lm.filter(rectSaw)
+        let lmOnly = lm.filter { !rectSaw($0) }
+        if !lmOnly.isEmpty {
+            let q = VNDetectFaceCaptureQualityRequest()
+            q.inputFaceObservations = lmOnly
+            let handler = VNImageRequestHandler(cgImage: cg, options: [:])
+            if (try? handler.perform([q])) != nil, let scored = q.results {
+                func sameBox(_ a: CGRect, _ b: CGRect) -> Bool {
+                    abs(a.minX - b.minX) < 1e-4 && abs(a.minY - b.minY) < 1e-4
+                        && abs(a.width - b.width) < 1e-4 && abs(a.height - b.height) < 1e-4
+                }
+                for f in lmOnly {
+                    // 没匹配到质量值:不拦(保守放行,与 detect 一致)
+                    if let so = scored.first(where: { sameBox($0.boundingBox, f.boundingBox) }),
+                       let v = so.faceCaptureQuality as? Float, v < 0.35 { continue }
+                    kept.append(f)
+                }
+            } else {
+                kept.append(contentsOf: lmOnly)   // 质量请求失败:保守放行
+            }
+        }
+        var union = kept
+        for r in rect where !kept.contains(where: { iou($0.boundingBox, r.boundingBox) > 0.5 }) {
             union.append(r)
         }
         // 大脸在前:主角级 30% 过滤以最大脸为基准,与既有规则一致
