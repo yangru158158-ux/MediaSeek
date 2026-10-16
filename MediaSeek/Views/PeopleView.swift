@@ -451,11 +451,17 @@ struct PeoplePanel: View {
                 // 远离门(第二十六批):相对线在主脸也小时失灵——2018 民光街
                 // 夜景实测主脸仅占画面宽 6-8%,远处吃饭人按比例过了线、还被
                 // J 聚合转正成"同伴"。绝对线:脸宽不足画面 5%(2048px 下约
-                // 100px)=远景路人,连主角级都不进(不匹配/不算他人);真同伴
-                // 的脸几乎不可能小于画面宽 5%
+                // 100px)=远景路人。宽景回退(用户实测建议):全身照/宽景构图主脸
+                // 天然小,若所有脸都过不了 5% 线,退回相对线让主脸照常参与——
+                // 全身占高 90% 的单人照不该因脸小出局;单人确认四重门(单脸/
+                // 已解释/躯干/SigLIP)仍在把守
                 let maxW = faces.map { $0.boundingBox.width }.max() ?? 0
-                let majorFloor = max(maxW * 0.3, 0.05)
-                let major = faces.filter { $0.boundingBox.width >= majorFloor }
+                var majorFloor = max(maxW * 0.3, 0.05)
+                var major = faces.filter { $0.boundingBox.width >= majorFloor }
+                if major.isEmpty, maxW > 0 {
+                    majorFloor = maxW * 0.3
+                    major = faces.filter { $0.boundingBox.width >= majorFloor }
+                }
                 let excludedFaceSizes = faces.filter { $0.boundingBox.width < majorFloor }.map {
                     let width = $0.boundingBox.width
                     let pixels = Int((width * CGFloat(img.width)).rounded())
@@ -464,7 +470,7 @@ struct PeoplePanel: View {
                 }
                 let faceSummary = "≥30px rect检出\(union.rectCount)/关键点\(union.landmarkCount)/并集\(faces.count),≥30%主角\(major.count)脸"
                     + (excludedFaceSizes.isEmpty ? "" : ";过滤小脸 " + excludedFaceSizes.joined(separator: ","))
-                    + (maxW * 0.3 < 0.05 ? ";远离门5%生效" : "")
+                    + (majorFloor > maxW * 0.3 ? ";远离门5%生效" : "")
                 guard !major.isEmpty else {
                     return (ref, [], 0, false, 3, 0, faceSummary)
                 }
