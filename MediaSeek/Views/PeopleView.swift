@@ -448,9 +448,15 @@ struct PeoplePanel: View {
                 }
                 // 主角级脸 = 宽度 ≥ 最大脸 30%:纯背景小脸不参与匹配也不算“他人”。
                 // 不以显著脸数量作提前放行条件;每张显著脸仍逐一匹配。
+                // 远离门(第二十六批):相对线在主脸也小时失灵——2018 民光街
+                // 夜景实测主脸仅占画面宽 6-8%,远处吃饭人按比例过了线、还被
+                // J 聚合转正成"同伴"。绝对线:脸宽不足画面 5%(2048px 下约
+                // 100px)=远景路人,连主角级都不进(不匹配/不算他人);真同伴
+                // 的脸几乎不可能小于画面宽 5%
                 let maxW = faces.map { $0.boundingBox.width }.max() ?? 0
-                let major = faces.filter { $0.boundingBox.width >= maxW * 0.3 }
-                let excludedFaceSizes = faces.filter { $0.boundingBox.width < maxW * 0.3 }.map {
+                let majorFloor = max(maxW * 0.3, 0.05)
+                let major = faces.filter { $0.boundingBox.width >= majorFloor }
+                let excludedFaceSizes = faces.filter { $0.boundingBox.width < majorFloor }.map {
                     let width = $0.boundingBox.width
                     let pixels = Int((width * CGFloat(img.width)).rounded())
                     let percent = maxW > 0 ? Int((width / maxW * 100).rounded()) : 0
@@ -458,6 +464,7 @@ struct PeoplePanel: View {
                 }
                 let faceSummary = "≥30px rect检出\(union.rectCount)/关键点\(union.landmarkCount)/并集\(faces.count),≥30%主角\(major.count)脸"
                     + (excludedFaceSizes.isEmpty ? "" : ";过滤小脸 " + excludedFaceSizes.joined(separator: ","))
+                    + (maxW * 0.3 < 0.05 ? ";远离门5%生效" : "")
                 guard !major.isEmpty else {
                     return (ref, [], 0, false, 3, 0, faceSummary)
                 }
@@ -577,6 +584,7 @@ struct PeoplePanel: View {
                 // 镜像/海报同人双脸:嵌入一致(≥0.48)豁免分差 veto(第十一批)
                 var unexplained = unexplainedCount
                 var bodyNote = ""
+                var soloConfirmed = false   // 纯单人四重确认过(单脸+已解释+躯干+SigLIP)
                 // 躯干兜底(167 实测漏径:双人照复检只出 1 脸——同行者的脸被
                 // Vision 检测层整个漏掉,根本没进匹配环节):纯单人判决
                 // (恰 1 张主角脸且已解释)再数人体,≥2 个同伴级躯干
@@ -602,14 +610,16 @@ struct PeoplePanel: View {
                         extraNote = String(format: ";siglip two=%.2f/one=%.2f", two, one)
                             + (suspected ? "→判有同行" : "")
                     }
-                    if suspected { unexplained = 1 }
+                    if suspected { unexplained = 1 } else { soloConfirmed = true }
                     // 躯干证据无论是否触发都写进诊断(逐躯干宽度百分比:下轮
                     // 截图即知每个躯干多大、18% 线卡没卡住第二人,直接定调线)
                     bodyNote = ";躯干\(bodies.count)个\(bodyWidths(bodies))/同伴级\(significant)"
                         + (suspected ? "→判有同行" : "") + extraNote
                 }
                 let swallowed = swallowedMin.isFinite
-                let reason = swallowed ? 1 : 0
+                // reason=4=纯单人确认:单主角脸+已解释+躯干/SigLIP 均无同行证据。
+                // 路由据此剥离入库期存下的远景/幻影脸簇资格(第二十六批)
+                let reason = swallowed ? 1 : (soloConfirmed ? 4 : 0)
                 let note = swallowed ? Int(swallowedMin * 100) : major.count
                 return (ref, matched, unexplained, false, reason, note,
                         faceSummary + bodyNote + "; " + detailParts.joined(separator: " | "))
@@ -704,12 +714,12 @@ struct PeoplePanel: View {
     /// 人名按当前标签重推——重命名/清标签无需重扫
     private func hydrateIfNeeded() {
         guard m.groups.isEmpty, !m.scanning else { return }
-        // 算法盐 a16:归组/补认逻辑变更必须升盐——旧快照与补认缓存不能复活旧裁决。
+        // 算法盐 a17:归组/补认逻辑变更必须升盐——旧快照与补认缓存不能复活旧裁决。
         // (人脸行/排除/模型)不含算法版本,163 的旧判决经快照水化+缓存命中在
         // 164 原样复活,用户看到的就是"修了没变化"。第十四批:J 破平局(同框
         // 先验裁决二义脸)改变了 U→J 的转正集合,旧快照/缓存必须作废重判
         let ver = app.store.peopleFingerprint(
-            extra: "a16-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
+            extra: "a17-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
         guard let json = app.store.loadPeopleResults(ver: ver),
               let data = json.data(using: .utf8),
               let snap = try? JSONDecoder().decode(PeopleSnapshot.self, from: data) else {
@@ -777,9 +787,9 @@ struct PeoplePanel: View {
         let faceModel = app.models.face
         let model = app.people   // 结果写共享模型:面板关了再开不丢(160 教训)
         // 指纹:人脸数据/排除集合/模型任一变化,快照与补认缓存自动作废;
-        // a16=算法盐,归组逻辑变更必须升盐(与 hydrateIfNeeded 同串)
+        // a17=算法盐,归组逻辑变更必须升盐(与 hydrateIfNeeded 同串)
         let ver = store.peopleFingerprint(
-            extra: "a16-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
+            extra: "a17-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
         // 「扫描中」记账 + 屏幕常亮:退后台被系统结束进程后,重开面板能明确
         // 告知「上次未完成」;常亮防前台锁屏挂起
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "peopleScanRunning")
@@ -954,7 +964,16 @@ struct PeoplePanel: View {
                     let rec = recovered[r]
                     if let rec { reasonsMap[r] = (rec.reason, rec.note); detailsMap[r] = rec.detail }
                     var key = libKey
-                    if let rec { key.formUnion(rec.recovered) }
+                    if let rec {
+                        key.formUnion(rec.recovered)
+                        // 纯单人确认剥离(第二十六批):单主角脸+已解释+躯干/SigLIP
+                        // 均无同行证据(reason=4)时,入库期存下的远景/幻影脸簇资格
+                        // 一律不认——照片只按现场复检认出的主角路由。实测库存远景
+                        // 脸把单人照锚进「程玉婷×未命名」,复检端的闸门管不到库存
+                        if rec.reason == 4, !rec.recovered.isEmpty {
+                            key = rec.recovered
+                        }
+                    }
                     if let rec, !rec.recovered.isSubset(of: libKey) { statRecovered += 1 }
                     let best = cs.compactMap { clusterBest[$0]?[r] }.max() ?? Float(1)
                     if key.isEmpty {
@@ -1278,16 +1297,28 @@ struct ClusterDetailView: View {
             // 第十四批:限定纯单人组——「主角 与其他人」组的主角也是 1 个,
             // 不排除会把角标误挂到必含 U 脸的合影上,"均判本人"文案失真
             if members.count == 1, !withOthers, let r = reasons[ref] {
-                if r.reason != 0 {
-                    Text(r.reason == 1 ? String(format: "弱分回退·%d%%", r.note)
-                         : r.reason == 2 ? "iCloud未取到"
-                         : "复检未检出人脸")
+                if r.reason == 1 {
+                    Text(String(format: "弱分回退·%d%%", r.note))
                         .font(.system(size: 9))
                         .padding(.horizontal, 3).padding(.vertical, 2)
                         .background(.orange.opacity(0.85), in: RoundedRectangle(cornerRadius: 4))
                         .foregroundStyle(.white)
                         .padding(4)
-                } else if r.note >= 2 {
+                } else if r.reason == 2 {
+                    Text("iCloud未取到")
+                        .font(.system(size: 9))
+                        .padding(.horizontal, 3).padding(.vertical, 2)
+                        .background(.orange.opacity(0.85), in: RoundedRectangle(cornerRadius: 4))
+                        .foregroundStyle(.white)
+                        .padding(4)
+                } else if r.reason == 3 {
+                    Text("复检未检出人脸")
+                        .font(.system(size: 9))
+                        .padding(.horizontal, 3).padding(.vertical, 2)
+                        .background(.orange.opacity(0.85), in: RoundedRectangle(cornerRadius: 4))
+                        .foregroundStyle(.white)
+                        .padding(4)
+                } else if r.reason == 0, r.note >= 2 {
                     Text("见\(r.note)脸·均判本人")
                         .font(.system(size: 9))
                         .padding(.horizontal, 3).padding(.vertical, 2)
