@@ -1188,7 +1188,8 @@ struct ClusterDetailView: View {
             Button("取消", role: .cancel) {}
         } message: {
             let n = namingMember.flatMap { personRefs[$0] }?.count ?? 0
-            Text("给该人物出现的全部 \(n) 张照片(含其他合照)写入同名标签;搜索该名字即可全部找到")
+            let extra = max(n - refs.count, 0)
+            Text("命名的是「人」不是「组」:该人物出现的全部 \(n) 张照片都会打上这个名字(本组 \(refs.count) 张 + 合影/多人照 \(extra) 张);搜索名字即可全部找到")
         }
         .alert("归类诊断", isPresented: $showingDebug) {
             Button("好", role: .cancel) {}
