@@ -611,14 +611,23 @@ struct PeoplePanel: View {
                 if major.count == 1 && (unexplained == 0 || soleFaceU) {
                     let bodies = FaceKit.detectHumans(cg: img)
                     let significant = FaceRecoveryPolicy.significantBodyCount(bodies)
+                    // 用全部检出脸对账(第二十八批):远处吃饭人的脸被远离门
+                    // 滤成小脸后,躯干层按「身体2>主角脸1」误判有同行——远景人
+                    // 的脸虽小但已入账,身体数≤全部脸数=每个身体都有主,不算
+                    // 同行;只有身体数超过全部脸数(真有脸漏检的人)才判有同行
                     var suspected = FaceRecoveryPolicy.companionSuspectedByBody(
-                        detectedFaces: major.count, significantBodies: significant)
+                        detectedFaces: faces.count, significantBodies: significant)
                     var extraNote = ""
                     // SigLIP 计数兜底(第三层):脸并集与躯干都只数出 1(170 实测
                     // 『躯干1个/同伴级1』= 贴脸/重叠构图连躯干检测器也只框出一人)
                     // 时,问整图语义「两人 vs 一人」——照片向量已在索引库,零图像
-                    // 推理;判据保守(margin 0.025),诊断带双分数可校准
-                    if !suspected, let anchors = siglipAnchors,
+                    // 推理;判据保守(margin 0.025),诊断带双分数可校准。
+                    // 远景脸已解释的"第二人"不触发语义计数(第二十八批):
+                    // 远处人已被远离门入账,语义层不再越权翻案;躯干数超过
+                    // 全部脸数(真漏检)时语义层照常把守
+                    let distantAccounted = faces.count > major.count
+                    if !suspected, !(distantAccounted && significant <= faces.count),
+                       let anchors = siglipAnchors,
                        let pv = store.clipVector(ref: ref), pv.count == anchors.two.count {
                         var two: Float = 0, one: Float = 0
                         vDSP_dotpr(pv, 1, anchors.two, 1, &two, vDSP_Length(pv.count))
@@ -758,12 +767,12 @@ struct PeoplePanel: View {
     /// 人名按当前标签重推——重命名/清标签无需重扫
     private func hydrateIfNeeded() {
         guard m.groups.isEmpty, !m.scanning else { return }
-        // 算法盐 a17:归组/补认逻辑变更必须升盐——旧快照与补认缓存不能复活旧裁决。
+        // 算法盐 a18:归组/补认逻辑变更必须升盐——旧快照与补认缓存不能复活旧裁决。
         // (人脸行/排除/模型)不含算法版本,163 的旧判决经快照水化+缓存命中在
         // 164 原样复活,用户看到的就是"修了没变化"。第十四批:J 破平局(同框
         // 先验裁决二义脸)改变了 U→J 的转正集合,旧快照/缓存必须作废重判
         let ver = app.store.peopleFingerprint(
-            extra: "a17-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
+            extra: "a18-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
         guard let json = app.store.loadPeopleResults(ver: ver),
               let data = json.data(using: .utf8),
               let snap = try? JSONDecoder().decode(PeopleSnapshot.self, from: data) else {
@@ -831,9 +840,9 @@ struct PeoplePanel: View {
         let faceModel = app.models.face
         let model = app.people   // 结果写共享模型:面板关了再开不丢(160 教训)
         // 指纹:人脸数据/排除集合/模型任一变化,快照与补认缓存自动作废;
-        // a17=算法盐,归组逻辑变更必须升盐(与 hydrateIfNeeded 同串)
+        // a18=算法盐,归组逻辑变更必须升盐(与 hydrateIfNeeded 同串)
         let ver = store.peopleFingerprint(
-            extra: "a17-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
+            extra: "a18-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
         // 「扫描中」记账 + 屏幕常亮:退后台被系统结束进程后,重开面板能明确
         // 告知「上次未完成」;常亮防前台锁屏挂起
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "peopleScanRunning")
