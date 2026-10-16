@@ -670,9 +670,14 @@ struct PeoplePanel: View {
                         + (suspected ? "→判有同行" : "") + extraNote
                 }
                 let swallowed = swallowedMin.isFinite
-                // reason=4=纯单人确认:单主角脸+已解释+躯干/SigLIP 均无同行证据。
-                // 路由据此剥离入库期存下的远景/幻影脸簇资格(第二十六批)
-                let reason = swallowed ? 1 : (soloConfirmed ? 4 : 0)
+                // reason=4/5=纯单人确认(单主角脸+已解释+躯干/SigLIP 均无同行证据)。
+                // 4=现场无被滤小脸:库存额外簇成员是幻影锚,路由剥离(第二十七批)
+                // 5=现场有被远离门滤下的小脸:小脸很可能就是库存成员本人(实测杨如
+                //    76px 小脸入库时已存进他的簇,「程玉婷×杨如」资格是真的)——
+                //    库存身份不剥,照片回纯组合组;用户纠偏:这类照片的正确归宿
+                //    是「程玉婷 × 杨如」双人组,不是单人组
+                let minorCount = faces.count - major.count
+                let reason = swallowed ? 1 : (soloConfirmed ? (minorCount > 0 ? 5 : 4) : 0)
                 let note = swallowed ? Int(swallowedMin * 100) : major.count
                 return (ref, matched, unexplained, false, reason, note,
                         faceSummary + bodyNote + "; " + detailParts.joined(separator: " | "))
