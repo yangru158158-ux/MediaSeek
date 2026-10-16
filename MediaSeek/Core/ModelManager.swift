@@ -48,6 +48,10 @@ final class ModelManager: ObservableObject {
     @Published private(set) var imageState: ModelState = .missing
     @Published private(set) var faceState: ModelState = .missing
     @Published private(set) var detailText: String = ""
+    /// 一轮 loadAll 是否进行中:排队未轮到的槽位状态仍是 .missing,设置页
+    /// 据此显示「加载中(排队)」而非「未安装」——冷启动时用户看到 SigLIP
+    /// 「未安装」以为模型被删了(2026-10-16 用户实测截图),实际在排队
+    @Published private(set) var loadPassRunning = false
 
     private(set) var gemma: GemmaTextEmbedder?
     private(set) var siglip: SigLIPEmbedder?
@@ -82,9 +86,17 @@ final class ModelManager: ObservableObject {
     // MARK: - 加载
 
     func loadAll() async {
-        if textState != .ready { await loadSlot(.text) }
-        if imageState != .ready { await loadSlot(.image) }
-        await loadSlot(.face)   // 人脸模型可选:未装时静默降级(人物归组功能不可用)
+        // 并行加载(第二十四批):iOS 把后台进程杀掉后重开=冷启动,模型必须
+        // 从盘重载(进程级无解);此前三槽串行,总等待=三者之和,且排队槽位
+        // 显示「未安装」吓人。改并行:总等待≈最慢一个,排队槽位由设置页
+        // 按 loadPassRunning 显示「加载中(排队)」
+        loadPassRunning = true
+        defer { loadPassRunning = false }
+        await withTaskGroup(of: Void.self) { group in
+            if textState != .ready { group.addTask { await self.loadSlot(.text) } }
+            if imageState != .ready { group.addTask { await self.loadSlot(.image) } }
+            group.addTask { await self.loadSlot(.face) }   // 人脸模型可选,缺时静默降级
+        }
     }
 
     private func loadSlot(_ slot: ModelSlot) async {

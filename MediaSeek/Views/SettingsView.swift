@@ -92,7 +92,10 @@ struct SettingsView: View {
 
     private func stateText(_ state: ModelState) -> String {
         switch state {
-        case .missing: return "未安装"
+        case .missing:
+            // 冷启动排队中 vs 真没装:loadAll 进行中的 missing 是「还没轮到」,
+            // 显示「未安装」会让用户以为模型被删(2026-10-16 实测)
+            return app.models.loadPassRunning ? "加载中(排队)…" : "未安装"
         case .loading: return "加载中…(首次编译模型需要一些时间)"
         case .ready: return "已就绪"
         case .failed(let m): return "失败:\(m)"
