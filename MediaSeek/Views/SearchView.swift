@@ -69,6 +69,19 @@ struct SearchView: View {
             .contentShape(Rectangle())
             .onTapGesture { hideKeyboard() }
             .navigationTitle("智搜")
+            // 键盘工具条(第三十三批,用户实测点导航栏空白不收——导航栏是
+            // 系统地盘 App 拦不到点按):键盘弹起时键盘顶上常驻收起按钮,
+            // 苹果备忘录/邮件同款;不依赖任何空白区域归属,一键必收
+            .toolbar {
+                ToolbarItemGroup(placement: .keyboard) {
+                    Spacer()
+                    Button {
+                        hideKeyboard()
+                    } label: {
+                        Image(systemName: "keyboard.chevron.compact.down")
+                    }
+                }
+            }
             .sheet(item: $selectedHit) { hit in
                 DetailSheet(hit: hit,
                             searchTerm: lastExecutedQuery,
