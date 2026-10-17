@@ -413,7 +413,9 @@ struct SearchView: View {
                             }
                         }
                         .contextMenu {
-                            if !lastExecutedQuery.isEmpty {
+                            // 选择模式让位(第三十一批):长按是划选的武装动作,
+                            // 不弹「不相关」菜单
+                            if !selectionMode, !lastExecutedQuery.isEmpty {
                                 Button(role: .destructive) {
                                     markIrrelevant(hit)
                                 } label: {

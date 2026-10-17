@@ -1395,6 +1395,8 @@ struct ClusterDetailView: View {
             }
         }
         .onLongPressGesture {
+            // 排除模式让位(第三十一批):长按是划选的武装动作,不弹诊断
+            guard !selecting else { return }
             debugText = details[ref] ?? "无逐脸记录(判决来自旧缓存/旧快照),重新归组一次即可生成"
             showingDebug = true
         }

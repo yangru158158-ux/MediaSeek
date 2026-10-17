@@ -1,14 +1,14 @@
 import SwiftUI
 
-// 划选(第二十批,用户点名「需要做选择的地方可以划过图片/文件/视频做选择」):
-// 相册手感——选择模式下按住横向划过一排条目即批量勾选/取消。
-// ① 首个触点定模式:按在未选项上=划选,按在已选项上=划反选
-// ② 横向起手才启动(位移 dx ≥ dy×1.3);竖向移动留给 ScrollView 滚动,
-//    两者互不抢事件(simultaneousGesture)
-// ③ 普通点按不受影响:drag 需移动 12pt 才算划,单击仍是原 toggle
+// 划选(第二十批起;第三十一批重设计):选择模式下**按住 ~0.3 秒**再划,
+// 划过的条目批量勾选/取消;不按住的直接扫=滚动,手势完全不参与。
+// 演进:二十批逐条目挂手势(ios26 堵死滚动)→二十三批撤到容器+方向门
+// (横起手才算划选)——但手势一旦识别仍抢走滚动手,选择模式里竖向
+// 滚不动(用户实测「选择项目时候内容需要往下滑,滑不动」)。方向判别
+// 天生歧义,改意图判别:LongPress+Drag 序列手势,长按 0.3s 内移动
+// ≤10pt 才武装——轻扫时序列手势直接失败,滚动 100% 畅通。
 // 列表(List 全宽行,如资料库文件列表)与横向 ScrollView(查重组)不适用
-// 划选——竖划/横划分别与滚动彻底同向,无法区分,苹果文件 App 同样只做
-// 点选+全选;划选只装在网格(搜索结果/人物组)。
+// 划选——与滚动同向无法区分;划选只装在网格(搜索结果/人物组)。
 
 /// 一次划选手势的进行态
 struct SwipeSelectState {
@@ -18,6 +18,12 @@ struct SwipeSelectState {
 
     mutating func reset() {
         active = false
+        touched = []
+    }
+
+    /// 武装(长按达成):此后划过的条目按"与起始格相反"的方向批量处理
+    mutating func arm() {
+        active = true
         touched = []
     }
 }
@@ -31,10 +37,8 @@ struct SwipeCellFramesKey: PreferenceKey {
 }
 
 extension View {
-    /// 条目侧:选择模式时上报自身 frame(划选命中测试用)。第二十三批修正:
-    /// 逐条目挂 simultaneousGesture 会把 ScrollView 滚动整个堵死(组详情
-    /// 只能看到首屏)——手势集中到容器一个(swipeSelectContainer),
-    /// 条目只负责报 frame;非选择模式连 frame 都不报,视图树零改动
+    /// 条目侧:选择模式时上报自身 frame(划选命中测试用)。非选择模式
+    /// 连 frame 都不报,视图树零改动
     @ViewBuilder
     func swipeCellFrame(id: String, space: String, enabled: Bool) -> some View {
         if enabled {
@@ -49,14 +53,20 @@ extension View {
         }
     }
 
-    /// 容器侧:整个网格挂一个划选手势。enabled=false 时用手势掩码彻底
-    /// 关闭(.none)——不识别、不拦截,ScrollView 滚动不受任何影响
+    /// 容器侧:整个网格挂一个"长按 0.3s + 拖动"序列手势。enabled=false 时
+    /// 用手势掩码彻底关闭(.none)——不识别、不拦截,滚动不受任何影响。
+    /// ⚠️ 选择模式里长按有别的用途的界面(结果卡 contextMenu/人物组诊断
+    /// 长按),须在 enabled 时让位(调用方用条件守卫)
     func swipeSelectContainer(space: String, enabled: Bool,
                               onSweep: @escaping (DragGesture.Value) -> Void,
                               onEnd: @escaping () -> Void) -> some View {
         simultaneousGesture(
-            DragGesture(minimumDistance: 12, coordinateSpace: .named(space))
-                .onChanged { v in onSweep(v) }
+            LongPressGesture(minimumDuration: 0.3)
+                .sequenced(before: DragGesture(minimumDistance: 4,
+                                               coordinateSpace: .named(space)))
+                .onChanged { v in
+                    if case .second(true, let drag?) = v { onSweep(drag) }
+                }
                 .onEnded { _ in onEnd() },
             including: enabled ? .all : .none)
     }
@@ -64,17 +74,14 @@ extension View {
 
 /// 容器侧裁决:配合 @State var swipe/swipeFrames 使用
 extension SwipeSelectState {
-    /// 划选事件入口:横向起手才启动;命中过的条目不重复处理
     mutating func handle(_ v: DragGesture.Value, frames: [String: CGRect],
                          isSelected: (String) -> Bool,
                          apply: (String, Bool) -> Void) {
         if !active {
-            // 竖向起手=用户在滚动,本次手势不再启动划选
-            guard abs(v.translation.width) >= abs(v.translation.height) * 1.3 else { return }
-            active = true
-            touched = []
+            // 武装后的第一次移动:首触格定模式(与它的当前状态相反)
+            arm()
             if let id = hit(v.location, frames: frames) {
-                selecting = !isSelected(id)   // 首触点定模式
+                selecting = !isSelected(id)
             }
         }
         guard let id = hit(v.location, frames: frames),
