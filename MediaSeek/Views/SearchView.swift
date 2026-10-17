@@ -441,6 +441,17 @@ struct SearchView: View {
                 .padding(.horizontal)
             }
         }
+        // 收键盘(第三十批,用户实测点空白不隐藏):iOS 默认点空白不收输入法。
+        // ①拖动结果列表立即收(scrollDismissesKeyboard) ②点空白区收——
+        // 结果卡是 Button 自吃点按,空白处的 tap 落到这里
+        .scrollDismissesKeyboard(.immediately)
+        .onTapGesture { hideKeyboard() }
+    }
+
+    /// 全局 resign first responder:收起搜索框输入法
+    private func hideKeyboard() {
+        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder),
+                                         to: nil, from: nil, for: nil)
     }
 
     /// 「不相关」标记:term=当前执行的查询词,库内成对记录,该查询下不再出现
