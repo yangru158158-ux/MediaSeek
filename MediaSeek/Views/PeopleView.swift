@@ -1219,8 +1219,8 @@ struct ClusterDetailView: View {
                 }
                 .coordinateSpace(name: "peopleGrid")
                 .swipeSelectContainer(space: "peopleGrid", enabled: selecting,
-                                      onSweep: { v in
-                                          swipe.handle(v, frames: swipeFrames,
+                                      onSweep: { p in
+                                          swipe.handle(p, frames: swipeFrames,
                                                        isSelected: { selected.contains($0) },
                                                        apply: { id, on in
                                                            if on { selected.insert(id) } else { selected.remove(id) }

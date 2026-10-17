@@ -63,6 +63,11 @@ struct SearchView: View {
                 }
                 resultGrid
             }
+            // 收键盘(第三十二批修正,用户实测点搜索框上方空白无反应):
+            // tap 挂页面根 VStack——覆盖搜索框上下一切空白(按钮自吃点按
+            // 不受影响);原先只挂结果列表,头部空白不在覆盖范围
+            .contentShape(Rectangle())
+            .onTapGesture { hideKeyboard() }
             .navigationTitle("智搜")
             .sheet(item: $selectedHit) { hit in
                 DetailSheet(hit: hit,
@@ -432,8 +437,8 @@ struct SearchView: View {
                 }
                 .coordinateSpace(name: "resultGrid")
                 .swipeSelectContainer(space: "resultGrid", enabled: selectionMode,
-                                      onSweep: { v in
-                                          swipe.handle(v, frames: swipeFrames,
+                                      onSweep: { p in
+                                          swipe.handle(p, frames: swipeFrames,
                                                        isSelected: { selected.contains($0) },
                                                        apply: { id, on in
                                                            if on { selected.insert(id) } else { selected.remove(id) }
@@ -443,11 +448,9 @@ struct SearchView: View {
                 .padding(.horizontal)
             }
         }
-        // 收键盘(第三十批,用户实测点空白不隐藏):iOS 默认点空白不收输入法。
-        // ①拖动结果列表立即收(scrollDismissesKeyboard) ②点空白区收——
-        // 结果卡是 Button 自吃点按,空白处的 tap 落到这里
+        // 拖动结果列表立即收键盘(scrollDismissesKeyboard);
+        // 点空白收起已挂页面根 VStack(见 body),此处不再重复挂
         .scrollDismissesKeyboard(.immediately)
-        .onTapGesture { hideKeyboard() }
     }
 
     /// 全局 resign first responder:收起搜索框输入法
