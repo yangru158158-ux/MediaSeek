@@ -91,16 +91,24 @@ def main() -> None:
     loc = next((x for x in locs.get("data", [])
                 if x["attributes"].get("locale") == "zh-Hans"),
                (locs.get("data") or [None])[0])
+    desc = "个人相册端侧语义搜索测试版:人物归组、文字/语义/组合检索、查重。仅供内部测试,不会公开发布。"
     if loc:
         st, resp = call("PATCH", f"/v1/betaAppLocalizations/{loc['id']}", {
             "data": {"type": "betaAppLocalizations", "id": loc["id"],
-                     "attributes": {
-                         "description": "个人相册端侧语义搜索测试版:人物归组、文字/语义/组合检索、查重。仅供内部测试,不会公开发布。",
-                         "feedbackEmail": "44957799@qq.com"}}})
-        print(f"  补描述/反馈邮箱: HTTP {st}")
+                     "attributes": {"description": desc,
+                                    "feedbackEmail": "44957799@qq.com"}}})
+        print(f"  补描述(PATCH): HTTP {st}")
+    else:
+        # 新 App 可能一条 Beta 本地化都没有——POST 新建
+        st, resp = call("POST", "/v1/betaAppLocalizations", {
+            "data": {"type": "betaAppLocalizations",
+                     "attributes": {"locale": "zh-Hans", "description": desc,
+                                    "feedbackEmail": "44957799@qq.com"},
+                     "relationships": {"app": {"data": {"id": APP_ID, "type": "apps"}}}}})
+        print(f"  补描述(POST 新建): HTTP {st} {resp if st >= 300 else ''}")
     # 前置二:出口合规——端侧推理,不含非豁免加密
-    st, det = call("GET", "/v1/builds/" + bid + "/buildBetaDetail")
-    did = det.get("data", {}).get("id") if isinstance(det, dict) else None
+    st, det = call("GET", "/v1/buildBetaDetails" + q(**{"filter[build]": bid}))
+    did = next((d["id"] for d in det.get("data", [])), None) if isinstance(det, dict) else None
     if did:
         st, resp = call("PATCH", f"/v1/buildBetaDetails/{did}", {
             "data": {"type": "buildBetaDetails", "id": did,
