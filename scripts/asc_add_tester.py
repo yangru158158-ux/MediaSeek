@@ -7,7 +7,7 @@ CI(macOS runner)上经 asc_tools.yml 运行。
 内部组须对方已是 App Store Connect 团队成员(用户和访问里加),API 的
 App 管理角色建不了团队成员——跨账号一律走外部组。
 """
-import base64, json, os, sys, time, urllib.request
+import base64, json, os, sys, time, urllib.parse, urllib.request
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
@@ -49,7 +49,8 @@ def call(method: str, path: str, body: dict | None = None) -> dict:
 def main() -> None:
     email, group_name = sys.argv[1], sys.argv[2]
     internal = "--internal" in sys.argv
-    groups = call("GET", f"/v1/betaGroups?filter[app]={APP_ID}&limit=200")
+    q = urllib.parse.urlencode({"filter[app]": APP_ID, "limit": 200})
+    groups = call("GET", f"/v1/betaGroups?{q}")
     gid = next((g["id"] for g in groups.get("data", [])
                 if g["attributes"]["name"] == group_name), None)
     if not gid:
@@ -60,7 +61,7 @@ def main() -> None:
         gid = made["data"]["id"]
         print(f"已建组 {group_name} (内部={internal})")
     else:
-        print(f"组已存在: {group_name}")
+        print(f"组已存在: {group_name} ({gid})")
     call("POST", "/v1/betaTesters", {
         "data": {"type": "betaTesters",
                  "attributes": {"email": email},
