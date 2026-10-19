@@ -65,6 +65,9 @@ def main() -> None:
     st, latest = call("GET", "/v1/builds" + q(**{
         "filter[app]": APP_ID, "filter[processed]": "true",
         "sort": "-uploadedDate", "limit": 1}))
+    if isinstance(latest, str) or st >= 300:
+        print(f"  构建查询失败 HTTP {st}: {latest}")
+        return
     items = latest.get("data", [])
     if not items:
         print("  没有已处理的构建!")
