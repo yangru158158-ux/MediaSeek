@@ -86,6 +86,26 @@ def main() -> None:
     st, resp = call("POST", f"/v1/betaGroups/{gid}/relationships/builds",
                     {"data": [{"id": bid, "type": "builds"}]})
     print(f"  挂构建到组: HTTP {st} {resp if st >= 300 else 'OK'}")
+    # 前置一:Beta App 描述(外部测试硬性要求,422 实测)
+    st, locs = call("GET", "/v1/betaAppLocalizations" + q(**{"filter[app]": APP_ID}))
+    loc = next((x for x in locs.get("data", [])
+                if x["attributes"].get("locale") == "zh-Hans"),
+               (locs.get("data") or [None])[0])
+    if loc:
+        st, resp = call("PATCH", f"/v1/betaAppLocalizations/{loc['id']}", {
+            "data": {"type": "betaAppLocalizations", "id": loc["id"],
+                     "attributes": {
+                         "description": "个人相册端侧语义搜索测试版:人物归组、文字/语义/组合检索、查重。仅供内部测试,不会公开发布。",
+                         "feedbackEmail": "44957799@qq.com"}}})
+        print(f"  补描述/反馈邮箱: HTTP {st}")
+    # 前置二:出口合规——端侧推理,不含非豁免加密
+    st, det = call("GET", "/v1/builds/" + bid + "/buildBetaDetail")
+    did = det.get("data", {}).get("id") if isinstance(det, dict) else None
+    if did:
+        st, resp = call("PATCH", f"/v1/buildBetaDetails/{did}", {
+            "data": {"type": "buildBetaDetails", "id": did,
+                     "attributes": {"usesNonExemptEncryption": False}}})
+        print(f"  出口合规(false): HTTP {st}")
     # 提交 Beta 审核(外部组首次分发必需)
     st, resp = call("POST", "/v1/betaAppReviewSubmissions", {
         "data": {"type": "betaAppReviewSubmissions",
