@@ -107,13 +107,11 @@ def main() -> None:
                      "relationships": {"app": {"data": {"id": APP_ID, "type": "apps"}}}}})
         print(f"  补描述(POST 新建): HTTP {st} {resp if st >= 300 else ''}")
     # 前置二:出口合规——端侧推理,不含非豁免加密
-    st, det = call("GET", "/v1/buildBetaDetails" + q(**{"filter[build]": bid}))
-    did = next((d["id"] for d in det.get("data", [])), None) if isinstance(det, dict) else None
-    if did:
-        st, resp = call("PATCH", f"/v1/buildBetaDetails/{did}", {
-            "data": {"type": "buildBetaDetails", "id": did,
-                     "attributes": {"usesNonExemptEncryption": False}}})
-        print(f"  出口合规(false): HTTP {st} {resp if st >= 300 else ''}")
+    # 合规字段在 build 本体(不在 buildBetaDetails,409 实测):端侧推理,不含非豁免加密
+    st, resp = call("PATCH", f"/v1/builds/{bid}", {
+        "data": {"type": "builds", "id": bid,
+                 "attributes": {"usesNonExemptEncryption": False}}})
+    print(f"  出口合规(false): HTTP {st} {resp if st >= 300 else ''}")
     # 提交 Beta 审核(外部组首次分发必需)
     st, resp = call("POST", "/v1/betaAppReviewSubmissions", {
         "data": {"type": "betaAppReviewSubmissions",
