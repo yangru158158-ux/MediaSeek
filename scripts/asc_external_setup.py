@@ -47,6 +47,21 @@ def q(**params) -> str:
 
 
 def main() -> None:
+    # ASC 团队用户名单(权威核验:邀请到底发没发)
+    st, users = call("GET", "/v1/users?limit=200")
+    print(f"  /v1/users HTTP {st}")
+    if isinstance(users, dict):
+        data = users.get("data", [])
+        print(f"  团队用户数: {len(data)}")
+        for u in data:
+            a = u.get("attributes", {})
+            roles = [d.get("id", "?") for d in
+                     (u.get("relationships", {}).get("roles", {}).get("data") or [])]
+            print(f"  ASC用户: {a.get('username')} 名={a.get('firstName','')}{a.get('lastName','')} roleIds={roles}")
+        if not data:
+            print(f"  原始返回片段: {str(users)[:400]}")
+    else:
+        print(f"  非dict返回: {str(users)[:400]}")
     group_name = sys.argv[1] if len(sys.argv) > 1 else "亲友外测"
     st, groups = call("GET", "/v1/betaGroups" + q(**{"filter[app]": APP_ID, "limit": 200}))
     gid = next((g["id"] for g in groups.get("data", [])
