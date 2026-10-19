@@ -56,7 +56,9 @@ def main() -> None:
     if not gid:
         made = call("POST", "/v1/betaGroups", {
             "data": {"type": "betaGroups",
-                     "attributes": {"name": group_name, "isInternal": internal},
+                     # ASC API 建 betaGroups 不收 isInternal(只读;API 建的组
+                     # 天然是外部组,内部组只能在 ASC 网页建)
+                     "attributes": {"name": group_name},
                      "relationships": {"app": {"data": {"id": APP_ID, "type": "apps"}}}}})
         gid = made["data"]["id"]
         print(f"已建组 {group_name} (内部={internal})")
