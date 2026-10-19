@@ -16,6 +16,18 @@ on:
         description: "测试组名"
         required: true
         default: "外部测试"
+      contact_last:
+        description: "审核联系人姓(external-setup 用)"
+        required: false
+      contact_first:
+        description: "审核联系人名"
+        required: false
+      contact_email:
+        description: "审核联系邮箱"
+        required: false
+      contact_phone:
+        description: "审核联系电话(含区号)"
+        required: false
 
 jobs:
   run:
@@ -42,4 +54,9 @@ jobs:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
-        run: python3 scripts/asc_external_setup.py "${{ inputs.group }}"
+        run: |
+          ARGS=("${{ inputs.group }}")
+          if [ -n "${{ inputs.contact_phone }}" ]; then
+            ARGS+=("${{ inputs.contact_last }}" "${{ inputs.contact_first }}" "${{ inputs.contact_email }}" "${{ inputs.contact_phone }}")
+          fi
+          python3 scripts/asc_external_setup.py "${ARGS[@]}"
