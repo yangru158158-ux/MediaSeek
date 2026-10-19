@@ -113,7 +113,7 @@ def main() -> None:
         st, resp = call("PATCH", f"/v1/buildBetaDetails/{did}", {
             "data": {"type": "buildBetaDetails", "id": did,
                      "attributes": {"usesNonExemptEncryption": False}}})
-        print(f"  出口合规(false): HTTP {st}")
+        print(f"  出口合规(false): HTTP {st} {resp if st >= 300 else ''}")
     # 提交 Beta 审核(外部组首次分发必需)
     st, resp = call("POST", "/v1/betaAppReviewSubmissions", {
         "data": {"type": "betaAppReviewSubmissions",
