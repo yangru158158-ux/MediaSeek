@@ -1,0 +1,37 @@
+name: ASC Tools
+# App Store Connect API 工具(本机 DNS 不通苹果域名,只能借 CI 的网):
+# add-tester = 邀请 TestFlight 测试员到指定组(默认外部组;内部组须对方
+# 已是 ASC 团队成员)。参数:email / group。
+on:
+  workflow_dispatch:
+    inputs:
+      job:
+        description: "add-tester"
+        required: true
+        default: add-tester
+      email:
+        description: "测试员邮箱"
+        required: true
+      group:
+        description: "测试组名"
+        required: true
+        default: "外部测试"
+
+jobs:
+  run:
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装依赖
+        run: pip3 install --quiet cryptography
+
+      - name: 邀请测试员
+        if: inputs.job == 'add-tester'
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+        run: python3 scripts/asc_add_tester.py "${{ inputs.email }}" "${{ inputs.group }}"
