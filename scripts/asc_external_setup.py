@@ -73,8 +73,9 @@ def main() -> None:
         a = b.get("attributes", {})
         print(f"    build v{a.get('version')} processed={a.get('processed')} "
               f"state={a.get('processingState')} uploaded={a.get('uploadedDate')}")
+    # processed 属性已空壳(None),真判据=processingState=="VALID"
     items = [b for b in latest.get("data", [])
-             if b.get("attributes", {}).get("processed")]
+             if b.get("attributes", {}).get("processingState") == "VALID"]
     if not items:
         print("  没有已处理的构建!")
         return
