@@ -62,13 +62,15 @@ def main() -> None:
     st, builds = call("GET", f"/v1/betaGroups/{gid}/builds")
     print(f"  组内构建数: {len(builds.get('data', []))}")
     # App 最新已处理构建
+    # filter[processed] 不是合法参数(400 实测)——拉回本地筛 processed
     st, latest = call("GET", "/v1/builds" + q(**{
-        "filter[app]": APP_ID, "filter[processed]": "true",
-        "sort": "-uploadedDate", "limit": 1}))
+        "filter[app]": APP_ID,
+        "sort": "-uploadedDate", "limit": 10}))
     if isinstance(latest, str) or st >= 300:
         print(f"  构建查询失败 HTTP {st}: {latest}")
         return
-    items = latest.get("data", [])
+    items = [b for b in latest.get("data", [])
+             if b.get("attributes", {}).get("processed")]
     if not items:
         print("  没有已处理的构建!")
         return
