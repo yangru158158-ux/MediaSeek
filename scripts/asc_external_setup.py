@@ -69,6 +69,10 @@ def main() -> None:
     if isinstance(latest, str) or st >= 300:
         print(f"  构建查询失败 HTTP {st}: {latest}")
         return
+    for b in latest.get("data", [])[:10]:
+        a = b.get("attributes", {})
+        print(f"    build v{a.get('version')} processed={a.get('processed')} "
+              f"state={a.get('processingState')} uploaded={a.get('uploadedDate')}")
     items = [b for b in latest.get("data", [])
              if b.get("attributes", {}).get("processed")]
     if not items:
