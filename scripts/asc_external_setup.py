@@ -115,20 +115,20 @@ def main() -> None:
     # 前置三:Beta 审核联系人(外部测试必需;argv: 组名 姓名 邮箱 电话)
     if len(sys.argv) >= 5:
         # betaReviewDetails 是 App 的子资源:路径必须挂在 App 下(独立集合 404 实测)
-        # 一对一关系,端点是单数 betaReviewDetail(复数 404 实测)
-        st, dets = call("GET", f"/v1/apps/{APP_ID}/betaReviewDetail")
-        d = next((x for x in dets.get("data", [])), None) if isinstance(dets, dict) else None
-        body = {"data": {"type": "betaReviewDetails",
+        # 资源真名 betaAppReviewDetail(Beta App 审核详情,App 的一对一子资源)
+        st, dets = call("GET", f"/v1/apps/{APP_ID}/betaAppReviewDetail")
+        d = dets.get("data") if isinstance(dets, dict) else None
+        body = {"data": {"type": "betaAppReviewDetails",
                          "attributes": {"contactFirstName": sys.argv[2],
                                         "contactLastName": sys.argv[3],
                                         "contactEmail": sys.argv[4],
                                         "contactPhone": sys.argv[5]}}}
         if d:
             body["data"]["id"] = d["id"]
-            st, resp = call("PATCH", f"/v1/betaReviewDetails/{d['id']}", body)
+            st, resp = call("PATCH", f"/v1/betaAppReviewDetails/{d['id']}", body)
         else:
             body["data"]["relationships"] = {"app": {"data": {"id": APP_ID, "type": "apps"}}}
-            st, resp = call("POST", "/v1/betaReviewDetails", body)
+            st, resp = call("POST", "/v1/betaAppReviewDetails", body)
         print(f"  审核联系人: HTTP {st} {resp if st >= 300 else ''}")
     # 提交 Beta 审核(外部组首次分发必需)
     st, resp = call("POST", "/v1/betaAppReviewSubmissions", {
