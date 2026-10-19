@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       job:
-        description: "add-tester"
+        description: "add-tester / external-setup"
         required: true
         default: add-tester
       email:
@@ -35,3 +35,11 @@ jobs:
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
         run: python3 scripts/asc_add_tester.py "${{ inputs.email }}" "${{ inputs.group }}"
+
+      - name: 外部组配货(挂构建+提交Beta审核)
+        if: inputs.job == 'external-setup'
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+        run: python3 scripts/asc_external_setup.py "${{ inputs.group }}"
