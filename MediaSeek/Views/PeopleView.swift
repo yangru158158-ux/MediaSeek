@@ -197,7 +197,7 @@ struct PeoplePanel: View {
             } label: {
                 Label("清除全部人名标签", systemImage: "tag.slash")
             }
-            Text("精确档:入库即过滤——截图、低质量脸、大侧脸一律不参与(苹果官方质量分把关);每张脸都必须与「平均脸」核验达标才归属,拿不准的一律进「不确定人物」。归组时现场补认合影里的第二个人:认出是谁就进对应组合组(如 程玉婷 × 杨如);有明显同行脸但认不出的(侧脸/模糊)进「某某 与其他人」;纯单人照才留在单人组。重新命名会覆盖旧名。组内点「排除」可手动移除错误照片,命名后搜索名字即命中。")
+            Text("合影会自动补认同行者:认得出的进组合组,认不出的进「与某人 与其他人」,纯单人照留在单人组。组内可排除错误照片;命名后搜索名字即命中全部照片。")
                 .font(.caption2).foregroundStyle(.secondary)
         }
     }
@@ -1168,8 +1168,6 @@ struct ClusterDetailView: View {
     @State private var nameText = ""
     @State private var applying = false
     @State private var selectedHit: DisplayHit?
-    @State private var showingDebug = false      // 长按照片看逐脸裁决(166 诊断)
-    @State private var debugText = ""
     @State private var selecting = false         // 排除模式:点选照片移出本组
     @State private var selected: Set<String> = []
     // 划选(第二十批):排除模式下横划过一排即批量勾选;竖向移动让给滚动
@@ -1283,13 +1281,7 @@ struct ClusterDetailView: View {
             let extra = max(n - refs.count, 0)
             Text("命名的是「人」不是「组」:该人物出现的全部 \(n) 张照片都会打上这个名字(本组 \(refs.count) 张 + 合影/多人照 \(extra) 张);搜索名字即可全部找到")
         }
-        .alert("归类诊断", isPresented: $showingDebug) {
-            Button("好", role: .cancel) {}
-        } message: {
-            // 逐脸裁决:S=强匹配认出 W=回退判本人难脸 V=双人认领降级 U=未识别;
-            // c数字=人物簇,@分数=对该簇质心/第二名质心的余弦
-            Text(debugText + "\n(S=认出 W=本人难脸 V=同认领降级 U=未识别 Y=同框先验 K=近邻复核 J=聚合转正 B=背景路人 M=同人双脸 N=噪声脸不可聚合)")
-        }
+
         .sheet(item: $selectedHit) { hit in
             DetailSheet(hit: hit)
         }
@@ -1337,68 +1329,6 @@ struct ClusterDetailView: View {
                     .shadow(radius: 2)
                     .padding(6)
             }
-        }
-        .overlay(alignment: .bottomLeading) {
-            // 角标=与「平均脸」的相似度(与逐脸核验同一标尺,组内成员恒 ≥48%);
-            // 不确定组没有归属分,不显示
-            if members.isEmpty { EmptyView() }
-            else if score < 0.999 {
-                Text(String(format: "%.0f%%", score * 100))
-                    .font(.caption2).monospacedDigit()
-                    .padding(.horizontal, 4).padding(.vertical, 2)
-                    .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 4))
-                    .foregroundStyle(score >= 0.5 ? .white : .orange)
-            } else {
-                Text("基准")
-                    .font(.caption2)
-                    .padding(.horizontal, 4).padding(.vertical, 2)
-                    .background(.black.opacity(0.6), in: RoundedRectangle(cornerRadius: 4))
-                    .foregroundStyle(.white)
-            }
-        }
-        .overlay(alignment: .topTrailing) {
-            // 纯单人组标注「为什么算单人」(165 诊断,166 补盲区):reason≠0 是异常
-            // 路径;reason=0 且检出多张脸全判成本人——正常只该发生在镜像/海报/
-            // 本人双脸,若用户肉眼看到别人就该长按照片看逐脸明细。
-            // 第十四批:限定纯单人组——「主角 与其他人」组的主角也是 1 个,
-            // 不排除会把角标误挂到必含 U 脸的合影上,"均判本人"文案失真
-            if members.count == 1, !withOthers, let r = reasons[ref] {
-                if r.reason == 1 {
-                    Text(String(format: "弱分回退·%d%%", r.note))
-                        .font(.system(size: 9))
-                        .padding(.horizontal, 3).padding(.vertical, 2)
-                        .background(.orange.opacity(0.85), in: RoundedRectangle(cornerRadius: 4))
-                        .foregroundStyle(.white)
-                        .padding(4)
-                } else if r.reason == 2 {
-                    Text("iCloud未取到")
-                        .font(.system(size: 9))
-                        .padding(.horizontal, 3).padding(.vertical, 2)
-                        .background(.orange.opacity(0.85), in: RoundedRectangle(cornerRadius: 4))
-                        .foregroundStyle(.white)
-                        .padding(4)
-                } else if r.reason == 3 {
-                    Text("复检未检出人脸")
-                        .font(.system(size: 9))
-                        .padding(.horizontal, 3).padding(.vertical, 2)
-                        .background(.orange.opacity(0.85), in: RoundedRectangle(cornerRadius: 4))
-                        .foregroundStyle(.white)
-                        .padding(4)
-                } else if r.reason == 0, r.note >= 2 {
-                    Text("见\(r.note)脸·均判本人")
-                        .font(.system(size: 9))
-                        .padding(.horizontal, 3).padding(.vertical, 2)
-                        .background(.orange.opacity(0.85), in: RoundedRectangle(cornerRadius: 4))
-                        .foregroundStyle(.white)
-                        .padding(4)
-                }
-            }
-        }
-        .onLongPressGesture {
-            // 排除模式让位(第三十一批):长按是划选的武装动作,不弹诊断
-            guard !selecting else { return }
-            debugText = details[ref] ?? "无逐脸记录(判决来自旧缓存/旧快照),重新归组一次即可生成"
-            showingDebug = true
         }
     }
 
