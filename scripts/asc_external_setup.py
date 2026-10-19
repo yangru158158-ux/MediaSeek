@@ -115,7 +115,8 @@ def main() -> None:
     # 前置三:Beta 审核联系人(外部测试必需;argv: 组名 姓名 邮箱 电话)
     if len(sys.argv) >= 5:
         # betaReviewDetails 是 App 的子资源:路径必须挂在 App 下(独立集合 404 实测)
-        st, dets = call("GET", f"/v1/apps/{APP_ID}/betaReviewDetails")
+        # 一对一关系,端点是单数 betaReviewDetail(复数 404 实测)
+        st, dets = call("GET", f"/v1/apps/{APP_ID}/betaReviewDetail")
         d = next((x for x in dets.get("data", [])), None) if isinstance(dets, dict) else None
         body = {"data": {"type": "betaReviewDetails",
                          "attributes": {"contactFirstName": sys.argv[2],
