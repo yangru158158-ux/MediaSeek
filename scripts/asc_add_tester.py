@@ -68,7 +68,7 @@ def main() -> None:
         "data": {"type": "betaTesters",
                  "attributes": {"email": email},
                  "relationships": {
-                     "apps": {"data": [{"id": APP_ID, "type": "apps"}]},
+                     # CREATE 不许带 apps 关系(409 NOT_ALLOWED 真因);组已指向 App
                      "betaGroups": {"data": [{"id": gid, "type": "betaGroups"}]}}}})
     print(f"已邀请 {email} → {group_name};对方邮箱将收到 TestFlight 邀请函")
 
