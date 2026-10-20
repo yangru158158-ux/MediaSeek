@@ -516,34 +516,11 @@ final class SearchEngine {
                 }
                 }
 
-                // 长中文词整句 LIKE 会因语序漏匹配(搜「医学出生证明」,证书上印的
-                // 是「出生医学证明」)→ 二字滑窗片段 OR,≥2 个片段命中才算,按数排序。
-                // 第二十一批:限定单词查询——多词已逐词独立命中,整串滑窗只会造噪声
-                if terms.count <= 1, query.count >= 4 {
-                    var grams: [String] = []
-                    var seenGram = Set<String>()
-                    let chars = Array(query)
-                    for i in 0..<(chars.count - 1) {
-                        let g = String(chars[i...i + 1])
-                        if seenGram.insert(g).inserted { grams.append(g) }
-                    }
-                    var counts: [String: Int] = [:]
-                    for g in grams {
-                        for ref in (try? store.searchOCR(query: g)) ?? []
-                        where among?.contains(ref.refKey) ?? true {
-                            counts[ref.refKey, default: 0] += 1
-                        }
-                    }
-                    let multi = counts.filter { $0.value >= 2 }
-                        .sorted { $0.value > $1.value }
-                        .prefix(topK)
-                    for (i, e) in multi.enumerated() {
-                        add(SearchHit(kind: ocrKind(e.key), refKey: e.key, frameIndex: 0,
-                                      space: "ocr", title: "含「\(query)」相关文字(命中\(e.value)处)",
-                                      date: nil, score: 1.0, color: nil),
-                            weight: 5.0, rank: rank + i)
-                    }
-                }
+                // 二字滑窗已废除(第三十五批,用户点名「无分隔符请使用完整匹配,
+                // 否则无法做到精确搜索」):滑窗把碎片≥2 的照片全放进结果
+                // (实测搜台胞证全名灌入 81 张,绝大多数是碎片巧合),精确性
+                // 崩坏。现在无分隔长词只做整词完整子串匹配(上方 searchOCR);
+                // 语序记反/说法不同的模糊召回改用 语义: 或拆多词空格
             }
         }
 
