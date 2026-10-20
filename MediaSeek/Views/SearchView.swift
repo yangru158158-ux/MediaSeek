@@ -725,7 +725,9 @@ struct SearchView: View {
             var e = entry
             e.results.removeAll { deadRefs.contains($0.refKey) }
             e.baseIDs.subtract(deadRefs)
-            e.textIDs.removeAll { id in deadRefs.contains { id.hasSuffix("-\($0)") } }
+            e.textIDs.removeAll { id in
+                deadRefs.contains(where: { ref in id.hasSuffix("-\(ref)") })
+            }
             return e
         }
     }
