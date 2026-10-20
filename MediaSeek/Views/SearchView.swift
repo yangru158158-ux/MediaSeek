@@ -692,6 +692,7 @@ struct SearchView: View {
                 for hit in hits { try? app.store.removeEverythingForRef(hit.refKey) }
                 await MainActor.run {
                     results.removeAll { selected.contains($0.id) }
+                    purgeDeletedFromHistory(Set(hits.map(\.refKey)))
                     selected.removeAll()
                     selectionMode = false
                     app.notify("已删除 \(ids.count) 个项目,可在「最近删除」保留 30 天")
@@ -704,11 +705,29 @@ struct SearchView: View {
     }
 
     private func removeFromIndexOnly() {
+        let deadRefs = Set(selectedHits.map(\.refKey))
         for hit in selectedHits { try? app.store.removeEverythingForRef(hit.refKey) }
         results.removeAll { selected.contains($0.id) }
+        purgeDeletedFromHistory(deadRefs)
         selected.removeAll()
         selectionMode = false
         app.notify("已从索引移除(下次同步会重新索引)")
+    }
+
+    /// 删除后清洗结果内历史栈(第三十六批):快照是按下搜索那一刻的内存存档,
+    /// 删除只清当前 results 不回头改历史——用户实测「复选删除一部分图片,
+    /// 返回上次结果还能看到已删照片」。逐层弹掉所有快照里的已删项
+    /// (最近删除里的资产仍能加载缩略图,不清就真·复活)
+    private func purgeDeletedFromHistory(_ deadRefs: Set<String>) {
+        guard !deadRefs.isEmpty else { return }
+        refineBaseIDs.subtract(deadRefs)
+        refineHistory = refineHistory.map { entry in
+            var e = entry
+            e.results.removeAll { deadRefs.contains($0.refKey) }
+            e.baseIDs.subtract(deadRefs)
+            e.textIDs.removeAll { id in deadRefs.contains { id.hasSuffix("-\($0)") } }
+            return e
+        }
     }
 
     /// 结果内搜索退回:弹出一轮历史,恢复上一次的结果/查询词/基数(可连按逐步退回)
