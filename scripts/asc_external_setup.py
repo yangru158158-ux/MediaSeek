@@ -101,6 +101,10 @@ def main() -> None:
     st, resp = call("POST", f"/v1/betaGroups/{gid}/relationships/builds",
                     {"data": [{"id": bid, "type": "builds"}]})
     print(f"  挂构建到组: HTTP {st} {resp if st >= 300 else 'OK'}")
+    # Beta 审核态(外测线进度查询)
+    st2, subs = call("GET", "/v1/betaAppReviewSubmissions" + q(**{"filter[build]": bid}))
+    for sub in (subs.get("data", []) if isinstance(subs, dict) else []):
+        print(f"  Beta审核态: {sub.get('attributes', {}).get('betaReviewState')}")
     # 前置一:Beta App 描述(外部测试硬性要求,422 实测)
     st, locs = call("GET", "/v1/betaAppLocalizations" + q(**{"filter[app]": APP_ID}))
     loc = next((x for x in locs.get("data", [])

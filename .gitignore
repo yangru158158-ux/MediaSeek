@@ -17,3 +17,4 @@ __pycache__/
 bc_logs/
 bc_logs.zip
 runs_check.json
+.mimosa/
