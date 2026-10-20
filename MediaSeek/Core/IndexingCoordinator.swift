@@ -448,7 +448,10 @@ final class IndexingCoordinator: ObservableObject {
             }
             try Task.checkCancellation()
             let text = try await SpeechTranscriber.transcribeVideo(avAsset: avAsset)
-            try store.appendSpeechText(refKey: id, text: text)
+            // 空结果写占位而非丢弃(第三十七批):防"假完成"——听写未启用时
+            // 全部空转,旧逻辑表面转完实际零字节。No speech 错误同理按成功记
+            try store.appendSpeechText(refKey: id,
+                                       text: text.isEmpty ? SpeechTranscriber.noSpeechMarker : text)
             var done = Set(UserDefaults.standard.stringArray(forKey: "speechDone") ?? [])
             done.insert(id)
             UserDefaults.standard.set(Array(done), forKey: "speechDone")
@@ -456,7 +459,16 @@ final class IndexingCoordinator: ObservableObject {
         } catch is CancellationError {
             return true   // 用户停止:不记账不算错,下轮同步从未转写的继续
         } catch {
-            errors.set("语音转写失败:\(error.localizedDescription)")
+            let msg = error.localizedDescription
+            if msg.contains("No speech") {
+                // 真没语音的视频:写占位并按成功记账,不再进失败重试队列
+                try? store.appendSpeechText(refKey: id, text: SpeechTranscriber.noSpeechMarker)
+                var done = Set(UserDefaults.standard.stringArray(forKey: "speechDone") ?? [])
+                done.insert(id)
+                UserDefaults.standard.set(Array(done), forKey: "speechDone")
+                return true
+            }
+            errors.set("语音转写失败:\(msg)")
             markSpeechFail(id)
             return false
         }

@@ -8,6 +8,7 @@ struct SettingsView: View {
     @State private var showModelPicker = false
     @State private var importing = false
     @State private var confirmWipe = false
+    @State private var confirmRespeech = false
     @State private var videoDiagRunning = false
     @State private var videoDiagText: String?
     @State private var labelVocab: [(label: String, count: Int)] = []
@@ -247,6 +248,16 @@ struct SettingsView: View {
         _ = store
     }
 
+    /// 重新转写:清记账+清旧语音文本(含白卷/占位),下轮同步全量重跑
+    /// (第三十七批:听写启用后旧白卷不会自愈——speechDone 记账挡着重跑)
+    private func resetSpeech() {
+        UserDefaults.standard.removeObject(forKey: "speechDone")
+        UserDefaults.standard.removeObject(forKey: "speechFail")
+        UserDefaults.standard.removeObject(forKey: "speechFailCnt")
+        try? app.store.clearSpeechTexts()
+        app.notify("已重置转写记录。回资料库点「同步新增内容」开始重跑(可中断可续)")
+    }
+
     /// 语音转写开关下方的状态说明:权限被拒/机型不支持时给出行动指引,
     /// 正常态讲清代价与检索入口(文字:)
     private var speechHint: String {
@@ -278,6 +289,34 @@ struct SettingsView: View {
                     Text(speechHint)
                         .font(.caption).foregroundStyle(.secondary)
                 }
+            }
+            // 语音转写诊断(第三十七批):听写未启用时识别器全交白卷却记账
+            // "已完成",靠这组数暴露真伪
+            let diag = app.store.speechDiagnostics()
+            let doneN = (UserDefaults.standard.stringArray(forKey: "speechDone") ?? []).count
+            VStack(alignment: .leading, spacing: 2) {
+                Text("转写状态:已记账 \(doneN) 部 · 已存文本 \(diag.stored) 部")
+                    .font(.caption).foregroundStyle(
+                        (UserDefaults.standard.bool(forKey: "speechEnabled") && diag.stored == 0 && doneN > 0)
+                            ? .red : .secondary)
+                if diag.stored > 0, !diag.sample.isEmpty {
+                    Text("样例:\(diag.sample)…")
+                        .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                }
+                if UserDefaults.standard.bool(forKey: "speechEnabled"), diag.stored == 0, doneN > 0 {
+                    Text("已记账但零文本——多为听写未启用导致识别器空转。去 系统设置→通用→键盘→启用听写(勾普通话),然后点下方「重新转写」")
+                        .font(.caption2).foregroundStyle(.red)
+                }
+            }
+            Button(role: .destructive) {
+                confirmRespeech = true
+            } label: {
+                Label("重新转写全部视频", systemImage: "arrow.clockwise")
+            }
+            .confirmationDialog("重新转写会清空全部已转写记录并重跑(≈音频总时长,建议插电)。继续?",
+                                isPresented: $confirmRespeech, titleVisibility: .visible) {
+                Button("重新转写", role: .destructive) { resetSpeech() }
+                Button("取消", role: .cancel) {}
             }
             Stepper(value: Binding(
                 get: { app.indexing.videoFramesPerVideo },

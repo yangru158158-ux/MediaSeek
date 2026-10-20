@@ -7,6 +7,11 @@ import Speech
 /// 被 文字: 精确检索命中。耗时≈音频时长,故置于设置开关之后、同步收尾阶段,
 /// 可中断可续(与 OCR/人脸补全同范式)。
 enum SpeechTranscriber {
+    /// 无语音/空结果的占位标记(第三十七批):此前空文本被静默丢弃但
+    /// speechDone 照记账——听写未启用时本机无语音模型,识别器对全部
+    /// 视频交白卷,表面"转写完成"库里零字节(实测 文字:语音 探针=0)。
+    /// 现在空结果也写占位:探针可见、重转写可辨
+    static let noSpeechMarker = "(未识别到语音)"
 
     /// 单视频音频时长上限:超长视频只转写前 30 分钟(导出时 timeRange 截断)
     static let maxAudioSeconds: Double = 1800

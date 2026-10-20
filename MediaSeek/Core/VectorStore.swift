@@ -705,6 +705,54 @@ final class VectorStore {
         guard sqlite3_step(stmt) == SQLITE_DONE else { throw MSError("语音文本保存失败") }
     } }
 
+    /// 重新转写前清旧语音文本(第三十七批):从 ocr_text 各行剥掉「〔语音〕…」
+    /// 段(保留 OCR 正文),剥完为空的行整行删除——旧白卷/占位全部出清
+    func clearSpeechTexts() throws { try serialized {
+        guard let db else { return }
+        let stmt = try prepare("SELECT ref_key, text FROM ocr_text WHERE text LIKE '%〔语音〕%'")
+        defer { sqlite3_finalize(stmt) }
+        var rows: [(String, String)] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            rows.append((String(cString: sqlite3_column_text(stmt, 0)),
+                         String(cString: sqlite3_column_text(stmt, 1))))
+        }
+        for (key, text) in rows {
+            guard let r = text.range(of: "\n〔语音〕") ?? text.range(of: "〔语音〕") else { continue }
+            let head = String(text[..<r.lowerBound])
+            if head.isEmpty {
+                let del = try prepare("DELETE FROM ocr_text WHERE ref_key = ?")
+                defer { sqlite3_finalize(del) }
+                sqlite3_bind_text(del, 1, key, -1, Self.transient)
+                _ = sqlite3_step(del)
+            } else {
+                let upd = try prepare("UPDATE ocr_text SET text = ? WHERE ref_key = ?")
+                defer { sqlite3_finalize(upd) }
+                sqlite3_bind_text(upd, 1, head, -1, Self.transient)
+                sqlite3_bind_text(upd, 2, key, -1, Self.transient)
+                _ = sqlite3_step(upd)
+            }
+        }
+    } }
+
+    /// 语音转写诊断(第三十七批):已入库的语音文本行数与样例——
+    /// 听写未启用时识别器全交白卷,"转写完成"却零字节,靠这组数暴露
+    func speechDiagnostics() -> (stored: Int, sample: String) { try serialized {
+        guard let db else { return (0, "") }
+        let c = try prepare("SELECT COUNT(*) FROM ocr_text WHERE text LIKE '%〔语音〕%'")
+        defer { sqlite3_finalize(c) }
+        guard sqlite3_step(c) == SQLITE_ROW else { return (0, "") }
+        let n = Int(sqlite3_column_int64(c, 0))
+        var sample = ""
+        if n > 0 {
+            let s2 = try prepare("SELECT text FROM ocr_text WHERE text LIKE '%〔语音〕%' LIMIT 1")
+            defer { sqlite3_finalize(s2) }
+            if sqlite3_step(s2) == SQLITE_ROW, let t = sqlite3_column_text(s2, 0) {
+                sample = String(String(cString: t).prefix(60))
+            }
+        }
+        return (n, sample)
+    } }
+
     /// OCR 文字精确检索(子串匹配,支持中文/数字/编号)
     func searchOCR(query: String) throws -> [(refKey: String, text: String)] { try serialized {
         guard let db, !query.isEmpty else { return [] }
