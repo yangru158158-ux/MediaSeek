@@ -449,9 +449,12 @@ final class IndexingCoordinator: ObservableObject {
             try Task.checkCancellation()
             let text = try await SpeechTranscriber.transcribeVideo(avAsset: avAsset)
             // 空结果写占位而非丢弃(第三十七批):防"假完成"——听写未启用时
-            // 全部空转,旧逻辑表面转完实际零字节。No speech 错误同理按成功记
-            try store.appendSpeechText(refKey: id,
-                                       text: text.isEmpty ? SpeechTranscriber.noSpeechMarker : text)
+            // 全部空转,旧逻辑表面转完实际零字节。纯空白文本同理按占位记
+            // (验收发现④:只判 isEmpty 时"全空格"仍走静默丢的窄口)
+            let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            try store.appendSpeechText(
+                refKey: id,
+                text: trimmedText.isEmpty ? SpeechTranscriber.noSpeechMarker : trimmedText)
             var done = Set(UserDefaults.standard.stringArray(forKey: "speechDone") ?? [])
             done.insert(id)
             UserDefaults.standard.set(Array(done), forKey: "speechDone")
@@ -459,8 +462,16 @@ final class IndexingCoordinator: ObservableObject {
         } catch is CancellationError {
             return true   // 用户停止:不记账不算错,下轮同步从未转写的继续
         } catch {
-            let msg = error.localizedDescription
-            if msg.contains("No speech") {
+            // 真没语音:按错误码判定(第三十七批验收发现:localizedDescription
+            // 随系统语言本地化,中文 iPhone 上不含英文 "No speech" 字样,文案
+            // 匹配会让修复在中文机上失效退回失败重试旧路径)。
+            // kAFAssistantErrorDomain code=1101 = no speech detected
+            let ns = error as NSError
+            let noSpeech = (ns.domain.contains("kAFAssistant") && ns.code == 1101)
+                || ns.localizedDescription.contains("No speech")
+                || ns.localizedDescription.contains("没有语音")
+                || ns.localizedDescription.contains("未检测到语音")
+            if noSpeech {
                 // 真没语音的视频:写占位并按成功记账,不再进失败重试队列
                 try? store.appendSpeechText(refKey: id, text: SpeechTranscriber.noSpeechMarker)
                 var done = Set(UserDefaults.standard.stringArray(forKey: "speechDone") ?? [])
@@ -468,7 +479,7 @@ final class IndexingCoordinator: ObservableObject {
                 UserDefaults.standard.set(Array(done), forKey: "speechDone")
                 return true
             }
-            errors.set("语音转写失败:\(msg)")
+            errors.set("语音转写失败:\(ns.localizedDescription)")
             markSpeechFail(id)
             return false
         }

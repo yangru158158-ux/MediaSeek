@@ -738,13 +738,15 @@ final class VectorStore {
     /// 听写未启用时识别器全交白卷,"转写完成"却零字节,靠这组数暴露
     func speechDiagnostics() -> (stored: Int, sample: String) { try serialized {
         guard let db else { return (0, "") }
-        let c = try prepare("SELECT COUNT(*) FROM ocr_text WHERE text LIKE '%〔语音〕%'")
+        // 与 faceStats 同款 try?(第三十七批验收发现:裸 try 使闭包 throwing,
+        // rethrows 的 serialized 传染到未标 throws 的本函数=编译错)
+        guard let c = try? prepare("SELECT COUNT(*) FROM ocr_text WHERE text LIKE '%〔语音〕%'")
+            else { return (0, "") }
         defer { sqlite3_finalize(c) }
         guard sqlite3_step(c) == SQLITE_ROW else { return (0, "") }
         let n = Int(sqlite3_column_int64(c, 0))
         var sample = ""
-        if n > 0 {
-            let s2 = try prepare("SELECT text FROM ocr_text WHERE text LIKE '%〔语音〕%' LIMIT 1")
+        if n > 0, let s2 = try? prepare("SELECT text FROM ocr_text WHERE text LIKE '%〔语音〕%' LIMIT 1") {
             defer { sqlite3_finalize(s2) }
             if sqlite3_step(s2) == SQLITE_ROW, let t = sqlite3_column_text(s2, 0) {
                 sample = String(String(cString: t).prefix(60))
