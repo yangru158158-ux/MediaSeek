@@ -525,6 +525,7 @@ final class SearchEngine {
         // OCR 命中会泄漏进照片结果
         if !semanticOnly, scope != .file {
             let allowedKinds = Self.scopeAllowedKinds(scope)
+            let classifier = OCRRefClassifier(store: store)
             var seen = Set<String>()
             var rank = 0
             // 第二十一批:恢复「每词独立命中」(build 32 的「或」语义在 CI 88
@@ -538,7 +539,7 @@ final class SearchEngine {
                 let variants = [t] + (QueryUnderstanding.ocrAliases[t] ?? [])
                 for term in variants {
                 let rows = (try? store.searchOCR(query: term)) ?? []
-                let kinds = classifyOCRRefs(rows.map(\.refKey))
+                let kinds = classifier.classify(rows.map(\.refKey))
                 for ref in rows {
                     guard let k = kinds[ref.refKey], allowedKinds.contains(k),
                           !seen.contains(ref.refKey),
@@ -734,6 +735,7 @@ final class SearchEngine {
         -> [(kind: ItemKind, refKey: String, text: String)] {
         var out: [(kind: ItemKind, refKey: String, text: String)] = []
         var seen = Set<String>()
+        let classifier = OCRRefClassifier(store: store)
         for term in [t] + (QueryUnderstanding.ocrAliases[t] ?? []) {
             let rows: [(String, String)]
             if let among = within {
@@ -743,7 +745,7 @@ final class SearchEngine {
                 rows = ((try? store.searchOCR(query: term)) ?? [])
                     .prefix(topK).map { ($0.refKey, $0.text) }
             }
-            let kinds = classifyOCRRefs(rows.map(\.0))
+            let kinds = classifier.classify(rows.map(\.0))
             for r in rows where !seen.contains(r.0) {
                 seen.insert(r.0)
                 out.append((kinds[r.0] ?? .photo, r.0, r.1))
@@ -752,30 +754,38 @@ final class SearchEngine {
         return out
     }
 
-    /// OCR 命中 ref 的真实身份归类(第四十三批):文件→.file;视频→.videoFrame
-    /// ——包括无帧向量行的近全黑/纯语音视频(帧全被 isTooDark 跳过,但语音
-    /// 转写/帧 OCR 文字都在 ocr_text):这类视频不在 refKeys(.videoFrame) 里,
-    /// 此前一律误归 .photo——视频范围搜不到其转写文字、照片范围反而泄漏其
-    /// 命中(验收 low 实锤)。含糊身份(既非文件也无帧行)批量问 PHAsset
-    /// 媒体类型兜底;其余→.photo。d04d122 教训同源:归类看身份不看 scope
-    private func classifyOCRRefs(_ refs: [String]) -> [String: ItemKind] {
-        let fileIds = (try? store.fileIds()) ?? []
-        let videoRefs = (try? store.refKeys(kinds: [.videoFrame])) ?? []
-        var out: [String: ItemKind] = [:]
-        var ambiguous: [String] = []
-        for r in refs {
-            if fileIds.contains(r) { out[r] = .file }
-            else if videoRefs.contains(r) { out[r] = .videoFrame }
-            else { ambiguous.append(r) }
+    /// OCR 命中身份归类器(第四十三批):文件表→.file;有帧向量行→.videoFrame;
+    /// 含糊身份(既非文件也无帧行,如帧全被 isTooDark 跳过的纯语音视频)问
+    /// PHAsset 媒体类型兜底。**一次搜索共用一个实例**:files/videoFrame 全表
+    /// 查询与 PHAsset 批查都只按需做一次并逐 ref 缓存——验收 low 实锤逐词
+    /// 变体各建一套会把扫描 IO 放大数倍(多词×别名×常见词数千命中)
+    final class OCRRefClassifier {
+        private let fileIds: Set<String>
+        private let videoRefs: Set<String>
+        private var cache: [String: ItemKind] = [:]
+        init(store: VectorStore) {
+            fileIds = (try? store.fileIds()) ?? []
+            videoRefs = (try? store.refKeys(kinds: [.videoFrame])) ?? []
         }
-        if !ambiguous.isEmpty {
-            let fetch = PHAsset.fetchAssets(withLocalIdentifiers: ambiguous, options: nil)
-            fetch.enumerateObjects { a, _, _ in
-                out[a.localIdentifier] = a.mediaType == .video ? .videoFrame : .photo
+        func classify(_ refs: [String]) -> [String: ItemKind] {
+            var ambiguous: [String] = []
+            for r in refs {
+                if cache[r] != nil { continue }
+                if fileIds.contains(r) { cache[r] = .file }
+                else if videoRefs.contains(r) { cache[r] = .videoFrame }
+                else { ambiguous.append(r) }
             }
+            if !ambiguous.isEmpty {
+                let fetch = PHAsset.fetchAssets(withLocalIdentifiers: ambiguous, options: nil)
+                fetch.enumerateObjects { a, _, _ in
+                    self.cache[a.localIdentifier] = a.mediaType == .video ? .videoFrame : .photo
+                }
+                for r in ambiguous where self.cache[r] == nil { self.cache[r] = .photo }
+            }
+            var out: [String: ItemKind] = [:]
+            for r in refs { out[r] = cache[r] ?? .photo }
+            return out
         }
-        for r in ambiguous where out[r] == nil { out[r] = .photo }
-        return out
     }
 
     /// SigLIP2 官方零样本模板("This is a photo of X.")对短语类查询更友好;
