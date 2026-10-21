@@ -148,7 +148,6 @@ enum SpeechTranscriber {
                 pump()
             }
         }
-        }
     }
 }
 
