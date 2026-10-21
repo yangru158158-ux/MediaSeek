@@ -113,7 +113,7 @@ enum SpeechTranscriber {
                     } else {
                         writerIn.markAsFinished()
                         finished = true
-                        writer.finishWriting { _ in
+                        writer.finishWriting {
                             if writer.status == .completed {
                                 cont.resume()
                             } else {
