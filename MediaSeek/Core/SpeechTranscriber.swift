@@ -2,21 +2,14 @@ import Foundation
 import AVFoundation
 import Speech
 
-/// 视频语音转文字:AVAsset 抽音轨(m4a)→ SFSpeechRecognizer 端侧识别。
-/// 强制 on-device:音频不出设备;识别文本追加进 ocr_text(〔语音〕段落),
-/// 被 文字: 精确检索命中。耗时≈音频时长,故置于设置开关之后、同步收尾阶段,
-/// 可中断可续(与 OCR/人脸补全同范式)。
+/// 视频语音转文字:AVAsset 抽音轨(WAV PCM 16kHz)→ SFSpeechRecognizer 识别。
+/// 第三十八批:m4a 导出在真机上可能产出坏文件(StackOverflow 实锤,模拟器
+/// 正常真机无声),换成 AVAssetReader+Writer 直写 WAV PCM——Speech 框架
+/// 最可靠的输入格式。识别文本追加进 ocr_text(〔语音〕段落),被 文字: 检索。
 enum SpeechTranscriber {
-    /// 无语音/空结果的占位标记(第三十七批):此前空文本被静默丢弃但
-    /// speechDone 照记账——听写未启用时本机无语音模型,识别器对全部
-    /// 视频交白卷,表面"转写完成"库里零字节(实测 文字:语音 探针=0)。
-    /// 现在空结果也写占位:探针可见、重转写可辨
     static let noSpeechMarker = "(未识别到语音)"
-
-    /// 单视频音频时长上限:超长视频只转写前 30 分钟(导出时 timeRange 截断)
     static let maxAudioSeconds: Double = 1800
 
-    /// 语音识别权限(Info.plist 必须声明 NSSpeechRecognitionUsageDescription)
     static func requestAuthorization() async -> Bool {
         await withCheckedContinuation { cont in
             SFSpeechRecognizer.requestAuthorization { status in
@@ -25,11 +18,6 @@ enum SpeechTranscriber {
         }
     }
 
-    /// 本机是否支持中文端侧识别。不支持时整个语音阶段跳过(全局记账),
-    /// 不逐视频试错——每部试一遍只会得到同一张错误罚单
-    /// 语音识别诊断(第三十八批):supportsOnDeviceRecognition 属性只是"理论
-    /// 支持",模型可能没下载完成——需要配合实际转写结果判断。诊断信息给
-    /// 设置页展示,帮用户定位在哪一环
     static func diagnosticInfo() -> String {
         guard let rec = SFSpeechRecognizer(locale: Locale(identifier: "zh-CN")) else {
             return "zh-CN 识别器创建失败(系统不支持该语言)"
@@ -41,32 +29,19 @@ enum SpeechTranscriber {
 
     static func onDeviceSupported() -> Bool {
         guard let rec = SFSpeechRecognizer(locale: Locale(identifier: "zh-CN")) else { return false }
-        return rec.supportsOnDeviceRecognition   // 属性,不是方法
+        return rec.supportsOnDeviceRecognition
     }
 
-    /// 转写一部视频的音轨。无有效语音返回空串(调用方照常记账防重复处理)。
-    /// 取消策略:进行中的识别自然收尾(用户视频多为短片,代价一段),
-    /// 下一部视频开跑前 checkCancellation 生效——不把外部取消接进识别器,
-    /// 换取 continuation 恢复路径只有「完成/出错」两条,无泄漏窗口
+    /// 转写一部视频的音轨:抽 WAV → SFSpeechRecognizer
     static func transcribeVideo(avAsset: AVAsset) async throws -> String {
         let duration = try await avAsset.load(.duration)
         guard duration.seconds > 0.5 else { return "" }
 
-        // 抽音轨 → 临时 m4a:SFSpeechURLRecognitionRequest 对视频容器不保证,
-        // 走标准音频文件路径
+        // WAV PCM 16kHz 单声道(第三十八批):m4a 在真机上可能坏,PCM 直写
         let tmp = FileManager.default.temporaryDirectory
-            .appendingPathComponent("speech-\(UUID().uuidString).m4a")
-        guard let export = AVAssetExportSession(asset: avAsset, presetName: AVAssetExportPresetAppleM4A) else {
-            throw MSError("无法建立音频导出会话")
-        }
-        export.outputURL = tmp
-        export.outputFileType = .m4a
-        if duration.seconds > maxAudioSeconds {
-            export.timeRange = CMTimeRange(
-                start: .zero,
-                duration: CMTime(seconds: maxAudioSeconds, preferredTimescale: 600))
-        }
-        try await exportAudio(export)
+            .appendingPathComponent("speech-\(UUID().uuidString).wav")
+        let maxSec = min(duration.seconds, maxAudioSeconds)
+        try await exportWAV(from: avAsset, to: tmp, maxSeconds: maxSec)
         defer { try? FileManager.default.removeItem(at: tmp) }
 
         guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "zh-CN")),
@@ -75,13 +50,7 @@ enum SpeechTranscriber {
         }
         let request = SFSpeechURLRecognitionRequest(url: tmp)
         request.shouldReportPartialResults = true
-        // 允许回退到苹果服务器(第三十八批):系统听写和 Speech 框架的本机
-        // 模型是两套独立的东西——用户实测 iPhone 听写正常出字但 SFSpeech
-        // 本机识别 333 部全空转。on-device 模型不可用时服务器识别是唯一
-        // 可用路径;隐私口径与系统听写一致(音频发给 Apple 处理)
-        // 按用户开关选择(第三十八批):默认 false=允许服务器(实测本机模型
-        // 空转后 333 部全白卷,用户已知情);隐私优先的用户可关掉开关强制本机
-        let allowServer = UserDefaults.standard.bool(forKey: "speechAllowServer")
+        let allowServer = UserDefaults.standard.object(forKey: "speechAllowServer") as? Bool ?? true
         request.requiresOnDeviceRecognition = !allowServer
 
         return try await withCheckedThrowingContinuation { cont in
@@ -97,23 +66,69 @@ enum SpeechTranscriber {
         }
     }
 
-    /// exportAsynchronously 包成 async(部署目标 iOS 17,无 async export())
-    private static func exportAudio(_ export: AVAssetExportSession) async throws {
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            export.exportAsynchronously {
-                switch export.status {
-                case .completed: cont.resume()
-                case .cancelled: cont.resume(throwing: CancellationError())
-                default:
-                    cont.resume(throwing: export.error ?? MSError("音轨导出失败"))
+    /// AVAssetReader+Writer 直写 WAV PCM 16kHz 单声道。
+    /// 第三十八批核心修:AVAssetExportSession+m4a 在真机上可能产出坏文件
+    /// (StackOverflow 74454393),换 PCM 直写绕开——Speech 框架最可靠输入。
+    private static func exportWAV(from avAsset: AVAsset, to url: URL, maxSeconds: Double) async throws {
+        guard let audioTrack = try await avAsset.loadTracks(withMediaType: .audio).first else {
+            throw MSError("无音轨")
+        }
+        // PCM 16kHz 单声道:Speech 框架推荐采样率
+        let pcmSettings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVSampleRateKey: 16000.0,
+            AVNumberOfChannelsKey: 1,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsBigEndianKey: false,
+        ]
+        let reader = try AVAssetReader(asset: avAsset)
+        let readerOut = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: pcmSettings)
+        reader.add(readerOut)
+
+        // 限制时长:reader 的 timeRange
+        reader.timeRange = CMTimeRange(
+            start: .zero,
+            duration: CMTime(seconds: maxSeconds, preferredTimescale: 600))
+
+        let writer = try AVAssetWriter(outputURL: url, fileType: .wav)
+        let writerIn = AVAssetWriterInput(mediaType: .audio, outputSettings: pcmSettings)
+        writer.add(writerIn)
+
+        guard reader.startReading() else {
+            throw reader.error ?? MSError("音轨读取启动失败")
+        }
+        writer.startWriting()
+        writer.startSession(atSourceTime: .zero)
+
+        // 逐块搬运, writerInput 需要在自己的队列上喂
+        let queue = DispatchQueue(label: "speech-wav-export")
+        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            var finished = false
+            writerIn.requestMediaDataWhenReady(on: queue) {
+                guard !finished else { return }
+                while writerIn.isReadyForMoreMediaData {
+                    if let buf = readerOut.copyNextSampleBuffer() {
+                        writerIn.append(buf)
+                    } else {
+                        writerIn.markAsFinished()
+                        finished = true
+                        writer.finishWriting { _ in
+                            if writer.status == .completed {
+                                cont.resume()
+                            } else {
+                                cont.resume(throwing: writer.error ?? MSError("WAV 写入失败"))
+                            }
+                        }
+                        return
+                    }
                 }
             }
         }
     }
 }
 
-/// 识别回调 → continuation 的单次恢复闸门:final/error 两条路径都可能到,
-/// 只恢复一次,重复回调(含 isFinal 后再来的残尾)静默丢弃
+/// 识别回调 → continuation 的单次恢复闸门
 private final class ResumeGate: @unchecked Sendable {
     private let lock = NSLock()
     private var resumed = false
@@ -123,8 +138,6 @@ private final class ResumeGate: @unchecked Sendable {
 
     init(_ cont: CheckedContinuation<String, Error>) { self.cont = cont }
 
-    /// 持有识别任务引用直到闸门析构(continuation 恢复后),
-    /// 防任务对象被提前释放(样例代码均以属性持有,照做)
     func attach(_ t: SFSpeechRecognitionTask) {
         lock.lock(); task = t; lock.unlock()
     }
