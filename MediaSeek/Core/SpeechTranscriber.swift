@@ -67,13 +67,13 @@ enum SpeechTranscriber {
     }
 
     /// AVAssetReader+Writer 直写 WAV PCM 16kHz 单声道。
-    /// 第三十八批核心修:AVAssetExportSession+m4a 在真机上可能产出坏文件
-    /// (StackOverflow 74454393),换 PCM 直写绕开——Speech 框架最可靠输入。
+    /// 第三十八批:用后台同步循环,不用 requestMediaDataWhenReady 回调——
+    /// 回调模式下 reader 出错/writer 卡死会导致 continuation 永不 resume,
+    /// TaskGroup 排队等它 → 连续多个泄漏后崩溃(用户实测最后几个视频崩)
     private static func exportWAV(from avAsset: AVAsset, to url: URL, maxSeconds: Double) async throws {
         guard let audioTrack = try await avAsset.loadTracks(withMediaType: .audio).first else {
             throw MSError("无音轨")
         }
-        // PCM 16kHz 单声道:Speech 框架推荐采样率
         let pcmSettings: [String: Any] = [
             AVFormatIDKey: kAudioFormatLinearPCM,
             AVSampleRateKey: 16000.0,
@@ -85,8 +85,6 @@ enum SpeechTranscriber {
         let reader = try AVAssetReader(asset: avAsset)
         let readerOut = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: pcmSettings)
         reader.add(readerOut)
-
-        // 限制时长:reader 的 timeRange
         reader.timeRange = CMTimeRange(
             start: .zero,
             duration: CMTime(seconds: maxSeconds, preferredTimescale: 600))
@@ -101,26 +99,51 @@ enum SpeechTranscriber {
         writer.startWriting()
         writer.startSession(atSourceTime: .zero)
 
-        // 逐块搬运, writerInput 需要在自己的队列上喂
-        let queue = DispatchQueue(label: "speech-wav-export")
-        return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            var finished = false
-            writerIn.requestMediaDataWhenReady(on: queue) {
-                guard !finished else { return }
+        // 后台线程逐块搬运:同步循环,每块一定被处理,不依赖回调再触发
+        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+            DispatchQueue.global(qos: .utility).async {
+                var wroteAny = false
                 while writerIn.isReadyForMoreMediaData {
                     if let buf = readerOut.copyNextSampleBuffer() {
                         writerIn.append(buf)
+                        wroteAny = true
                     } else {
                         writerIn.markAsFinished()
-                        finished = true
+                        // 等 writer 收尾
                         writer.finishWriting {
                             if writer.status == .completed {
                                 cont.resume()
                             } else {
-                                cont.resume(throwing: writer.error ?? MSError("WAV 写入失败"))
+                                cont.resume(throwing: writer.error ?? MSError("WAV 写入失败(状态=\(writer.status.rawValue))"))
                             }
                         }
                         return
+                    }
+                }
+                // isReadyForMoreMediaData 变 false 且 reader 已读完但没进 else 分支
+                // (writer 内部缓冲满):等 writer 消化后重试,60 秒超时兜底
+                if reader.status == .completed {
+                    writerIn.markAsFinished()
+                    writer.finishWriting {
+                        if writer.status == .completed {
+                            cont.resume()
+                        } else {
+                            cont.resume(throwing: writer.error ?? MSError("WAV 写入失败(尾部)"))
+                        }
+                    }
+                } else if reader.status == .failed {
+                    cont.resume(throwing: reader.error ?? MSError("音轨读取失败"))
+                } else {
+                    // writer buffer 满且 reader 还在读:极罕见,等 1 秒后强制收尾
+                    DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1.0) {
+                        writerIn.markAsFinished()
+                        writer.finishWriting {
+                            if writer.status == .completed {
+                                cont.resume()
+                            } else {
+                                cont.resume(throwing: writer.error ?? MSError("WAV 写入超时"))
+                            }
+                        }
                     }
                 }
             }
