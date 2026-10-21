@@ -140,7 +140,6 @@ final class SearchEngine {
         var query = QueryUnderstanding.core(spec.body)
         guard !query.isEmpty else { return .empty }
 
-        let semanticOnly = spec.semanticOnly
         let siglip = await MainActor.run { models.siglip }
         lastSemanticTopScore = nil
 
@@ -186,10 +185,9 @@ final class SearchEngine {
         // GPS 地点浏览(该地拍摄的照片/视频,不依赖索引)只做并集排前
         if let placeRegion, placeLabel != nil, !query.isEmpty,
            spec.channel == .any, spec.connector == .none, within == nil {
-            let main = try await runMainSearch(query: query, spec: spec, semanticOnly: semanticOnly,
-                                               scope: scope, topK: topK, siglip: siglip,
-                                               dateRange: dateRange, placeRegion: nil,
-                                               placeLabel: placeLabel)
+            let main = try await runBareSearch(query: query, spec: spec, scope: scope, topK: topK,
+                                               siglip: siglip, dateRange: dateRange,
+                                               placeRegion: nil, placeLabel: placeLabel, among: nil)
             var browseHits: [DisplayHit] = []
             photo.fetchAllAssets().enumerateObjects { asset, _, _ in
                 guard browseHits.count < topK else { return }
@@ -239,7 +237,12 @@ final class SearchEngine {
                                  timeLabel: dateRange?.label, placeLabel: placeLabel)
         }
 
-        if let within, !within.isEmpty {
+        // 第四十一批:此分支只接管裸搜(或任何 spec 的文件范围)——前缀查询
+        // (and:/or:/文字:)在结果内也要落到下方 searchScoped 保持 AND/排他
+        // 语义,与全库搜索一致;此前被拦进主管线,文字: 在结果内多词退化成
+        // 并集。文件范围例外:searchScoped 有 scope 守卫拦截,保持主管线
+        if let within, !within.isEmpty,
+           scope == .file || (spec.channel == .any && spec.connector == .none) {
             // 结果内纯时间词(如「2025年」):基数集合本身按拍摄/创建时间筛+倒序,
             // 与第一次搜索的纯时间浏览同构,只是范围缩进当前结果集
             if query.isEmpty, let dateRange {
@@ -273,10 +276,9 @@ final class SearchEngine {
             // 完全一致(旧 searchWithin 是特设核验流程,通道与主流程不同步,
             // 反复出病:门槛悬空、漏标签通道,已删);时间词由 runMainSearch 内部
             // 按 dateRange 过滤(时间+内容词组合,如「2025年 海滩」)
-            return try await runMainSearch(query: query, spec: spec, semanticOnly: semanticOnly,
-                                           scope: scope, topK: topK, siglip: siglip,
-                                           dateRange: dateRange, placeRegion: nil, placeLabel: nil,
-                                           among: within)
+            return try await runBareSearch(query: query, spec: spec, scope: scope, topK: topK,
+                                           siglip: siglip, dateRange: dateRange, placeRegion: nil,
+                                           placeLabel: nil, among: within)
         }
         if spec.channel == .text || spec.connector != .none {
             let scoped = try await searchScoped(spec: spec, scope: scope,
@@ -284,10 +286,33 @@ final class SearchEngine {
             return SearchOutcome(hits: scoped.hits, textIDs: scoped.textIDs,
                                  timeLabel: nil, placeLabel: nil)
         }
-        return try await runMainSearch(query: query, spec: spec, semanticOnly: semanticOnly,
+        return try await runBareSearch(query: query, spec: spec, scope: scope, topK: topK,
+                                       siglip: siglip, dateRange: dateRange,
+                                       placeRegion: placeRegion, placeLabel: placeLabel, among: nil)
+    }
+
+    /// 第四十一批:裸搜执行器——多词(有分隔符)=每词同时命中(AND)。
+    /// 此前裸搜多词逐词取并集(第二十一批「或」语义),「宝宝 老公」190 个
+    /// 结果几乎全是只含「宝宝」的;用户定规(2026-10-21):有分隔符=同时
+    /// 完全匹配。AND 复用 searchScoped 的 and: 路径(每词 OCR∪语义∪标签
+    /// 命中再交集,已验收实现,不另造一套防漂移);单词与文件范围(file 被
+    /// searchScoped 守卫拦截)保持原主管线;or: 前缀仍可显式取并集
+    private func runBareSearch(query: String, spec: QuerySpec, scope: SearchScope,
+                               topK: Int, siglip: SigLIPEmbedder?, dateRange: QueryDateRange?,
+                               placeRegion: CLCircularRegion?, placeLabel: String?,
+                               among: Set<String>? = nil) async throws -> SearchOutcome {
+        if scope != .file, Self.splitTerms(query).count >= 2 {
+            let andSpec = QuerySpec(connector: .and, channel: .any, body: query)
+            let scoped = try await searchScoped(spec: andSpec, scope: scope, topK: topK,
+                                                siglip: siglip, within: among,
+                                                dateRange: dateRange)
+            return SearchOutcome(hits: scoped.hits, textIDs: scoped.textIDs,
+                                 timeLabel: dateRange?.label, placeLabel: placeLabel)
+        }
+        return try await runMainSearch(query: query, spec: spec, semanticOnly: spec.semanticOnly,
                                        scope: scope, topK: topK, siglip: siglip,
                                        dateRange: dateRange, placeRegion: placeRegion,
-                                       placeLabel: placeLabel)
+                                       placeLabel: placeLabel, among: among)
     }
 
     private func runMainSearch(query: String, spec: QuerySpec, semanticOnly: Bool,
@@ -564,7 +589,8 @@ final class SearchEngine {
     /// 「文字:」前缀的全部命中被三维度切换栏归进语义栏——用户实测
     /// 文字:地图 189 个全挂语义、文字 0)
     private func searchScoped(spec: QuerySpec, scope: SearchScope,
-                              topK: Int, siglip: SigLIPEmbedder?, within: Set<String>? = nil) async throws -> (hits: [DisplayHit], textIDs: Set<String>) {
+                              topK: Int, siglip: SigLIPEmbedder?, within: Set<String>? = nil,
+                              dateRange: QueryDateRange? = nil) async throws -> (hits: [DisplayHit], textIDs: Set<String>) {
         guard scope != .file else { return ([], []) }   // 文件范围无照片/视频(第三十九批:视频范围原被误拦)
         let terms = Self.splitTerms(spec.body)
         guard !terms.isEmpty else { return ([], []) }
@@ -596,7 +622,7 @@ final class SearchEngine {
             let combined = combine(perTerm, connector: spec.connector)
             let textIDs = Set(combined.filter { $0.space == "ocr" }
                 .map { "\($0.kind.rawValue)-\($0.refKey)" })
-            return (resolve(combined), textIDs)
+            return (resolve(combined, dateRange: dateRange), textIDs)
         }
 
         // 语义/自动通道:数字词→文字,其余词→视觉
