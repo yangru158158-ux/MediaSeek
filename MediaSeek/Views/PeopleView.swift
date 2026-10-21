@@ -1138,11 +1138,10 @@ struct PeoplePanel: View {
                         .init(members: $0.members, refs: $0.refs,
                               scores: $0.scores, withOthers: $0.withOthers)
                     },
-                    personRefs: refsOf, nameScope: nameScope,
-                    totalPersons: persons.count,
+                    personRefs: refsOf, totalPersons: persons.count,
                     unknownCount: unknownAlive, savedAt: Date(),
                     reasons: reasonsMap.mapValues { [$0.reason, $0.note] },
-                    details: detailsMap)
+                    details: detailsMap, nameScope: nameScope)
                 if let data = try? JSONEncoder().encode(snap) {
                     store.savePeopleResults(json: String(decoding: data, as: UTF8.self), ver: ver)
                 }
