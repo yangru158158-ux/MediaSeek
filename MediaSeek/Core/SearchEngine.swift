@@ -288,7 +288,8 @@ final class SearchEngine {
         }
         return try await runBareSearch(query: query, spec: spec, scope: scope, topK: topK,
                                        siglip: siglip, dateRange: dateRange,
-                                       placeRegion: placeRegion, placeLabel: placeLabel, among: nil)
+                                       placeRegion: placeRegion, placeLabel: placeLabel,
+                                       among: within)
     }
 
     /// 第四十一批:裸搜执行器——多词(有分隔符)=每词同时命中(AND)。
@@ -301,11 +302,29 @@ final class SearchEngine {
                                topK: Int, siglip: SigLIPEmbedder?, dateRange: QueryDateRange?,
                                placeRegion: CLCircularRegion?, placeLabel: String?,
                                among: Set<String>? = nil) async throws -> SearchOutcome {
-        if scope != .file, Self.splitTerms(query).count >= 2 {
+        // 只对裸搜(channel == .any)生效:语义: 前缀必须保持排他(只要语义
+        // 命中),不得被改道 and: 并入 OCR——验收 medium 实锤(此前只看
+        // scope 和词数,语义:多词被误改道且未在提交说明声明)
+        if spec.channel == .any, scope != .file, Self.splitTerms(query).count >= 2 {
             let andSpec = QuerySpec(connector: .and, channel: .any, body: query)
             let scoped = try await searchScoped(spec: andSpec, scope: scope, topK: topK,
                                                 siglip: siglip, within: among,
                                                 dateRange: dateRange)
+            // 空结果诊断(与主管线同口径 minScore:-1/limit:1):AND 交空时记
+            // 全库最高语义分供空态提示——searchScoped 不写该字段,不补则
+            // 「语义通道最高相关度仅 X%」提示退化(验收 low)
+            if scoped.hits.isEmpty, let siglip {
+                let probeKinds: [ItemKind] = scope == .photo ? [.photo]
+                    : (scope == .video ? [.videoFrame] : [.photo, .videoFrame])
+                for t in Self.splitTerms(query) where !Self.containsDigit(t) {
+                    guard let q = try? siglip.embedQuery(Self.siglipQuery(t)) else { continue }
+                    if let top = (try? store.search(space: siglip.space, kinds: probeKinds,
+                                                    query: q, limit: 1, minScore: -1,
+                                                    among: among))?.first?.score {
+                        lastSemanticTopScore = lastSemanticTopScore.map { max($0, top) } ?? top
+                    }
+                }
+            }
             return SearchOutcome(hits: scoped.hits, textIDs: scoped.textIDs,
                                  timeLabel: dateRange?.label, placeLabel: placeLabel)
         }
