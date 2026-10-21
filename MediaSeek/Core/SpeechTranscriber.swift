@@ -63,7 +63,11 @@ enum SpeechTranscriber {
         }
         let request = SFSpeechURLRecognitionRequest(url: tmp)
         request.shouldReportPartialResults = true
-        request.requiresOnDeviceRecognition = true   // 强制本机:音频不上传
+        // 允许回退到苹果服务器(第三十八批):系统听写和 Speech 框架的本机
+        // 模型是两套独立的东西——用户实测 iPhone 听写正常出字但 SFSpeech
+        // 本机识别 333 部全空转。on-device 模型不可用时服务器识别是唯一
+        // 可用路径;隐私口径与系统听写一致(音频发给 Apple 处理)
+        request.requiresOnDeviceRecognition = false
 
         return try await withCheckedThrowingContinuation { cont in
             let gate = ResumeGate(cont)
