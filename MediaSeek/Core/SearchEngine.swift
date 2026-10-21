@@ -577,15 +577,10 @@ final class SearchEngine {
             for t in terms {
                 // 第三十九批修:按范围过滤 OCR 命中——验收 medium 发现,视频
                 // 范围下照片 OCR 泄漏进结果(ocrKind 只归类不过滤)
-                let raw = ocrUnionHits(t, scope: scope, within: within, topK: topK)
-                let rows = raw.filter { ref in
-                    switch scope {
-                    case .video: return ref.kind == .videoFrame
-                    case .photo: return ref.kind == .photo
-                    case .all: return true
-                    case .file: return ref.kind == .file
-                    }
-                }
+                // 第四十批:改用 scopeAllowedKinds 统一映射,消除并行维护的
+                // 内联 switch(其 .file 分支因上方 guard 永不可达)
+                let rows = ocrUnionHits(t, scope: scope, within: within, topK: topK)
+                    .filter { Self.scopeAllowedKinds(scope).contains($0.kind) }
                 let connectorIsAnd = (spec.connector == .and)
                 perTerm.append(rows.enumerated().map { rank, ref in
                     let base = within != nil
@@ -702,8 +697,10 @@ final class SearchEngine {
         -> [(kind: ItemKind, refKey: String, text: String)] {
         let fileIds = (try? store.fileIds()) ?? []
         let videoRefs = (try? store.refKeys(kinds: [.videoFrame])) ?? []
+        // 第四十批修:文件 ref 一律归 .file——此前仅 scope == .all 时归类,
+        // 其余范围下被归 .photo,照片范围过滤挡不住文件 OCR 命中
         func ocrKind(_ ref: String) -> ItemKind {
-            if scope == .all, fileIds.contains(ref) { return .file }
+            if fileIds.contains(ref) { return .file }
             if videoRefs.contains(ref) { return .videoFrame }
             return .photo
         }
@@ -743,10 +740,10 @@ final class SearchEngine {
                               scope: SearchScope = .all) -> [SearchHit] {
         guard let siglip else { return [] }
         guard let q = try? siglip.embedQuery(Self.siglipQuery(term)) else { return [] }
-        // 第三十九批:按范围取 kinds(与主管线 imageKinds 同构)——此前
-        // 全部写死 [.photo],视频范围下视频帧向量从不被查询
+        // 第三十九批:按范围取 kinds(与主管线 imageKinds 同构,.file→[] 空)——
+        // 此前全部写死 [.photo],视频范围下视频帧向量从不被查询
         let searchKinds: [ItemKind] = scope == .all ? [.photo, .videoFrame]
-            : (scope == .photo ? [.photo] : (scope == .video ? [.videoFrame] : [.photo]))
+            : (scope == .photo ? [.photo] : (scope == .video ? [.videoFrame] : []))
         // 结果内核验:分数只在基数集合内算,门槛放宽、相对截断以集合内最佳为基准——
         // 否则全局排名的尾部截断会在取交集前把候选砍光(「行情图 ∩ 语义:电脑屏幕=0」事故:
         // 全库最高分是实拍屏幕,行情截图全被 85% 线砍掉,交集自然为空)
@@ -769,7 +766,7 @@ final class SearchEngine {
             }
             let best = hits.first?.score ?? 0
             if best > 0 { hits = hits.filter { $0.score >= best * 0.85 } }
-            return hits
+            return videoFrameGuard(hits, term: term)
         }
         var hits = Self.dedupByRef((try? store.search(
             space: siglip.space, kinds: searchKinds, query: q, limit: topK, minScore: 0.25)) ?? [])
@@ -785,7 +782,25 @@ final class SearchEngine {
         let best = hits.first?.score ?? 0
         // 低置信收紧与主流程同规:最佳 <0.13 = 无真匹配,只留贴近最佳的一小撮
         if best > 0 { hits = hits.filter { $0.score >= best * (best >= 0.13 ? 0.85 : 0.95) } }
-        return hits
+        return videoFrameGuard(hits, term: term)
+    }
+
+    /// 视频帧实据护栏(第四十批,与主管线 392-400 同规):SigLIP 对视频帧
+    /// 区分度不足,0.08-0.15 是噪声带(2026-10-12 马尔代夫实测)——帧标签
+    /// 与查询词有交集或分数 ≥0.15 强信号才入场,否则剔除视频帧命中
+    private func videoFrameGuard(_ hits: [SearchHit], term: String) -> [SearchHit] {
+        guard hits.contains(where: { $0.kind == .videoFrame }) else { return hits }
+        let tokens = Self.queryTokens(query: term)
+        var labelRefs = Set<String>()
+        if !tokens.isEmpty, let rows = try? store.allVideoFrameLabels() {
+            for row in rows {
+                let labelTokens = Set(row.title.lowercased()
+                    .components(separatedBy: CharacterSet(charactersIn: ", ")))
+                if !tokens.intersection(labelTokens).isEmpty { labelRefs.insert(row.refKey) }
+            }
+        }
+        return hits.filter { $0.kind != .videoFrame
+            || labelRefs.contains($0.refKey) || $0.score >= 0.15 }
     }
 
     /// 按连接词合并各词命中列表:and=交集,or/无=并集(去重保序),最后相对化显示分
