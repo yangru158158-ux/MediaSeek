@@ -122,23 +122,20 @@ enum SpeechTranscriber {
         header.append(le32(0)) // placeholder: dataSize, 回填
         try file.write(contentsOf: header)
 
-        // 逐块写 PCM 数据
+        // 逐块写 PCM 数据:直接从 CMBlockBuffer 取原始字节(已是 Linear PCM)
         var totalBytes = 0
         while let buf = readerOut.copyNextSampleBuffer() {
-            if let block = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
-                buf, bufferListSizeOut: nil, blockBufferSizeOut: nil,
-                blockBufferAllocator: kCFAllocatorDefault, blockBufferMemoryAllocator: kCFAllocatorDefault,
-                flags: 0)?.data {
-                // AudioBufferList → 逐 AudioBuffer 取数据
-                let listPtr = block.withUnsafeBytes { $0.bindMemory(to: AudioBufferList.self).baseAddress! }
-                let bufCount = Int(listPtr.pointee.mNumberBuffers)
-                for i in 0..<bufCount {
-                    let ab = listPtr.pointee.mBuffers[i]
-                    if let dataPtr = ab.mData {
-                        let bytes = Data(bytes: dataPtr, count: Int(ab.mDataByteSize))
-                        try file.write(contentsOf: bytes)
-                        totalBytes += bytes.count
-                    }
+            if let dataBuf = CMSampleBufferGetDataBuffer(buf) {
+                var length = 0
+                var ptr: UnsafeMutablePointer<Int8>?
+                CMBlockBufferGetDataPointer(dataBuf, atOffset: 0,
+                                           lengthAtOffsetOut: nil,
+                                           totalLengthOut: &length,
+                                           dataPointerOut: &ptr)
+                if let p = ptr, length > 0 {
+                    let chunk = Data(bytes: p, count: length)
+                    try file.write(contentsOf: chunk)
+                    totalBytes += length
                 }
             }
         }
