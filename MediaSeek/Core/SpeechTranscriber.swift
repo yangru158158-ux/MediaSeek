@@ -66,88 +66,92 @@ enum SpeechTranscriber {
         }
     }
 
-    /// AVAssetReader+Writer 直写 WAV PCM 16kHz 单声道。
-    /// 第三十八批:用后台同步循环,不用 requestMediaDataWhenReady 回调——
-    /// 回调模式下 reader 出错/writer 卡死会导致 continuation 永不 resume,
-    /// TaskGroup 排队等它 → 连续多个泄漏后崩溃(用户实测最后几个视频崩)
+    /// 手写 WAV 文件(第三十八批):AVAssetWriter 不支持 WAV+PCM 的
+    /// outputSettings(实测 init 即抛 NSInvalidArgumentException→SIGABRT,
+    /// .ips 定案),改为 AVAssetReader 读 PCM → 手写 44 字节 WAV 头 +
+    /// FileHandle 逐块写原始数据。WAV 是最简音频容器,手写比框架更可靠。
     private static func exportWAV(from avAsset: AVAsset, to url: URL, maxSeconds: Double) async throws {
         guard let audioTrack = try await avAsset.loadTracks(withMediaType: .audio).first else {
             throw MSError("无音轨")
         }
-        let pcmSettings: [String: Any] = [
+        // PCM 16kHz 单声道 16bit:Speech 框架推荐格式
+        let sampleRate = 16000.0
+        let channels = 1
+        let bitsPerSample = 16
+        let byteRate = Int(sampleRate) * channels * bitsPerSample / 8
+        let blockAlign = channels * bitsPerSample / 8
+
+        let reader = try AVAssetReader(asset: avAsset)
+        let readerOut = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: [
             AVFormatIDKey: kAudioFormatLinearPCM,
-            AVSampleRateKey: 16000.0,
-            AVNumberOfChannelsKey: 1,
-            AVLinearPCMBitDepthKey: 16,
+            AVSampleRateKey: sampleRate,
+            AVNumberOfChannelsKey: channels,
+            AVLinearPCMBitDepthKey: bitsPerSample,
             AVLinearPCMIsFloatKey: false,
             AVLinearPCMIsBigEndianKey: false,
-        ]
-        let reader = try AVAssetReader(asset: avAsset)
-        let readerOut = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: pcmSettings)
+        ])
         reader.add(readerOut)
         reader.timeRange = CMTimeRange(
             start: .zero,
             duration: CMTime(seconds: maxSeconds, preferredTimescale: 600))
-
-        let writer = try AVAssetWriter(outputURL: url, fileType: .wav)
-        let writerIn = AVAssetWriterInput(mediaType: .audio, outputSettings: pcmSettings)
-        writer.add(writerIn)
-
         guard reader.startReading() else {
             throw reader.error ?? MSError("音轨读取启动失败")
         }
-        writer.startWriting()
-        writer.startSession(atSourceTime: .zero)
 
-        // 后台线程逐块搬运:同步循环+缓冲满等待重试,所有路径保证 resume
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            DispatchQueue.global(qos: .utility).async {
-                // 内层函数:单次搬运,返回是否正常读完(用递归替代 while 以支持等待重试)
-                func pump() {
-                    // reader 失败先查:即使 copyNextSampleBuffer 返回 nil 也要区分
-                    if reader.status == .failed {
-                        cont.resume(throwing: reader.error ?? MSError("音轨读取失败"))
-                        return
+        // 先写 44 字节标准 WAV 头(占位 dataSize=0,最后回填)
+        FileManager.default.createFile(atPath: url.path, contents: nil)
+        let file = try FileHandle(forWritingTo: url)
+        defer { try? file.close() }
+
+        func le32(_ v: UInt32) -> Data { withUnsafeBytes(of: v.littleEndian) { Data($0) } }
+        func le16(_ v: UInt16) -> Data { withUnsafeBytes(of: v.littleEndian) { Data($0) } }
+
+        var header = Data()
+        header.append("RIFF".data(using: .ascii)!)
+        header.append(le32(0)) // placeholder: fileSize-8, 回填
+        header.append("WAVE".data(using: .ascii)!)
+        header.append("fmt ".data(using: .ascii)!)
+        header.append(le32(16)) // fmt chunk size
+        header.append(le16(1))  // PCM
+        header.append(le16(UInt16(channels)))
+        header.append(le32(UInt32(sampleRate)))
+        header.append(le32(UInt32(byteRate)))
+        header.append(le16(UInt16(blockAlign)))
+        header.append(le16(UInt16(bitsPerSample)))
+        header.append("data".data(using: .ascii)!)
+        header.append(le32(0)) // placeholder: dataSize, 回填
+        try file.write(contentsOf: header)
+
+        // 逐块写 PCM 数据
+        var totalBytes = 0
+        while let buf = readerOut.copyNextSampleBuffer() {
+            if let block = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
+                buf, bufferListSizeOut: nil, blockBufferSizeOut: nil,
+                blockBufferAllocator: kCFAllocatorDefault, blockBufferMemoryAllocator: kCFAllocatorDefault,
+                flags: 0)?.data {
+                // AudioBufferList → 逐 AudioBuffer 取数据
+                let listPtr = block.withUnsafeBytes { $0.bindMemory(to: AudioBufferList.self).baseAddress! }
+                let bufCount = Int(listPtr.pointee.mNumberBuffers)
+                for i in 0..<bufCount {
+                    let ab = listPtr.pointee.mBuffers[i]
+                    if let dataPtr = ab.mData {
+                        let bytes = Data(bytes: dataPtr, count: Int(ab.mDataByteSize))
+                        try file.write(contentsOf: bytes)
+                        totalBytes += bytes.count
                     }
-                    while writerIn.isReadyForMoreMediaData {
-                        if let buf = readerOut.copyNextSampleBuffer() {
-                            writerIn.append(buf)
-                        } else {
-                            // reader 正常读完
-                            writerIn.markAsFinished()
-                            writer.finishWriting {
-                                if writer.status == .completed {
-                                    cont.resume()
-                                } else {
-                                    cont.resume(throwing: writer.error ?? MSError(
-                                        "WAV 写入失败(reader=\(reader.status.rawValue) writer=\(writer.status.rawValue))"))
-                                }
-                            }
-                            return
-                        }
-                    }
-                    // writer 缓冲满且 reader 还在读:等 writer 消化后重试(不截断)
-                    // 10ms 粒度轮询,60 秒超时兜底(极罕见:writer 内部卡死)
-                    let deadline = Date().addingTimeInterval(60.0)
-                    func retryOrTimeout() {
-                        if Date() > deadline {
-                            writerIn.markAsFinished()
-                            writer.finishWriting {
-                                cont.resume(throwing: MSError("WAV 写入超时(60s)"))
-                            }
-                            return
-                        }
-                        if writerIn.isReadyForMoreMediaData || reader.status != .reading {
-                            pump()  // 缓冲消化了或 reader 读完/失败,回到主循环
-                        } else {
-                            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.01, execute: retryOrTimeout)
-                        }
-                    }
-                    retryOrTimeout()
                 }
-                pump()
             }
         }
+
+        if reader.status == .failed {
+            throw reader.error ?? MSError("PCM 读取失败")
+        }
+
+        // 回填 RIFF 大小和 dataSize
+        try file.seek(toOffset: 4)
+        try file.write(contentsOf: le32(UInt32(36 + totalBytes)))  // fileSize-8
+        try file.seek(toOffset: 40)
+        try file.write(contentsOf: le32(UInt32(totalBytes)))       // dataSize
     }
 }
 
