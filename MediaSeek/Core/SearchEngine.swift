@@ -796,6 +796,15 @@ final class SearchEngine {
         if let en = QueryUnderstanding.english(for: concept) {
             return "This is a photo of \(en)."
         }
+        // 第四十四批:裸英文单词/短语(词典没收的,如直接打 woman/man/beach)
+        // 同样套官方零样本模板——短裸词分数系统性偏低,照片通道 0.30/0.18
+        // 档几乎全灭(2026-10-21 用户实测 woman 仅 2 张;中文「女人」因词典
+        // 命中带模板反而正常)。长句(>3 词)保持原文,与词典路径同规
+        let isAscii = concept.unicodeScalars.allSatisfy(\.isASCII)
+        let wordCount = concept.split(separator: " ").count
+        if isAscii, wordCount >= 1, wordCount <= 3, !concept.isEmpty {
+            return "This is a photo of \(concept)."
+        }
         return concept
     }
 

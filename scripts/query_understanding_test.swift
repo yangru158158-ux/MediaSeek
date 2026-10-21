@@ -48,6 +48,20 @@ enum QueryUnderstandingTest {
         expect(QueryUnderstanding.english(for: "沙滩")?.contains("beach") == true,
                "口语变体「沙滩」入册(第十九批:此前只有「海滩」,搜沙滩语义空转)")
 
-        print("PASS: 查询理解 14 项确定性回归断言全部通过")
+        // —— 性别词补全(第四十四批:woman 裸搜仅 2 张事故) ——
+        expect(QueryUnderstanding.english(for: "女性")?.contains("woman") == true,
+               "「女性」入册(性别查询走词典→模板,不再依赖标签碰运气)")
+        expect(QueryUnderstanding.english(for: "男性")?.contains("man") == true,
+               "「男性」入册")
+        let manTokens = QueryUnderstanding.expandedTokens(["man"])
+        expect(manTokens.contains("boy") == true && manTokens.contains("guy") == true,
+               "man 一跳扩展含 boy/guy(与 woman 含 girl 对称,标签覆盖不再缺半边)")
+        let womanTokens = QueryUnderstanding.expandedTokens(["woman"])
+        expect(womanTokens.contains("lady") == true,
+               "woman 一跳扩展含 lady")
+        expect(womanTokens.contains("adult") == false,
+               "泛化词不做同义入口(woman 的扩展不含 adult,防灌水回潮)")
+
+        print("PASS: 查询理解 19 项确定性回归断言全部通过")
     }
 }
