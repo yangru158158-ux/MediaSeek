@@ -91,25 +91,32 @@ enum QueryUnderstanding {
 
     /// 标签通道比对词集(第四十五批自 SearchEngine 迁入,纳入 CI 断言):
     /// 原文分词 + 词典英译分词 → 一跳同义扩展 → 泛化词剔除。
-    /// 剔除守卫(验收二轮补强):英文负载 = 词集里的 ASCII 词(直接输入或
-    /// 词典直译,如 机器→machine),它们是标签比对的唯一可命中部分。
-    /// 英文负载非空且全是泛化词时(machine 本尊/机器直译)不剔——剔了等于
-    /// 拿纯中文词去对英文 Vision 标签,标签命中归零(用户实测:词典 machine
-    /// 标签 1306 张,搜 machine 仅出 6 张 OCR 文字命中,标签通道哑火)。
-    /// 英文负载含非泛化词(machine beach)或为空(纯中文专名)时照常剔,防灌水
+    /// 剔除规则(第四十八批,验收拦下「屏幕截图」事故后重立):
+    /// 照片标签牌按同一本词典挂,词典直译词就是显示词的本体,
+    /// 泛化剔除只针对用户手敲的英文词,直译词一律免疫——
+    /// 「屏幕截图」直译 screen+screenshot,旧规则(混合直译剔泛化)把
+    /// screenshot 剔掉,对着 5197 张挂 screenshot 标签牌的照片把标签通道
+    /// 关掉;「机器设备」同理。手敲词的守卫不变:全是泛化词时保留
+    /// (machine 本尊直搜,剔它等于删掉查询本体),带实义词时照常剔防灌水
     static func labelTokens(_ query: String) -> Set<String> {
-        var tokens = Set(query.lowercased()
+        let raw = Set(query.lowercased()
             .components(separatedBy: .whitespacesAndNewlines)
             .filter { !$0.isEmpty })
+        var tokens = raw
+        var dictTokens = Set<String>()
         if let en = english(for: query) {
-            for t in en.lowercased().split(separator: " ") { tokens.insert(String(t)) }
+            for t in en.lowercased().split(separator: " ") {
+                let s = String(t)
+                tokens.insert(s)
+                dictTokens.insert(s)
+            }
         }
         if query.count >= 3 {
-            let enPayload = tokens.filter { $0.allSatisfy(\.isASCII) }
-            let enAllGeneric = !enPayload.isEmpty && enPayload.subtracting(genericTokens).isEmpty
-            tokens = enAllGeneric
+            let typed = raw.filter { $0.allSatisfy(\.isASCII) }
+            let typedAllGeneric = !typed.isEmpty && typed.subtracting(genericTokens).isEmpty
+            tokens = typedAllGeneric
                 ? expandedTokens(tokens)
-                : expandedTokens(tokens).subtracting(genericTokens)
+                : expandedTokens(tokens).subtracting(genericTokens.subtracting(dictTokens))
         } else {
             tokens = expandedTokens(tokens)
         }

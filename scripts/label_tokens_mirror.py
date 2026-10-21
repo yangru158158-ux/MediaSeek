@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""labelTokens 全保真 Python 镜像(第四十八批词典直译免疫规则)。
+
+此前两轮本机镜像与 CI 分歧的教训:english(for:) 查两张表(dictionary +
+LabelZh.englishFromZh)、多命中按位置排序用空格拼接——镜像漏一环,CI 就红一轮。
+本镜像从 Swift 源码直接解析三张表,逐语义复刻,跑 34 条断言中的标签相关
+子集 + 两条 1566 词穷尽循环(CI 上从未跑完过,先在本机排雷)。
+"""
+import re
+import sys
+
+ROOT = "MediaSeek/Core/"
+QU = open(ROOT + "QueryUnderstanding.swift", encoding="utf-8").read()
+LZ = open(ROOT + "LabelZh.swift", encoding="utf-8").read()
+LZE = open(ROOT + "LabelZhExtra.swift", encoding="utf-8").read()
+
+# ---- 解析三张表 ----
+dic_block = QU.split("static let dictionary: [(String, String)] = [", 1)[1]
+dic_block = dic_block.split("\n    ]", 1)[0]
+DICTIONARY = re.findall(r'\("([^"]+)",\s*"([^"]+)"\)', dic_block)
+
+gen_block = QU.split("static let genericTokens: Set<String> = [", 1)[1]
+gen_block = gen_block.split("]", 1)[0]
+GENERIC = set(re.findall(r'"([a-z_]+)"', gen_block))
+
+syn_block = QU.split("static let synonyms: [String: [String]] = [", 1)[1]
+syn_block = syn_block.split("\n    ]", 1)[0]
+SYNONYMS = {}
+for k, vals in re.findall(r'"([^"]+)":\s*\[([^\]]*)\]', syn_block):
+    SYNONYMS[k] = [v.strip().strip('"') for v in vals.split(",") if v.strip()]
+
+base_block = LZ.split("private static let base: [String: String] = [", 1)[1]
+base_block = base_block.split("\n    ]", 1)[0]
+BASE = dict(re.findall(r'"([^"]+)":\s*"([^"]+)"', base_block))
+extra_block = LZE.split("= [", 1)[1]
+extra_block = extra_block.split("\n    ]", 1)[0]
+EXTRA = dict(re.findall(r'"([^"]+)":\s*"([^"]+)"', extra_block))
+ZH = {**EXTRA, **BASE}          # base 优先(merge { a, _ in a })
+EN_FROM_ZH = {}
+for en, cn in list(EXTRA.items()) + list(BASE.items()):  # base 后写先到先得
+    pass
+for en, cn in list(BASE.items()) + list(EXTRA.items()):
+    EN_FROM_ZH.setdefault(cn, en)
+
+
+def english_for(core):
+    matches = []
+    for zh, en in DICTIONARY:
+        if len(zh) == 1:
+            if core == zh:
+                matches.append((0, en))
+            continue
+        pos = core.find(zh)
+        if pos >= 0:
+            matches.append((pos, en))
+    for cn, en in EN_FROM_ZH.items():
+        if len(cn) == 1:
+            if core == cn:
+                matches.append((0, en))
+            continue
+        pos = core.find(cn)
+        if pos >= 0:
+            matches.append((pos, en))
+    if not matches:
+        return None
+    matches.sort(key=lambda m: m[0])
+    return " ".join(en for _, en in matches)
+
+
+def expanded(tokens):
+    out = set(tokens)
+    for t in tokens:
+        out |= set(SYNONYMS.get(t, []))
+    return out
+
+
+def label_tokens(query):
+    raw = {w for w in re.split(r"\s+", query.lower()) if w}
+    tokens = set(raw)
+    dict_tokens = set()
+    en = english_for(query)
+    if en:
+        for t in en.lower().split(" "):
+            if t:
+                tokens.add(t)
+                dict_tokens.add(t)
+    if len(query) >= 3:
+        typed = {t for t in raw if all(ord(c) < 128 for c in t)}
+        typed_all_generic = bool(typed) and typed.issubset(GENERIC)
+        if typed_all_generic:
+            tokens = expanded(tokens)
+        else:
+            tokens = expanded(tokens) - (GENERIC - dict_tokens)
+    else:
+        tokens = expanded(tokens)
+    return tokens
+
+
+def expect(cond, msg):
+    if not cond:
+        print("FAIL:", msg)
+        sys.exit(1)
+
+
+# ---- 34 条断言中的标签相关子集 ----
+expect("machine" in label_tokens("machine"), "machine 本尊保留")
+expect("person" in label_tokens("person"), "person 本尊保留")
+expect("machine" in label_tokens("机器"), "机器(2字)直译保留")
+expect("screenshot" in label_tokens("屏幕截图"), "屏幕截图→screenshot 免疫(5197张)")
+expect("machine" in label_tokens("机器设备"), "机器设备混合直译 machine 免疫(1306张)")
+expect("screenshot" in label_tokens("网页"), "网页→website screenshot 保留")
+expect("people" in label_tokens("朋友"), "朋友→friend people 保留")
+expect("document" in label_tokens("pdf"), "pdf→document 保留")
+expect("beach" in label_tokens("machine beach"), "machine beach 留 beach")
+expect("machine" not in label_tokens("machine beach"), "machine beach 剔 machine(手敲防灌水)")
+expect("people" not in label_tokens("people beach photo"), "people beach photo 剔 people")
+expect("boy" in expanded({"man"}) and "guy" in expanded({"man"}), "man 扩展含 boy/guy")
+expect("lady" in expanded({"woman"}), "woman 扩展含 lady")
+expect("adult" not in expanded({"woman"}), "woman 扩展不含 adult")
+expect("gentleman" in expanded({"man"}), "man 扩展含 gentleman")
+
+# ---- 穷尽循环排雷(CI 从未跑完) ----
+multiword = [en for en in ZH if " " in en]
+print(f"多词英文键(含空格,穷尽循环 contains(en) 会误杀): {multiword or '无'}")
+zh_to_ens = {}
+for en, cn in ZH.items():
+    zh_to_ens.setdefault(cn, []).append(en)
+
+fail_en = [en for en in ZH if en not in label_tokens(en)]
+expect(not fail_en, f"英文标签直搜被剔除: {fail_en[:5]}")
+print(f"英文直搜穷尽: {len(ZH) - len(fail_en)}/{len(ZH)} 全保留")
+
+fail_cn = []
+for cn, ens in zh_to_ens.items():
+    toks = label_tokens(cn)
+    if not any(e in toks for e in ens):
+        fail_cn.append((cn, ens))
+expect(not fail_cn, f"中文反查哑火: {fail_cn[:5]}")
+print(f"中文反查穷尽: {len(zh_to_ens) - len(fail_cn)}/{len(zh_to_ens)} 全命中")
+
+print("PASS: 镜像全绿(词典", len(DICTIONARY), "条/标签", len(ZH), "词/泛化", len(GENERIC), "个)")

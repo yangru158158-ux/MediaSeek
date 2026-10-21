@@ -67,13 +67,22 @@ enum QueryUnderstandingTest {
                "查询本身就是泛化词 machine 时保留——剔它等于删掉查询本体")
         expect(QueryUnderstanding.labelTokens("person").contains("person"),
                "查询本身就是 person 时保留(用户点名要这个标签)")
-        // 注:「机器设备」这类混合直译(machine 泛化 + equipment 实义)会剔
-        // machine 留实义词(更具体者顶上,防灌水)——这是有意行为;用户真实
-        // 路径是词典显示词本身,下面两条按显示词断言
+        // 注:「机器设备」这类混合直译(machine 泛化 + device 实义)旧规则会
+        // 剔 machine 留实义词——但照片标签牌按同一本词典挂,剔词典直译词
+        // 等于对着挂 machine 牌的 1306 张关掉标签通道。第四十八批重立规则:
+        // 泛化剔除只管用户手敲的英文词,词典直译词一律免疫
         expect(QueryUnderstanding.labelTokens("机器").contains("machine"),
                "词典显示词「机器」(2字)直搜 machine 标签正常(库内 1306 张)")
         expect(QueryUnderstanding.labelTokens("屏幕截图").contains("screenshot"),
-               "词典显示词「屏幕截图」(5字)全泛化直译保留(库内 5197 张)")
+               "词典显示词「屏幕截图」直译 screenshot 免疫泛化剔除(库内 5197 张)")
+        expect(QueryUnderstanding.labelTokens("机器设备").contains("machine"),
+               "混合直译的泛化词也保留(机器设备→machine+device,1306 张机器标签可达)")
+        expect(QueryUnderstanding.labelTokens("网页").contains("screenshot"),
+               "复合直译带出的泛化词保留(网页→website screenshot)")
+        expect(QueryUnderstanding.labelTokens("朋友").contains("people"),
+               "词典直译 people 保留(朋友→friend people,人物标签可达)")
+        expect(QueryUnderstanding.labelTokens("pdf").contains("document"),
+               "词典直译 document 保留(pdf→document,文档标签可达)")
         expect(QueryUnderstanding.labelTokens("machine beach").contains("beach"),
                "machine beach 保留实义词 beach")
         expect(QueryUnderstanding.labelTokens("machine beach").contains("machine") == false,
@@ -106,6 +115,6 @@ enum QueryUnderstandingTest {
         expect(passCn == zhToEns.count,
                "全量 \(zhToEns.count) 个中文词反查全部命中标签通道")
 
-        print("PASS: 查询理解 28 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词穷尽)")
+        print("PASS: 查询理解 34 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词穷尽)")
     }
 }
