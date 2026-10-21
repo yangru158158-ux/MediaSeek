@@ -42,6 +42,11 @@ private struct PeopleSnapshot: Codable {
     /// 逐脸匹配明细(166 起):ref → 「共N脸: c3@0.65>c7@0.21S | …」,
     /// 长按照片可读,把每张合影漏进单人组的裁决依据摆到台面上
     var details: [String: String]?
+    /// 名字判定的分母口径(第四十二批起):名字过半判据在入库簇照片上算
+    /// (标签历史上写在簇命中照片上,含补认的全量 personRefs 会稀释判据);
+    /// 水化重推名字必须用同口径,否则补标签失败过的会话重启后人物变「未命名」。
+    /// 旧快照无此字段=nil → 退回 personRefs
+    var nameScope: [Int: [String]]?
 }
 
 /// 归组扫描共享状态:挂在 AppModel 一份,视图只观察。
@@ -806,7 +811,9 @@ struct PeoplePanel: View {
                        scores: g.scores, withOthers: g.withOthers)
         }
         m.personRefs = snap.personRefs
-        m.personNames = Self.deriveNames(personRefs: snap.personRefs,
+        // 名字重推用扫描时的簇口径分母(快照 nameScope),与扫描完成路径同判据;
+        // 全量 personRefs 做分母会把补标签失败过的会话里的人物稀释成「未命名」
+        m.personNames = Self.deriveNames(personRefs: snap.nameScope ?? snap.personRefs,
                                          tags: app.store.userTagsForRefs(allRefs))
         m.assets = fetched
         m.totalPersons = snap.totalPersons
@@ -855,7 +862,7 @@ struct PeoplePanel: View {
         let faceModel = app.models.face
         let model = app.people   // 结果写共享模型:面板关了再开不丢(160 教训)
         // 指纹:人脸数据/排除集合/模型任一变化,快照与补认缓存自动作废;
-        // a19=算法盐,归组逻辑变更必须升盐(与 hydrateIfNeeded 同串)
+        // a20=算法盐,归组逻辑变更必须升盐(与 hydrateIfNeeded 同串)
         let ver = store.peopleFingerprint(
             extra: "a20-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
         // 「扫描中」记账 + 屏幕常亮:退后台被系统结束进程后,重开面板能明确
@@ -1131,7 +1138,8 @@ struct PeoplePanel: View {
                         .init(members: $0.members, refs: $0.refs,
                               scores: $0.scores, withOthers: $0.withOthers)
                     },
-                    personRefs: refsOf, totalPersons: persons.count,
+                    personRefs: refsOf, nameScope: nameScope,
+                    totalPersons: persons.count,
                     unknownCount: unknownAlive, savedAt: Date(),
                     reasons: reasonsMap.mapValues { [$0.reason, $0.note] },
                     details: detailsMap)
