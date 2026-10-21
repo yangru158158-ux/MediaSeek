@@ -579,7 +579,6 @@ final class SearchEngine {
             timeLabel: dateRange?.label, placeLabel: placeLabel)
     }
 
-
     /// 显式语法流程:通道(文字/语义/自动)× 连接词(and/or)自由组合。
     /// 返回 hits + textIDs(文字维度命中集,第十五批:此前调用方写死空集,
     /// 「文字:」前缀的全部命中被三维度切换栏归进语义栏——用户实测
@@ -786,7 +785,7 @@ final class SearchEngine {
         // 命中带模板反而正常)。长句(>3 词)保持原文,与词典路径同规
         let isAscii = concept.unicodeScalars.allSatisfy(\.isASCII)
         let wordCount = concept.split(separator: " ").count
-        if isAscii, wordCount >= 1, wordCount <= 3, !concept.isEmpty {
+        if isAscii, wordCount >= 1, wordCount <= 3 {
             return "This is a photo of \(concept)."
         }
         return concept

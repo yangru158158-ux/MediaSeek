@@ -67,13 +67,17 @@ enum QueryUnderstandingTest {
                "查询本身就是泛化词 machine 时保留——剔它等于删掉查询本体")
         expect(QueryUnderstanding.labelTokens("person").contains("person"),
                "查询本身就是 person 时保留(用户点名要这个标签)")
+        expect(QueryUnderstanding.labelTokens("机器设备").contains("machine"),
+               "≥3 字中文查询词典直译全是泛化词时保留(机器设备→machine,验收二轮补强)")
         expect(QueryUnderstanding.labelTokens("machine beach").contains("beach"),
                "machine beach 保留实义词 beach")
         expect(QueryUnderstanding.labelTokens("machine beach").contains("machine") == false,
                "有别的实义词时 machine 照常防灌水剔除(三十九批设计不回退)")
         expect(QueryUnderstanding.labelTokens("people beach photo").contains("people") == false,
                "多词长查询的泛化词剔除照常生效(防全库灌水)")
+        expect(manTokens.contains("gentleman") == true,
+               "man 一跳扩展含 gentleman(与 lady 对称)")
 
-        print("PASS: 查询理解 24 项确定性回归断言全部通过")
+        print("PASS: 查询理解 26 项确定性回归断言全部通过")
     }
 }

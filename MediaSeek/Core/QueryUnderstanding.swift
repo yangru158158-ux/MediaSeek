@@ -91,10 +91,12 @@ enum QueryUnderstanding {
 
     /// 标签通道比对词集(第四十五批自 SearchEngine 迁入,纳入 CI 断言):
     /// 原文分词 + 词典英译分词 → 一跳同义扩展 → 泛化词剔除。
-    /// 剔除守卫:只有当查询自有词(用户实际输入+词典直译)里还存在非泛化词时
-    /// 才剔——查询本身就是 machine/person 这类泛化词时,剔它等于把查询本体
-    /// 删掉,标签命中直接归零(用户实测:词典 machine 标签 1306 张,搜
-    /// machine 仅出 6 张 OCR 文字命中,标签通道哑火)
+    /// 剔除守卫(验收二轮补强):英文负载 = 词集里的 ASCII 词(直接输入或
+    /// 词典直译,如 机器→machine),它们是标签比对的唯一可命中部分。
+    /// 英文负载非空且全是泛化词时(machine 本尊/机器直译)不剔——剔了等于
+    /// 拿纯中文词去对英文 Vision 标签,标签命中归零(用户实测:词典 machine
+    /// 标签 1306 张,搜 machine 仅出 6 张 OCR 文字命中,标签通道哑火)。
+    /// 英文负载含非泛化词(machine beach)或为空(纯中文专名)时照常剔,防灌水
     static func labelTokens(_ query: String) -> Set<String> {
         var tokens = Set(query.lowercased()
             .components(separatedBy: .whitespacesAndNewlines)
@@ -102,8 +104,12 @@ enum QueryUnderstanding {
         if let en = english(for: query) {
             for t in en.lowercased().split(separator: " ") { tokens.insert(String(t)) }
         }
-        if query.count >= 3, !tokens.subtracting(genericTokens).isEmpty {
-            tokens = expandedTokens(tokens).subtracting(genericTokens)
+        if query.count >= 3 {
+            let enPayload = tokens.filter { $0.allSatisfy(\.isASCII) }
+            let enAllGeneric = !enPayload.isEmpty && enPayload.subtracting(genericTokens).isEmpty
+            tokens = enAllGeneric
+                ? expandedTokens(tokens)
+                : expandedTokens(tokens).subtracting(genericTokens)
         } else {
             tokens = expandedTokens(tokens)
         }
