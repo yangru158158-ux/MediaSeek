@@ -565,7 +565,7 @@ final class SearchEngine {
     /// 文字:地图 189 个全挂语义、文字 0)
     private func searchScoped(spec: QuerySpec, scope: SearchScope,
                               topK: Int, siglip: SigLIPEmbedder?, within: Set<String>? = nil) async throws -> (hits: [DisplayHit], textIDs: Set<String>) {
-        guard scope == .all || scope == .photo else { return ([], []) }   // v1 只作用于照片
+        guard scope != .file else { return ([], []) }   // 文件范围无照片/视频(第三十九批:视频范围原被误拦)
         let terms = Self.splitTerms(spec.body)
         guard !terms.isEmpty else { return ([], []) }
 
