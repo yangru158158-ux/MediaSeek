@@ -575,7 +575,17 @@ final class SearchEngine {
         if spec.channel == .text {
             var perTerm: [[SearchHit]] = []
             for t in terms {
-                let rows = ocrUnionHits(t, scope: scope, within: within, topK: topK)
+                // 第三十九批修:按范围过滤 OCR 命中——验收 medium 发现,视频
+                // 范围下照片 OCR 泄漏进结果(ocrKind 只归类不过滤)
+                let raw = ocrUnionHits(t, scope: scope, within: within, topK: topK)
+                let rows = raw.filter { ref in
+                    switch scope {
+                    case .video: return ref.kind == .videoFrame
+                    case .photo: return ref.kind == .photo
+                    case .all: return true
+                    case .file: return ref.kind == .file
+                    }
+                }
                 let connectorIsAnd = (spec.connector == .and)
                 perTerm.append(rows.enumerated().map { rank, ref in
                     let base = within != nil
