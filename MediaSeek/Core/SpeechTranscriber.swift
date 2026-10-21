@@ -99,54 +99,55 @@ enum SpeechTranscriber {
         writer.startWriting()
         writer.startSession(atSourceTime: .zero)
 
-        // 后台线程逐块搬运:同步循环,每块一定被处理,不依赖回调再触发
+        // 后台线程逐块搬运:同步循环+缓冲满等待重试,所有路径保证 resume
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             DispatchQueue.global(qos: .utility).async {
-                var wroteAny = false
-                while writerIn.isReadyForMoreMediaData {
-                    if let buf = readerOut.copyNextSampleBuffer() {
-                        writerIn.append(buf)
-                        wroteAny = true
-                    } else {
-                        writerIn.markAsFinished()
-                        // 等 writer 收尾
-                        writer.finishWriting {
-                            if writer.status == .completed {
-                                cont.resume()
-                            } else {
-                                cont.resume(throwing: writer.error ?? MSError("WAV 写入失败(状态=\(writer.status.rawValue))"))
-                            }
-                        }
+                // 内层函数:单次搬运,返回是否正常读完(用递归替代 while 以支持等待重试)
+                func pump() {
+                    // reader 失败先查:即使 copyNextSampleBuffer 返回 nil 也要区分
+                    if reader.status == .failed {
+                        cont.resume(throwing: reader.error ?? MSError("音轨读取失败"))
                         return
                     }
-                }
-                // isReadyForMoreMediaData 变 false 且 reader 已读完但没进 else 分支
-                // (writer 内部缓冲满):等 writer 消化后重试,60 秒超时兜底
-                if reader.status == .completed {
-                    writerIn.markAsFinished()
-                    writer.finishWriting {
-                        if writer.status == .completed {
-                            cont.resume()
+                    while writerIn.isReadyForMoreMediaData {
+                        if let buf = readerOut.copyNextSampleBuffer() {
+                            writerIn.append(buf)
                         } else {
-                            cont.resume(throwing: writer.error ?? MSError("WAV 写入失败(尾部)"))
-                        }
-                    }
-                } else if reader.status == .failed {
-                    cont.resume(throwing: reader.error ?? MSError("音轨读取失败"))
-                } else {
-                    // writer buffer 满且 reader 还在读:极罕见,等 1 秒后强制收尾
-                    DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1.0) {
-                        writerIn.markAsFinished()
-                        writer.finishWriting {
-                            if writer.status == .completed {
-                                cont.resume()
-                            } else {
-                                cont.resume(throwing: writer.error ?? MSError("WAV 写入超时"))
+                            // reader 正常读完
+                            writerIn.markAsFinished()
+                            writer.finishWriting {
+                                if writer.status == .completed {
+                                    cont.resume()
+                                } else {
+                                    cont.resume(throwing: writer.error ?? MSError(
+                                        "WAV 写入失败(reader=\(reader.status.rawValue) writer=\(writer.status.rawValue))"))
+                                }
                             }
+                            return
                         }
                     }
+                    // writer 缓冲满且 reader 还在读:等 writer 消化后重试(不截断)
+                    // 10ms 粒度轮询,60 秒超时兜底(极罕见:writer 内部卡死)
+                    let deadline = Date().addingTimeInterval(60.0)
+                    func retryOrTimeout() {
+                        if Date() > deadline {
+                            writerIn.markAsFinished()
+                            writer.finishWriting {
+                                cont.resume(throwing: MSError("WAV 写入超时(60s)"))
+                            }
+                            return
+                        }
+                        if writerIn.isReadyForMoreMediaData || reader.status != .reading {
+                            pump()  // 缓冲消化了或 reader 读完/失败,回到主循环
+                        } else {
+                            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 0.01, execute: retryOrTimeout)
+                        }
+                    }
+                    retryOrTimeout()
                 }
+                pump()
             }
+        }
         }
     }
 }
