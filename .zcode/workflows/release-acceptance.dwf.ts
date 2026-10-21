@@ -291,7 +291,7 @@ const finalReport = {
     `${checks.filter((c) => c.state === "success").length}/${checks.length} 绿),` +
     `改动核对 ${reviewed.length} 个提交、确认 ${effectiveFindings.filter((f) => f.status === "verified").length} 个问题` +
     `(高危 ${highs.length},已抵消 ${effectiveFindings.filter((f) => f.status === "resolved-by-later-commit").length})。`,
-  findings,
+  findings: effectiveFindings,
   verified: [
     "git status/rev-parse/rev-list 确认仓库边界(确定性)",
     "gh run list --commit 确认四项 CI 结论,失败运行逐一 gh run view 区分容量拒单与真失败(确定性)",
