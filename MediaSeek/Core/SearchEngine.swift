@@ -297,7 +297,12 @@ final class SearchEngine {
     /// 结果几乎全是只含「宝宝」的;用户定规(2026-10-21):有分隔符=同时
     /// 完全匹配。AND 复用 searchScoped 的 and: 路径(每词 OCR∪语义∪标签
     /// 命中再交集,已验收实现,不另造一套防漂移);单词与文件范围(file 被
-    /// searchScoped 守卫拦截)保持原主管线;or: 前缀仍可显式取并集
+    /// searchScoped 守卫拦截)保持原主管线;or: 前缀仍可显式取并集。
+    /// 已知收窄(有意):全部范围多词改道后不跑 Gemma 文件语义通道——旧裸搜
+    /// 对文件是整句模糊匹配,与逐词 AND 精确语义不兼容,文件改靠 OCR 原文
+    /// (PDF/CSV/XLSX/TXT 内容均已入库 ocr_text)双词精确命中。
+    /// 空态分数提示(lastSemanticTopScore)仅 语义: 查询展示,而 语义: 已被
+    /// 下方 channel 校验挡回主管线(主管线自己写该字段),本函数无需写
     private func runBareSearch(query: String, spec: QuerySpec, scope: SearchScope,
                                topK: Int, siglip: SigLIPEmbedder?, dateRange: QueryDateRange?,
                                placeRegion: CLCircularRegion?, placeLabel: String?,
@@ -310,21 +315,6 @@ final class SearchEngine {
             let scoped = try await searchScoped(spec: andSpec, scope: scope, topK: topK,
                                                 siglip: siglip, within: among,
                                                 dateRange: dateRange)
-            // 空结果诊断(与主管线同口径 minScore:-1/limit:1):AND 交空时记
-            // 全库最高语义分供空态提示——searchScoped 不写该字段,不补则
-            // 「语义通道最高相关度仅 X%」提示退化(验收 low)
-            if scoped.hits.isEmpty, let siglip {
-                let probeKinds: [ItemKind] = scope == .photo ? [.photo]
-                    : (scope == .video ? [.videoFrame] : [.photo, .videoFrame])
-                for t in Self.splitTerms(query) where !Self.containsDigit(t) {
-                    guard let q = try? siglip.embedQuery(Self.siglipQuery(t)) else { continue }
-                    if let top = (try? store.search(space: siglip.space, kinds: probeKinds,
-                                                    query: q, limit: 1, minScore: -1,
-                                                    among: among))?.first?.score {
-                        lastSemanticTopScore = lastSemanticTopScore.map { max($0, top) } ?? top
-                    }
-                }
-            }
             return SearchOutcome(hits: scoped.hits, textIDs: scoped.textIDs,
                                  timeLabel: dateRange?.label, placeLabel: placeLabel)
         }
@@ -719,7 +709,7 @@ final class SearchEngine {
         }
         let textIDs = Set(combined.filter { $0.space == "ocr" }
             .map { "\($0.kind.rawValue)-\($0.refKey)" })
-        return (resolve(combined), textIDs)
+        return (resolve(combined, dateRange: dateRange), textIDs)
     }
 
     /// 范围允许的命中 kind(第三十九批):文字/自动通道统一按范围过滤,
