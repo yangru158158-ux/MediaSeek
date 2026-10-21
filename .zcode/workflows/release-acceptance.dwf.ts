@@ -22,10 +22,12 @@ interface Finding {
   what: string;
   /** 证据:看到的代码行或命令输出 */
   evidence: string;
-  /** verified=复核员独立复现;unconfirmed=复核未通过或未复核 */
-  status: "verified" | "unconfirmed";
+  /** verified=复核员独立复现;unconfirmed=复核未通过;resolved-by-later-commit=后续提交已修(跨提交抵消) */
+  status: "verified" | "unconfirmed" | "resolved-by-later-commit";
   /** high=会崩溃或数据错;medium=功能受损;low=风格 */
   severity: "low" | "medium" | "high";
+  /** 发现该问题的提交哈希(前 7 位) */
+  sourceSha?: string;
 }
 interface ReviewResult {
   sha: string;
@@ -168,7 +170,10 @@ for (const r of reviewed) {
 }
 
 phase("独立复核发现的问题");
-const rawFindings = reviewed.flatMap((r) => r.findings);
+// 带来源提交:评审员只看自己那个提交的 diff,问题可能在后续提交里被修
+const rawFindings: Finding[] = reviewed.flatMap((r) =>
+  r.findings.map((f) => ({ ...f, sourceSha: r.sha.slice(0, 7) })),
+);
 const confirmations: Confirmation[] = await Promise.all(
   rawFindings.map((f, i) =>
     agent(`复核员-${i}`, {
@@ -187,11 +192,40 @@ const findings: Finding[] = rawFindings.map((f, i) => ({
   status: confirmations[i]?.holds ? "verified" : "unconfirmed",
 }));
 
+phase("跨提交抵消检查");
+// 来源不是 HEAD 的发现:交给抵消检查员只读 HEAD 现态——后续提交可能已修
+const headShort = headSha.slice(0, 7);
+const fromEarlier = findings.filter((f) => f.status === "verified" && f.sourceSha !== undefined && f.sourceSha !== headShort);
+const offsetResolutions = await Promise.all(
+  fromEarlier.map((f, i) =>
+    agent(`抵消检查员-${i}`, {
+      system:
+        "你是跨提交抵消检查员:一个问题在较早的提交里被发现,你要判断它在当前 HEAD 上是否已被后续提交修复。" +
+        "只读不改:严禁编辑任何文件。判断依据是 HEAD 上的实际代码,不是 git log 或提交说明。",
+    }).ask<{ stillPresent: boolean; note: string }>(
+      `以下问题是在提交 ${f.sourceSha} 的 diff 中发现的:\n` +
+      `位置:${f.where}\n问题:${f.what}\n证据:${f.evidence}\n\n` +
+      `请打开 MediaSeek 仓库里该文件在当前 HEAD(${headShort})上的实际内容(git 命令用 git -C MediaSeek ...),` +
+      `读 where 指向的位置及其上下文,判断:该问题在 HEAD 上是否仍然存在?` +
+      `返回 {stillPresent: 是否仍存在, note: 一句话依据(如'已改为 try? prepare'或'仍是裸 try')}`,
+    ),
+  ),
+);
+const effectiveFindings: Finding[] = findings.map((f) => {
+  const idx = fromEarlier.indexOf(f);
+  if (idx >= 0 && offsetResolutions[idx] && !offsetResolutions[idx].stillPresent) {
+    return { ...f, status: "resolved-by-later-commit" as const };
+  }
+  return f;
+});
+log(`跨提交抵消:${fromEarlier.length} 个非 HEAD 来源的发现中,` +
+  `${fromEarlier.filter((_, i) => offsetResolutions[i] && !offsetResolutions[i].stillPresent).length} 个已被后续提交修复`);
+
 phase("产出验收报告");
 const realFail = checks.filter((c) => c.state === "real-failure");
 const unsettled = checks.filter((c) => c.state === "capacity-failure" || c.state === "running" || c.state === "none");
 const skipped = checks.filter((c) => c.state === "skip-ok");
-const highs = findings.filter((f) => f.severity === "high" && f.status === "verified");
+const highs = effectiveFindings.filter((f) => f.severity === "high" && f.status === "verified");
 const blockers = [
   ...realFail.map((c) => `CI 真失败:${c.name}`),
   ...(dirty ? [`工作区有未提交改动(不会随本次发版):${dirty.split("\n").slice(0, 3).join("; ")}`] : []),
@@ -231,10 +265,15 @@ await artifact.markdown(
           ...(r.findings.length === 0 ? ["- 无问题"] : r.findings.map((f) => `- [${f.severity}] ${f.what}(${f.where})`)),
         ])),
     "",
-    "## 全部发现(含复核结论)",
-    ...(findings.length === 0
+    "## 全部发现(含复核与跨提交抵消)",
+    ...(effectiveFindings.length === 0
       ? ["- 无"]
-      : findings.map((f) => `- [${f.severity}/${f.status}] ${f.what} — ${f.where}\n  证据:${f.evidence}`)),
+      : effectiveFindings.map((f) => {
+          if (f.status === "resolved-by-later-commit") {
+            return `- ~~[${f.severity}] ${f.what} — ${f.where}~~\n  ✅ 已被后续提交修复(来源:${f.sourceSha})`;
+          }
+          return `- [${f.severity}/${f.status}] ${f.what} — ${f.where}\n  证据:${f.evidence}`;
+        })),
     "",
     "## 建议",
     verdict.startsWith("可以发版")
@@ -250,14 +289,15 @@ const finalReport = {
   conclusion:
     `${verdict}。待发 ${headSha.slice(0, 7)}(自上次发版 ${commits.length} 个提交,CI ` +
     `${checks.filter((c) => c.state === "success").length}/${checks.length} 绿),` +
-    `改动核对 ${reviewed.length} 个提交、确认 ${findings.filter((f) => f.status === "verified").length} 个问题` +
-    `(高危 ${highs.length})。`,
+    `改动核对 ${reviewed.length} 个提交、确认 ${effectiveFindings.filter((f) => f.status === "verified").length} 个问题` +
+    `(高危 ${highs.length},已抵消 ${effectiveFindings.filter((f) => f.status === "resolved-by-later-commit").length})。`,
   findings,
   verified: [
     "git status/rev-parse/rev-list 确认仓库边界(确定性)",
     "gh run list --commit 确认四项 CI 结论,失败运行逐一 gh run view 区分容量拒单与真失败(确定性)",
     "每个待发提交由独立评审员读 diff 核对提交声明与项目教训清单",
     ...(rawFindings.length > 0 ? ["每个发现由独立复核员只读复现"] : []),
+    ...(fromEarlier.length > 0 ? ["非 HEAD 来源的发现经跨提交抵消检查(只读 HEAD 现态验证是否已修)"] : []),
   ],
   notCovered: [
     ...(commits.length > 6 ? [`提交数 ${commits.length} 超过 6,只核对了前 6 个`] : []),
