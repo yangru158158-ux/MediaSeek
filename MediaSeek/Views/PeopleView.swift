@@ -1084,7 +1084,7 @@ struct PeoplePanel: View {
                         refsOf[ci, default: []].append(contentsOf: g.refs)
                     }
                 }
-                for ci in refsOf { refsOf[ci] = Array(Set(refsOf[ci])).sorted() }
+                for ci in refsOf.keys { refsOf[ci] = Array(Set(refsOf[ci])).sorted() }
                 let names = Self.deriveNames(personRefs: refsOf, tags: tagMap)
                 var outGroups: [ComboGroup] = []
                 for (i, o) in ordered.enumerated() {
