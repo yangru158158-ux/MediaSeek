@@ -524,16 +524,6 @@ final class SearchEngine {
         // 老公 宝宝/文字:老公 均正常);且照片范围不过滤命中身份,视频的
         // OCR 命中会泄漏进照片结果
         if !semanticOnly, scope != .file {
-            // OCR 命中可能来自导入文件(PDF OCR 原文):按 files 表区分 文件/照片
-            let fileIds = (try? store.fileIds()) ?? []
-            let videoRefs = (try? store.refKeys(kinds: [.videoFrame])) ?? []
-            // OCR 命中的 ref 可能是 照片/文件/视频(视频帧 OCR):按库内身份
-            // 归类(不看 scope——d04d122 教训:按 scope 条件归类会让下游过滤失效)
-            func ocrKind(_ ref: String) -> ItemKind {
-                if fileIds.contains(ref) { return .file }
-                if videoRefs.contains(ref) { return .videoFrame }
-                return .photo
-            }
             let allowedKinds = Self.scopeAllowedKinds(scope)
             var seen = Set<String>()
             var rank = 0
@@ -547,10 +537,12 @@ final class SearchEngine {
                 // 只搜证件名会漏掉全部正面照——补字段级别名并集保召回
                 let variants = [t] + (QueryUnderstanding.ocrAliases[t] ?? [])
                 for term in variants {
-                for ref in (try? store.searchOCR(query: term)) ?? [] {
-                    let k = ocrKind(ref.refKey)
-                    guard !seen.contains(ref.refKey), among?.contains(ref.refKey) ?? true,
-                          allowedKinds.contains(k) else { continue }
+                let rows = (try? store.searchOCR(query: term)) ?? []
+                let kinds = classifyOCRRefs(rows.map(\.refKey))
+                for ref in rows {
+                    guard let k = kinds[ref.refKey], allowedKinds.contains(k),
+                          !seen.contains(ref.refKey),
+                          among?.contains(ref.refKey) ?? true else { continue }
                     seen.insert(ref.refKey)
                     add(SearchHit(kind: k, refKey: ref.refKey, frameIndex: 0,
                                   space: "ocr", title: "含「\(term)」:\(Self.ocrSnippet(ref.text, term))",
@@ -740,15 +732,6 @@ final class SearchEngine {
     private func ocrUnionHits(_ t: String, scope: SearchScope,
                               within: Set<String>?, topK: Int)
         -> [(kind: ItemKind, refKey: String, text: String)] {
-        let fileIds = (try? store.fileIds()) ?? []
-        let videoRefs = (try? store.refKeys(kinds: [.videoFrame])) ?? []
-        // 第四十批修:文件 ref 一律归 .file——此前仅 scope == .all 时归类,
-        // 其余范围下被归 .photo,照片范围过滤挡不住文件 OCR 命中
-        func ocrKind(_ ref: String) -> ItemKind {
-            if fileIds.contains(ref) { return .file }
-            if videoRefs.contains(ref) { return .videoFrame }
-            return .photo
-        }
         var out: [(kind: ItemKind, refKey: String, text: String)] = []
         var seen = Set<String>()
         for term in [t] + (QueryUnderstanding.ocrAliases[t] ?? []) {
@@ -760,11 +743,38 @@ final class SearchEngine {
                 rows = ((try? store.searchOCR(query: term)) ?? [])
                     .prefix(topK).map { ($0.refKey, $0.text) }
             }
+            let kinds = classifyOCRRefs(rows.map(\.0))
             for r in rows where !seen.contains(r.0) {
                 seen.insert(r.0)
-                out.append((ocrKind(r.0), r.0, r.1))
+                out.append((kinds[r.0] ?? .photo, r.0, r.1))
             }
         }
+        return out
+    }
+
+    /// OCR 命中 ref 的真实身份归类(第四十三批):文件→.file;视频→.videoFrame
+    /// ——包括无帧向量行的近全黑/纯语音视频(帧全被 isTooDark 跳过,但语音
+    /// 转写/帧 OCR 文字都在 ocr_text):这类视频不在 refKeys(.videoFrame) 里,
+    /// 此前一律误归 .photo——视频范围搜不到其转写文字、照片范围反而泄漏其
+    /// 命中(验收 low 实锤)。含糊身份(既非文件也无帧行)批量问 PHAsset
+    /// 媒体类型兜底;其余→.photo。d04d122 教训同源:归类看身份不看 scope
+    private func classifyOCRRefs(_ refs: [String]) -> [String: ItemKind] {
+        let fileIds = (try? store.fileIds()) ?? []
+        let videoRefs = (try? store.refKeys(kinds: [.videoFrame])) ?? []
+        var out: [String: ItemKind] = [:]
+        var ambiguous: [String] = []
+        for r in refs {
+            if fileIds.contains(r) { out[r] = .file }
+            else if videoRefs.contains(r) { out[r] = .videoFrame }
+            else { ambiguous.append(r) }
+        }
+        if !ambiguous.isEmpty {
+            let fetch = PHAsset.fetchAssets(withLocalIdentifiers: ambiguous, options: nil)
+            fetch.enumerateObjects { a, _, _ in
+                out[a.localIdentifier] = a.mediaType == .video ? .videoFrame : .photo
+            }
+        }
+        for r in ambiguous where out[r] == nil { out[r] = .photo }
         return out
     }
 
