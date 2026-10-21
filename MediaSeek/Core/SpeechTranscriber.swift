@@ -27,6 +27,18 @@ enum SpeechTranscriber {
 
     /// 本机是否支持中文端侧识别。不支持时整个语音阶段跳过(全局记账),
     /// 不逐视频试错——每部试一遍只会得到同一张错误罚单
+    /// 语音识别诊断(第三十八批):supportsOnDeviceRecognition 属性只是"理论
+    /// 支持",模型可能没下载完成——需要配合实际转写结果判断。诊断信息给
+    /// 设置页展示,帮用户定位在哪一环
+    static func diagnosticInfo() -> String {
+        guard let rec = SFSpeechRecognizer(locale: Locale(identifier: "zh-CN")) else {
+            return "zh-CN 识别器创建失败(系统不支持该语言)"
+        }
+        let onDevice = rec.supportsOnDeviceRecognition
+        let available = rec.isAvailable
+        return "zh-CN 识别器:可用=\(available), 本机模型=\(onDevice ? "已支持" : "未下载")"
+    }
+
     static func onDeviceSupported() -> Bool {
         guard let rec = SFSpeechRecognizer(locale: Locale(identifier: "zh-CN")) else { return false }
         return rec.supportsOnDeviceRecognition   // 属性,不是方法
@@ -67,7 +79,10 @@ enum SpeechTranscriber {
         // 模型是两套独立的东西——用户实测 iPhone 听写正常出字但 SFSpeech
         // 本机识别 333 部全空转。on-device 模型不可用时服务器识别是唯一
         // 可用路径;隐私口径与系统听写一致(音频发给 Apple 处理)
-        request.requiresOnDeviceRecognition = false
+        // 按用户开关选择(第三十八批):默认 false=允许服务器(实测本机模型
+        // 空转后 333 部全白卷,用户已知情);隐私优先的用户可关掉开关强制本机
+        let allowServer = UserDefaults.standard.bool(forKey: "speechAllowServer")
+        request.requiresOnDeviceRecognition = !allowServer
 
         return try await withCheckedThrowingContinuation { cont in
             let gate = ResumeGate(cont)

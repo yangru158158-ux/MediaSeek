@@ -290,6 +290,27 @@ struct SettingsView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
+            // 语音识别引擎诊断+服务器回退开关(第三十八批):系统听写和 Speech
+            // 框架的本机模型是两套——听写出字不代表 Speech 本机模型在位
+            if UserDefaults.standard.bool(forKey: "speechEnabled") {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(SpeechTranscriber.diagnosticInfo())
+                        .font(.caption).foregroundStyle(.secondary)
+                    Toggle(isOn: Binding(
+                        get: { UserDefaults.standard.object(forKey: "speechAllowServer") as? Bool ?? true },
+                        set: { UserDefaults.standard.set($0, forKey: "speechAllowServer") })) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("允许服务器识别")
+                            Text("本机模型不可用时,音频经苹果服务器处理(与系统听写行为一致)。关闭则强制本机,需确保模型已下载")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    if !(UserDefaults.standard.object(forKey: "speechAllowServer") as? Bool ?? true) {
+                        Text("💡 下载本机模型:设置→Siri与搜索→语言→改为中文(普通话-中国大陆),等待下载完成后重新转写")
+                            .font(.caption2).foregroundStyle(.orange)
+                    }
+                }
+            }
             // 语音转写诊断(第三十七批):听写未启用时识别器全交白卷却记账
             // "已完成",靠这组数暴露真伪
             let diag = app.store.speechDiagnostics()
