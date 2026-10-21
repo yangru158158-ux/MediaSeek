@@ -517,16 +517,24 @@ final class SearchEngine {
         // OCR 文字精确通道:「或」语义——每个词独立命中"含该文字"的照片,
         // 与视觉通道取并集;标题附命中片段,方便核对为什么命中(小字/页脚也会算)
         // 语义: 前缀模式下跳过(只要语义命中)
-        if !semanticOnly, scope == .all || scope == .photo {
+        // 第四十三批:视频范围放行 + 命中按范围过滤(与 searchScoped 的
+        // d04d122 同规)。此前通道只在 全部/照片 范围跑:视频范围裸搜单词
+        // 恒空——转写文字在 ocr_text 里,文字: 前缀与多词 AND 走 searchScoped
+        // 都能命中,唯独裸搜单词不通(2026-10-21 用户实测 老公:视频范围 0,
+        // 老公 宝宝/文字:老公 均正常);且照片范围不过滤命中身份,视频的
+        // OCR 命中会泄漏进照片结果
+        if !semanticOnly, scope != .file {
             // OCR 命中可能来自导入文件(PDF OCR 原文):按 files 表区分 文件/照片
             let fileIds = (try? store.fileIds()) ?? []
             let videoRefs = (try? store.refKeys(kinds: [.videoFrame])) ?? []
-            // OCR 命中的 ref 可能是 照片/文件/视频(视频帧 OCR):按库内身份归类
+            // OCR 命中的 ref 可能是 照片/文件/视频(视频帧 OCR):按库内身份
+            // 归类(不看 scope——d04d122 教训:按 scope 条件归类会让下游过滤失效)
             func ocrKind(_ ref: String) -> ItemKind {
-                if scope == .all, fileIds.contains(ref) { return .file }
+                if fileIds.contains(ref) { return .file }
                 if videoRefs.contains(ref) { return .videoFrame }
                 return .photo
             }
+            let allowedKinds = Self.scopeAllowedKinds(scope)
             var seen = Set<String>()
             var rank = 0
             // 第二十一批:恢复「每词独立命中」(build 32 的「或」语义在 CI 88
@@ -539,10 +547,12 @@ final class SearchEngine {
                 // 只搜证件名会漏掉全部正面照——补字段级别名并集保召回
                 let variants = [t] + (QueryUnderstanding.ocrAliases[t] ?? [])
                 for term in variants {
-                for ref in (try? store.searchOCR(query: term)) ?? []
-                where !seen.contains(ref.refKey) && (among?.contains(ref.refKey) ?? true) {
+                for ref in (try? store.searchOCR(query: term)) ?? [] {
+                    let k = ocrKind(ref.refKey)
+                    guard !seen.contains(ref.refKey), among?.contains(ref.refKey) ?? true,
+                          allowedKinds.contains(k) else { continue }
                     seen.insert(ref.refKey)
-                    add(SearchHit(kind: ocrKind(ref.refKey), refKey: ref.refKey, frameIndex: 0,
+                    add(SearchHit(kind: k, refKey: ref.refKey, frameIndex: 0,
                                   space: "ocr", title: "含「\(term)」:\(Self.ocrSnippet(ref.text, term))",
                                   date: nil, score: 1.0, color: nil),
                         weight: 8.0, rank: rank)
