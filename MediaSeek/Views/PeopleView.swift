@@ -1071,10 +1071,20 @@ struct PeoplePanel: View {
                 // ④ 人名:该人照片里覆盖率 ≥40% 的标签众数(无门槛众数会污染,147 教训)
                 let allRefs = Array(Set(ordered.flatMap { $0.refs }))
                 let tagMap = store.userTagsForRefs(allRefs)
+                // 第四十二批:命名打标签范围 = 该人参与的全部归组照片,按路由
+                // key 反查。此前取 scan 期 clusterRefSets,补认救回进组合组的
+                // 照片(J/Y/K/W 救回的第二人)不在范围内——组 255 张 vs 搜
+                // 「程玉婷 杨如」161 张、重命名也不涨,就是那 94 张补认照片
+                // 从未被打上第二人名字标签(2026-10-21 用户实测)。24 批
+                // 「1,178 vs 769」的口径自此改为含补认:组员数、打标签数、
+                // 双词搜索数三者对齐
                 var refsOf: [Int: [String]] = [:]
-                for ci in persons {
-                    refsOf[ci] = Array(clusterRefSets[ci] ?? []).sorted()
+                for g in ordered {
+                    for ci in g.members where persons.contains(ci) {
+                        refsOf[ci, default: []].append(contentsOf: g.refs)
+                    }
                 }
+                for ci in refsOf { refsOf[ci] = Array(Set(refsOf[ci])).sorted() }
                 let names = Self.deriveNames(personRefs: refsOf, tags: tagMap)
                 var outGroups: [ComboGroup] = []
                 for (i, o) in ordered.enumerated() {
@@ -1105,6 +1115,15 @@ struct PeoplePanel: View {
                     store.savePeopleResults(json: String(decoding: data, as: UTF8.self), ver: ver)
                 }
                 UserDefaults.standard.removeObject(forKey: "peopleScanRunning")
+
+                // 第四十二批:已命名人物自动补标签——补认救回的新照片立即有
+                // 名字,重跑归组后搜双名立即对齐组员数,无需再手动重命名
+                // (已有同名标签的照片自动跳过,批量通道秒级)
+                for (ci, name) in names {
+                    if let refs = refsOf[ci], !refs.isEmpty {
+                        try? await app.addUserTag(name, toRefs: refs)
+                    }
+                }
 
                 await MainActor.run {
                     model.scanning = false
