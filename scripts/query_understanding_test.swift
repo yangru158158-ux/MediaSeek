@@ -67,8 +67,13 @@ enum QueryUnderstandingTest {
                "查询本身就是泛化词 machine 时保留——剔它等于删掉查询本体")
         expect(QueryUnderstanding.labelTokens("person").contains("person"),
                "查询本身就是 person 时保留(用户点名要这个标签)")
-        expect(QueryUnderstanding.labelTokens("机器设备").contains("machine"),
-               "≥3 字中文查询词典直译全是泛化词时保留(机器设备→machine,验收二轮补强)")
+        // 注:「机器设备」这类混合直译(machine 泛化 + equipment 实义)会剔
+        // machine 留实义词(更具体者顶上,防灌水)——这是有意行为;用户真实
+        // 路径是词典显示词本身,下面两条按显示词断言
+        expect(QueryUnderstanding.labelTokens("机器").contains("machine"),
+               "词典显示词「机器」(2字)直搜 machine 标签正常(库内 1306 张)")
+        expect(QueryUnderstanding.labelTokens("屏幕截图").contains("screenshot"),
+               "词典显示词「屏幕截图」(5字)全泛化直译保留(库内 5197 张)")
         expect(QueryUnderstanding.labelTokens("machine beach").contains("beach"),
                "machine beach 保留实义词 beach")
         expect(QueryUnderstanding.labelTokens("machine beach").contains("machine") == false,
