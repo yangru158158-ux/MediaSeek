@@ -780,12 +780,14 @@ struct PeoplePanel: View {
     /// 人名按当前标签重推——重命名/清标签无需重扫
     private func hydrateIfNeeded() {
         guard m.groups.isEmpty, !m.scanning else { return }
-        // 算法盐 a19:归组/补认逻辑变更必须升盐——旧快照与补认缓存不能复活旧裁决。
+        // 算法盐 a20:归组/补认逻辑变更必须升盐——旧快照与补认缓存不能复活旧裁决。
         // (人脸行/排除/模型)不含算法版本,163 的旧判决经快照水化+缓存命中在
         // 164 原样复活,用户看到的就是"修了没变化"。第十四批:J 破平局(同框
-        // 先验裁决二义脸)改变了 U→J 的转正集合,旧快照/缓存必须作废重判
+        // 先验裁决二义脸)改变了 U→J 的转正集合,旧快照/缓存必须作废重判;
+        // 第四十二批:personRefs 口径变更(命名范围含补认照片),旧快照的
+        // personRefs 会让重命名继续打不到补认照片
         let ver = app.store.peopleFingerprint(
-            extra: "a19-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
+            extra: "a20-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
         guard let json = app.store.loadPeopleResults(ver: ver),
               let data = json.data(using: .utf8),
               let snap = try? JSONDecoder().decode(PeopleSnapshot.self, from: data) else {
@@ -855,7 +857,7 @@ struct PeoplePanel: View {
         // 指纹:人脸数据/排除集合/模型任一变化,快照与补认缓存自动作废;
         // a19=算法盐,归组逻辑变更必须升盐(与 hydrateIfNeeded 同串)
         let ver = store.peopleFingerprint(
-            extra: "a19-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
+            extra: "a20-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
         // 「扫描中」记账 + 屏幕常亮:退后台被系统结束进程后,重开面板能明确
         // 告知「上次未完成」;常亮防前台锁屏挂起
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "peopleScanRunning")
@@ -1085,7 +1087,15 @@ struct PeoplePanel: View {
                     }
                 }
                 for ci in refsOf.keys { refsOf[ci] = Array(Set(refsOf[ci] ?? [])).sorted() }
-                let names = Self.deriveNames(personRefs: refsOf, tags: tagMap)
+                // 名字判定沿用入库簇口径(clusterRefSets):标签历史上写在簇命中
+                // 照片上,分母扩到含补认的全量 refsOf 会把过半判据稀释(如旧口径
+                // 90/161 过半、新口径 90/255 不过),原本已命名的人变「未命名」,
+                // 自动补标签反而跳过他——验收 medium。打标签范围仍用全量 refsOf
+                var nameScope: [Int: [String]] = [:]
+                for ci in persons {
+                    nameScope[ci] = Array(clusterRefSets[ci] ?? []).sorted()
+                }
+                let names = Self.deriveNames(personRefs: nameScope, tags: tagMap)
                 var outGroups: [ComboGroup] = []
                 for (i, o) in ordered.enumerated() {
                     // PHAsset 取回整体为空(授权降级/图库瞬断)时不能把全部结果
@@ -1099,6 +1109,20 @@ struct PeoplePanel: View {
                                                 refs: alive, scores: scores, withOthers: o.withOthers))
                 }
                 let unknownAlive = outGroups.first { $0.members.isEmpty }?.refs.count ?? 0
+
+                // 第四十二批:已命名人物自动补标签——补认救回的新照片立即有
+                // 名字,重跑归组后搜双名立即对齐组员数,无需再手动重命名
+                // (已有同名标签的照片自动跳过,批量通道秒级)。放在快照落库
+                // 与记账清理**之前**:此段被杀则快照未存,重开面板提示重跑、
+                // 补标签必然重试;若放落库后,水化路径无补标签逻辑=静默丢单
+                // (验收 low)。gemma 未就绪/写库失败按人物计数,完成 toast 报告
+                var tagSyncFails = 0
+                for (ci, name) in names {
+                    if let refs = refsOf[ci], !refs.isEmpty {
+                        do { try await app.addUserTag(name, toRefs: refs) }
+                        catch { tagSyncFails += 1 }
+                    }
+                }
 
                 // 结果落库(162):进程随时被杀都拿得回来,重开面板直接水化;
                 // 完成即清「扫描中」记账
@@ -1116,15 +1140,6 @@ struct PeoplePanel: View {
                 }
                 UserDefaults.standard.removeObject(forKey: "peopleScanRunning")
 
-                // 第四十二批:已命名人物自动补标签——补认救回的新照片立即有
-                // 名字,重跑归组后搜双名立即对齐组员数,无需再手动重命名
-                // (已有同名标签的照片自动跳过,批量通道秒级)
-                for (ci, name) in names {
-                    if let refs = refsOf[ci], !refs.isEmpty {
-                        try? await app.addUserTag(name, toRefs: refs)
-                    }
-                }
-
                 await MainActor.run {
                     model.scanning = false
                     model.progress = nil
@@ -1140,11 +1155,19 @@ struct PeoplePanel: View {
                     model.details = detailsMap
                     if outGroups.isEmpty {
                         app.notify("没有找到可归组的人脸")
-                    } else if statRecovered > 0 || statOthers > 0 {
-                        // 诊断口径:认出=进了对应组合组;未识别同行=进了「与其他人」
-                        app.notify(fetchFails > 0
+                    } else {
+                        var msg: String?
+                        if statRecovered > 0 || statOthers > 0 {
+                            // 诊断口径:认出=进了对应组合组;未识别同行=进了「与其他人」
+                            msg = fetchFails > 0
                                ? "合影补认:认出 \(statRecovered) 张进对应组合组,\(statOthers) 张有认不出的同行人(侧脸/模糊)已归「与其他人」;\(fetchFails) 张 iCloud 照片未能复检(已按入库主角归组,下次扫描自动重试)"
-                               : "合影补认:认出 \(statRecovered) 张进对应组合组,\(statOthers) 张有认不出的同行人(侧脸/模糊)已归「与其他人」")
+                               : "合影补认:认出 \(statRecovered) 张进对应组合组,\(statOthers) 张有认不出的同行人(侧脸/模糊)已归「与其他人」"
+                        }
+                        if tagSyncFails > 0 {
+                            let w = "⚠️ \(tagSyncFails) 位人物名字标签补写失败(文本模型未就绪/写库出错),重新点「开始归组」会自动重试"
+                            msg = msg.map { $0 + "\n" + w } ?? w
+                        }
+                        if let msg { app.notify(msg) }
                     }
                 }
             } catch {
