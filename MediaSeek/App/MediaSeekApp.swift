@@ -59,6 +59,14 @@ final class AppModel: ObservableObject {
                 Task { @MainActor in self?.indexing.startAutoSyncIfAuthorized() }
             }
             .store(in: &bag)
+
+        // 图像模型切换(so400m ↔ 标准,第四十六批)→ 同一模式:同步开始处的
+        // 维度比对自动清空旧 clip 向量并全量重嵌,切换完不用重启也不用手动点同步
+        NotificationCenter.default.publisher(for: .clipModelChanged)
+            .sink { [weak self] _ in
+                Task { @MainActor in self?.indexing.startAutoSyncIfAuthorized() }
+            }
+            .store(in: &bag)
     }
 
     func fail(_ error: Error) {

@@ -12,18 +12,25 @@ extension Notification.Name {
     /// 直接去人物归组,聚类的还是旧模型向量(2026-10-13 用户实测「装了 r50
     /// 还是混人」:指纹链路本身是通的,缺的就是导入后的这次触发)
     static let faceModelChanged = Notification.Name("faceModelChanged")
+
+    /// 图像模型切换(so400m ↔ 标准,第四十六批):维度变了旧视觉向量作废,
+    /// 广播触发自动同步——同步开始处的维度比对会清空 clip 向量并全量重嵌,
+    /// 不用等用户手动点同步或重启 App
+    static let clipModelChanged = Notification.Name("clipModelChanged")
 }
 
 enum ModelSlot: String {
     case text = "TextEmbedder"
     case image = "ImageEmbedder"
+    case imagePro = "ImageEmbedderPro"
     case face = "FaceEmbedder"
 
     var displayName: String {
         switch self {
         case .text: return "文本模型(EmbeddingGemma)"
         case .image: return "图文模型(SigLIP)"
-        case .face: return "人脸模型(MobileFaceNet)"
+        case .imagePro: return "图文模型·高精度(SigLIP so400m)"
+        case .face: return "人脸模型(ArcFace r50)"
         }
     }
 }
@@ -53,12 +60,68 @@ final class ModelManager: ObservableObject {
     /// 「未安装」以为模型被删了(2026-10-16 用户实测截图),实际在排队
     @Published private(set) var loadPassRunning = false
 
+    // MARK: 图像模型切换(第四十六批:标准 ↔ so400m)
+    /// so400m 增强包是否已导入(ImageEmbedderPro 槽位有 meta.json)
+    @Published private(set) var proInstalled = false
+    /// 切换进行中(设置页禁用交互,防双击并发双加载)
+    @Published private(set) var imageSwitching = false
+
     private(set) var gemma: GemmaTextEmbedder?
     private(set) var siglip: SigLIPEmbedder?
     private(set) var face: FaceEmbedder?
 
     var bothReady: Bool { textState == .ready && imageState == .ready }
     var anyReady: Bool { textState == .ready || imageState == .ready }
+
+    /// 当前是否用 so400m 高精度图像模型(默认标准)
+    var useProImage: Bool {
+        UserDefaults.standard.bool(forKey: "imageModelUsePro")
+    }
+    /// 实际参与加载的图像槽位:选了 pro 但没导入 → 自动退回标准,
+    /// 保证 App 永远有可用的图像模型
+    var activeImageSlot: ModelSlot {
+        useProImage && proInstalled ? .imagePro : .image
+    }
+
+    init() {
+        refreshProInstalled()
+    }
+
+    func refreshProInstalled() {
+        let meta = supportRoot.appendingPathComponent(ModelSlot.imagePro.rawValue)
+            .appendingPathComponent("meta.json")
+        proInstalled = FileManager.default.fileExists(atPath: meta.path)
+    }
+
+    /// 切换图像模型(标准 ↔ so400m)。切换 = 换视觉「眼睛」:
+    /// 释放旧模型内存(两者不可共存,so400m 明显更大)→ 加载新槽位 →
+    /// 维度变化时广播 clipModelChanged,AppModel 收到后自动开同步清旧向量全量重嵌
+    func setImageModel(pro: Bool) async {
+        guard !imageSwitching else { return }
+        guard pro != useProImage else { return }
+        guard !pro || proInstalled else {
+            detailText = "so400m 增强包未导入(设置→模型在线更新)"
+            return
+        }
+        imageSwitching = true
+        defer { imageSwitching = false }
+        let prevDim = UserDefaults.standard.object(forKey: "clipModelDim") as? Int
+        UserDefaults.standard.set(pro, forKey: "imageModelUsePro")
+        // 先释放旧 SigLIP 实例再加载新槽位,避免两个图像模型短时同驻内存
+        siglip = nil
+        setState(.loading, for: .image)
+        await loadSlot(activeImageSlot)
+        // so400m 加载失败(包损坏/内存不足等):退回标准,保证语义搜索可用
+        if siglip == nil, pro {
+            UserDefaults.standard.set(false, forKey: "imageModelUsePro")
+            await loadSlot(.image)
+        }
+        if siglip != nil,
+           let nowDim = UserDefaults.standard.object(forKey: "clipModelDim") as? Int,
+           nowDim != prevDim {
+            NotificationCenter.default.post(name: .clipModelChanged, object: nil)
+        }
+    }
 
     private var supportRoot: URL {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -70,7 +133,7 @@ final class ModelManager: ObservableObject {
     func state(for slot: ModelSlot) -> ModelState {
         switch slot {
         case .text: return textState
-        case .image: return imageState
+        case .image, .imagePro: return imageState
         case .face: return faceState
         }
     }
@@ -78,7 +141,7 @@ final class ModelManager: ObservableObject {
     private func setState(_ s: ModelState, for slot: ModelSlot) {
         switch slot {
         case .text: textState = s
-        case .image: imageState = s
+        case .image, .imagePro: imageState = s
         case .face: faceState = s
         }
     }
@@ -94,7 +157,10 @@ final class ModelManager: ObservableObject {
         defer { loadPassRunning = false }
         await withTaskGroup(of: Void.self) { group in
             if textState != .ready { group.addTask { await self.loadSlot(.text) } }
-            if imageState != .ready { group.addTask { await self.loadSlot(.image) } }
+            // 只加载「当前选中」的图像模型(标准/so400m 二选一,第四十六批):
+            // so400m 体积数倍于标准,两者不可同时驻内存;选了 pro 没导入时
+            // activeImageSlot 已自动退回 .image
+            if imageState != .ready { group.addTask { await self.loadSlot(self.activeImageSlot) } }
             group.addTask { await self.loadSlot(.face) }   // 人脸模型可选,缺时静默降级
         }
     }
@@ -113,7 +179,9 @@ final class ModelManager: ObservableObject {
                     // 2) 从随包模型目录编译一次
                     guard let bundled = bundleDir,
                           FileManager.default.fileExists(atPath: bundled.appendingPathComponent("meta.json").path) else {
-                        throw MSError("未安装模型包 \(slot.rawValue)")
+                        throw MSError(slot == .imagePro
+                            ? "so400m 增强包未导入(设置→模型在线更新 下载后可切换)"
+                            : "未安装模型包 \(slot.rawValue)")
                     }
                     dir = root.appendingPathComponent(slot.rawValue)
                     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -217,7 +285,11 @@ final class ModelManager: ObservableObject {
     // MARK: - 从 zip 导入模型包
 
     /// zip 根目录应包含 TextEmbedder/ 与 ImageEmbedder/(各含 .mlpackage、tokenizer.json、meta.json)
-    func importModelZip(at url: URL) async throws {
+    /// - Parameter imageTarget: 显式指定图像包落位槽位(so400m 在线更新传 .imagePro,
+    ///   与随包标准模型并存实现切换);nil 时按 meta 维度启发式路由:
+    ///   dim ≥ 1024(so400m=1152)视为增强包进 .imagePro,防止手动导入增强包
+    ///   覆盖掉标准槽位
+    func importModelZip(at url: URL, imageTarget: ModelSlot? = nil) async throws {
         // 文件选择器给的是安全域 URL,必须先申请访问权
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
@@ -232,11 +304,24 @@ final class ModelManager: ObservableObject {
 
         var found = 0
         for name in try FileManager.default.contentsOfDirectory(atPath: extractDir.path) {
-            guard let slot = ModelSlot(rawValue: name) else { continue }
+            guard var slot = ModelSlot(rawValue: name) else { continue }
             let src = extractDir.appendingPathComponent(name)
             guard FileManager.default.fileExists(atPath: src.appendingPathComponent("meta.json").path) else { continue }
 
-            let dest = supportRoot.appendingPathComponent(name)
+            // 图像包路由(第四十六批):显式指定优先;否则读 meta.json 的 dim,
+            // 高维包(so400m=1152)自动落 .imagePro,不覆盖标准槽
+            if slot == .image {
+                if imageTarget == .imagePro {
+                    slot = .imagePro
+                } else if imageTarget == nil,
+                          let data = try? Data(contentsOf: src.appendingPathComponent("meta.json")),
+                          let meta = try? JSONDecoder().decode(ModelMeta.self, from: data),
+                          meta.dim >= 1024 {
+                    slot = .imagePro
+                }
+            }
+
+            let dest = supportRoot.appendingPathComponent(slot.rawValue)
             try? FileManager.default.removeItem(at: dest)
             try FileManager.default.createDirectory(at: dest, withIntermediateDirectories: true)
             for file in try FileManager.default.contentsOfDirectory(atPath: src.path) {
@@ -254,6 +339,7 @@ final class ModelManager: ObservableObject {
         }
         guard found > 0 else { throw MSError("压缩包里没有找到 TextEmbedder / ImageEmbedder 模型目录") }
 
+        refreshProInstalled()
         textState = .loading
         imageState = .loading
         await loadAll()

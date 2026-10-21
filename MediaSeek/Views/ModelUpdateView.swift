@@ -159,7 +159,7 @@ struct ModelUpdateSection: View {
         } header: {
             Text("模型在线更新")
         } footer: {
-            Text("从 GitHub Release 下载模型包并自动导入,建议 Wi-Fi 且保持 App 前台。增强图像模型(so400m)识别更强,导入后需点「同步新增内容」全量重建图像向量(约 1-2 小时),期间可随时中断续跑。")
+            Text("从 GitHub Release 下载模型包并自动导入,建议 Wi-Fi 且保持 App 前台。增强图像模型(so400m)识别更强,导入后自动切换并全量重建视觉向量(约 1-2 小时,可中断续跑);之后可在上方「图像模型切换」随时切回标准模型对比效果。")
         }
     }
 
@@ -202,11 +202,19 @@ struct ModelUpdateSection: View {
             do {
                 let zipURL = try await loader.download(f)
                 loader.importing = true
-                try await app.models.importModelZip(at: zipURL)
+                // so400m 增强包落独立槽位 ImageEmbedderPro(第四十六批):
+                // 与随包标准模型并存,导入后自动切到 so400m,设置页可随时切回
+                let isPro = f.key == "so400m"
+                try await app.models.importModelZip(at: zipURL, imageTarget: isPro ? .imagePro : nil)
                 try? FileManager.default.removeItem(at: zipURL)
                 loader.importing = false
                 loader.finish(key: f.key, version: version)
-                app.notify("「\(f.name)」已导入并生效")
+                if isPro {
+                    await app.models.setImageModel(pro: true)
+                    app.notify("so400m 已导入并切换;视觉向量开始全量重嵌(约 1-2 小时,可中断续跑)")
+                } else {
+                    app.notify("「\(f.name)」已导入并生效")
+                }
             } catch {
                 loader.importing = false
                 loader.abortWith(error: error)

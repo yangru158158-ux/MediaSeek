@@ -13,11 +13,15 @@ struct SettingsView: View {
     @State private var videoDiagText: String?
     @State private var labelVocab: [(label: String, count: Int)] = []
     @State private var showLabelVocab = false
+    // 图像模型切换(第四十六批):picker 本地镜像 + 待确认的目标值
+    @State private var imageModelPick = false
+    @State private var pendingImagePro: Bool?
 
     var body: some View {
         NavigationStack {
             List {
                 modelSection
+                imageModelSection
                 ModelUpdateSection()
                 tuningSection
                 labelVocabSection
@@ -106,7 +110,8 @@ struct SettingsView: View {
     private var modelSection: some View {
         Section {
             modelRow(.text)
-            modelRow(.image)
+            // 图像行显示「当前选中」的图像模型(标准/so400m,第四十六批)
+            modelRow(app.models.activeImageSlot)
             modelRow(.face)
             if !app.models.detailText.isEmpty {
                 Text(app.models.detailText).font(.caption2).foregroundStyle(.secondary)
@@ -128,6 +133,64 @@ struct SettingsView: View {
         } footer: {
             Text("所有推理均在设备本机完成,照片、视频与文件内容不会上传到任何服务器。")
         }
+    }
+
+    // MARK: - 图像模型切换(第四十六批:so400m ↔ 标准,A/B 对比用)
+
+    private var imageModelSection: some View {
+        Section {
+            Picker("当前图像模型", selection: $imageModelPick) {
+                Text("标准 SigLIP2(随包)").tag(false)
+                Text("高精度 so400m(增强)").tag(true)
+            }
+            .pickerStyle(.inline)
+            .disabled(!app.models.proInstalled || app.models.imageSwitching)
+            .onChange(of: imageModelPick) { pick in
+                if pick != app.models.useProImage { pendingImagePro = pick }
+            }
+            .onChange(of: app.models.useProImage) { pick in
+                imageModelPick = pick   // 在线更新导入 so400m 自动切换时同步 picker
+            }
+            .onAppear { imageModelPick = app.models.useProImage }
+
+            if !app.models.proInstalled {
+                Label("so400m 未导入:在下方「模型在线更新」下载增强图像模型后即可切换", systemImage: "info.circle")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if app.models.imageSwitching {
+                HStack { ProgressView(); Text("正在切换(加载模型)…") }
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        } header: {
+            Text("图像模型切换(实验)")
+        } footer: {
+            Text(proInstalledFooter)
+        }
+        .confirmationDialog(
+            "切换图像模型?",
+            isPresented: Binding(
+                get: { pendingImagePro != nil },
+                set: { if !$0 { pendingImagePro = nil; imageModelPick = app.models.useProImage } }),
+            titleVisibility: .visible
+        ) {
+            Button(pendingImagePro == true ? "切换到 so400m" : "切换回标准模型") {
+                guard let target = pendingImagePro else { return }
+                pendingImagePro = nil
+                Task { await app.models.setImageModel(pro: target) }
+            }
+            Button("取消", role: .cancel) {
+                pendingImagePro = nil
+                imageModelPick = app.models.useProImage
+            }
+        } message: {
+            Text("将自动清空视觉向量并开始全量重嵌(约 1-2 小时,可中断续跑;人脸、文字、标签通道不受影响)。重嵌完成前语义搜索结果为空属正常。")
+        }
+    }
+
+    private var proInstalledFooter: String {
+        app.models.proInstalled
+            ? "切换 = 换视觉「眼睛」:两个模型嵌入维度不同,旧视觉向量自动作废清空,切回时同样要重嵌。适合 A/B 对比同一批搜索词(如 woman/男人)的效果。人脸、文字、标签数据不受影响。"
+            : "先在下方「模型在线更新」下载 so400m 增强包(约 2GB,建议 Wi-Fi)后,这里就能切换。"
     }
 
     // MARK: - 调优
