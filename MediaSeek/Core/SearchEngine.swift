@@ -607,18 +607,22 @@ final class SearchEngine {
         // 语义/自动通道:数字词→文字,其余词→视觉
         var perTerm: [[SearchHit]] = []
         for t in terms {
+            // 第三十九批:自动通道与文字通道同规按范围过滤(验收 medium 发现:
+            // and:/or: 前缀在视频范围下仍混入照片命中)
+            let allowed = Self.scopeAllowedKinds(scope)
             if Self.containsDigit(t) {
-                let refs: [String] = within.map { among in
-                    (try? store.searchOCR(query: t, among: Array(among))) ?? []
-                } ?? ((try? store.searchOCR(query: t)) ?? []).prefix(topK).map(\.refKey)
-                perTerm.append(refs.enumerated().map { rank, refKey in
-                    SearchHit(kind: .photo, refKey: refKey, frameIndex: 0, space: "ocr",
-                              title: "含「\(t)」文字", date: nil,
-                              score: Float(1.0 / Double(rank + 1)), color: nil)
-                })
+                // 数字词也走 OCR 并集(带 kind 归类)再按范围过滤——此前写死
+                // .photo,视频范围下数字词命中全是照片泄漏
+                perTerm.append(ocrUnionHits(t, scope: scope, within: within, topK: topK)
+                    .filter { allowed.contains($0.kind) }
+                    .enumerated().map { rank, r in
+                        SearchHit(kind: r.kind, refKey: r.refKey, frameIndex: 0, space: "ocr",
+                                  title: "含「\(t)」文字", date: nil,
+                                  score: Float(1.0 / Double(rank + 1)), color: nil)
+                    })
             } else {
                 // 结果内时语义分数限定在基数集合内算(同 searchWithin 的修正)
-                var hits = semanticHits(t, siglip: siglip, topK: topK, within: within)
+                var hits = semanticHits(t, siglip: siglip, topK: topK, within: within, scope: scope)
                 if let within { hits = hits.filter { within.contains($0.refKey) } }
                 // 「像或含字」同构(第十六批):裸搜模式里每个词 = OCR∪视觉任一
                 // 命中即算,and:/or: 自动通道此前只送语义——证件/文件类词语义
@@ -627,6 +631,7 @@ final class SearchEngine {
                 // 优先(带真实分),OCR 只补缺口
                 var seen = Set(hits.map(\.refKey))
                 for (rank, r) in ocrUnionHits(t, scope: scope, within: within, topK: topK)
+                    .filter({ allowed.contains($0.kind) })
                     .enumerated() where !seen.contains(r.refKey) {
                     seen.insert(r.refKey)
                     hits.append(SearchHit(kind: r.kind, refKey: r.refKey, frameIndex: 0,
@@ -637,12 +642,15 @@ final class SearchEngine {
                 // 命中他的照片,and:/or: 前缀此前丢掉这条通道——中文人名不在
                 // 词典、语义通道对人名无效、核酸截图之外的照片又不含这两个字,
                 // and:杨如 男 只能出文字截图,他本人的照片一张进不了交集
-                for r in ((try? store.searchUserTags(query: t)) ?? [])
-                    .filter({ within?.contains($0) ?? true }) where !seen.contains(r) {
-                    seen.insert(r)
-                    hits.append(SearchHit(kind: .photo, refKey: r, frameIndex: 0,
-                                          space: "userTag", title: nil, date: nil,
-                                          score: 0.9, color: nil))
+                // 第三十九批:人名标签是照片侧数据,视频范围下不再并入
+                if allowed.contains(.photo) {
+                    for r in ((try? store.searchUserTags(query: t)) ?? [])
+                        .filter({ within?.contains($0) ?? true }) where !seen.contains(r) {
+                        seen.insert(r)
+                        hits.append(SearchHit(kind: .photo, refKey: r, frameIndex: 0,
+                                              space: "userTag", title: nil, date: nil,
+                                              score: 0.9, color: nil))
+                    }
                 }
                 perTerm.append(hits)
             }
@@ -672,6 +680,17 @@ final class SearchEngine {
         let textIDs = Set(combined.filter { $0.space == "ocr" }
             .map { "\($0.kind.rawValue)-\($0.refKey)" })
         return (resolve(combined), textIDs)
+    }
+
+    /// 范围允许的命中 kind(第三十九批):文字/自动通道统一按范围过滤,
+    /// 防跨范围泄漏(视频范围混入照片命中)
+    private static func scopeAllowedKinds(_ scope: SearchScope) -> Set<ItemKind> {
+        switch scope {
+        case .all: return [.photo, .videoFrame, .file]
+        case .photo: return [.photo]
+        case .video: return [.videoFrame]
+        case .file: return [.file]
+        }
     }
 
     /// OCR 命中并集(词本身+证件类字段别名,第十六批):与主流程 OCR 层同口径。
@@ -720,19 +739,24 @@ final class SearchEngine {
 
     /// 单词语义命中(SigLIP 视觉,门槛 0.14 + 0.08 弱信号兜底 + 相对尾部截断)
     private func semanticHits(_ term: String, siglip: SigLIPEmbedder?, topK: Int,
-                              within: Set<String>? = nil) -> [SearchHit] {
+                              within: Set<String>? = nil,
+                              scope: SearchScope = .all) -> [SearchHit] {
         guard let siglip else { return [] }
         guard let q = try? siglip.embedQuery(Self.siglipQuery(term)) else { return [] }
+        // 第三十九批:按范围取 kinds(与主管线 imageKinds 同构)——此前
+        // 全部写死 [.photo],视频范围下视频帧向量从不被查询
+        let searchKinds: [ItemKind] = scope == .all ? [.photo, .videoFrame]
+            : (scope == .photo ? [.photo] : (scope == .video ? [.videoFrame] : [.photo]))
         // 结果内核验:分数只在基数集合内算,门槛放宽、相对截断以集合内最佳为基准——
         // 否则全局排名的尾部截断会在取交集前把候选砍光(「行情图 ∩ 语义:电脑屏幕=0」事故:
         // 全库最高分是实拍屏幕,行情截图全被 85% 线砍掉,交集自然为空)
         if let within, !within.isEmpty {
             var hits = Self.dedupByRef((try? store.search(
-                space: siglip.space, kinds: [.photo], query: q, limit: topK,
+                space: siglip.space, kinds: searchKinds, query: q, limit: topK,
                 minScore: 0.20, among: within)) ?? [])
             if hits.isEmpty {
                 hits = Self.dedupByRef((try? store.search(
-                    space: siglip.space, kinds: [.photo], query: q, limit: topK,
+                    space: siglip.space, kinds: searchKinds, query: q, limit: topK,
                     minScore: 0.10, among: within)) ?? [])
             }
             if hits.isEmpty {
@@ -740,7 +764,7 @@ final class SearchEngine {
                 // 地板 0.03(结果内=点名小集合,相对排名优先,与主流程照片第三档同规),
                 // 尾部由 best×0.95 低置信尾线截断
                 hits = Self.dedupByRef((try? store.search(
-                    space: siglip.space, kinds: [.photo], query: q, limit: topK,
+                    space: siglip.space, kinds: searchKinds, query: q, limit: topK,
                     minScore: 0.03, among: within)) ?? [])
             }
             let best = hits.first?.score ?? 0
@@ -748,15 +772,15 @@ final class SearchEngine {
             return hits
         }
         var hits = Self.dedupByRef((try? store.search(
-            space: siglip.space, kinds: [.photo], query: q, limit: topK, minScore: 0.25)) ?? [])
+            space: siglip.space, kinds: searchKinds, query: q, limit: topK, minScore: 0.25)) ?? [])
         if hits.isEmpty {
             hits = Self.dedupByRef((try? store.search(
-                space: siglip.space, kinds: [.photo], query: q, limit: topK, minScore: 0.15)) ?? [])
+                space: siglip.space, kinds: searchKinds, query: q, limit: topK, minScore: 0.15)) ?? [])
         }
         if hits.isEmpty {
             // 真尺度地板 0.08(与主流程照片第三档同规)
             hits = Self.dedupByRef((try? store.search(
-                space: siglip.space, kinds: [.photo], query: q, limit: topK, minScore: 0.08)) ?? [])
+                space: siglip.space, kinds: searchKinds, query: q, limit: topK, minScore: 0.08)) ?? [])
         }
         let best = hits.first?.score ?? 0
         // 低置信收紧与主流程同规:最佳 <0.13 = 无真匹配,只留贴近最佳的一小撮
