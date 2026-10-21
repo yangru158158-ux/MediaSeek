@@ -78,6 +78,29 @@ enum QueryUnderstandingTest {
         expect(manTokens.contains("gentleman") == true,
                "man 一跳扩展含 gentleman(与 lady 对称)")
 
-        print("PASS: 查询理解 26 项确定性回归断言全部通过")
+        // —— 全量标签词典回归(第四十七批):词典里每一个词都必须能工作 ——
+        // 不是逐词救火:全部标签词(≈1566)做两个方向的穷尽断言——
+        //   ①英文标签直搜不被任何逻辑剔除(含 12 个泛化词,守卫后本尊保留)
+        //   ②词典中文反查能命中对应英文标签(标签精确通道)
+        // 以后改 labelTokens/词典/泛化名单漏掉任何一词,CI 立即红
+        var zhToEns: [String: [String]] = [:]
+        for (en, cn) in LabelZh.zh { zhToEns[cn, default: []].append(en) }
+        var passEn = 0
+        for en in LabelZh.zh.keys {
+            if QueryUnderstanding.labelTokens(en).contains(en) { passEn += 1 }
+            else { fatalError("FAIL: 英文标签直搜被剔除:\(en)") }
+        }
+        expect(passEn == LabelZh.zh.count,
+               "全量 \(LabelZh.zh.count) 个英文标签直搜全部保留")
+        var passCn = 0
+        for (cn, ens) in zhToEns {
+            let tokens = QueryUnderstanding.labelTokens(cn)
+            if ens.contains(where: { tokens.contains($0) }) { passCn += 1 }
+            else { fatalError("FAIL: 词典中文「\(cn)」搜不到对应标签 \(ens)") }
+        }
+        expect(passCn == zhToEns.count,
+               "全量 \(zhToEns.count) 个中文词反查全部命中标签通道")
+
+        print("PASS: 查询理解 28 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词穷尽)")
     }
 }
