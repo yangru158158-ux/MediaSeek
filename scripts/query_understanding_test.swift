@@ -62,6 +62,18 @@ enum QueryUnderstandingTest {
         expect(womanTokens.contains("adult") == false,
                "泛化词不做同义入口(woman 的扩展不含 adult,防灌水回潮)")
 
-        print("PASS: 查询理解 19 项确定性回归断言全部通过")
+        // —— 泛化词不自剔(第四十五批:搜 machine 标签 1306 张命中归零事故) ——
+        expect(QueryUnderstanding.labelTokens("machine").contains("machine"),
+               "查询本身就是泛化词 machine 时保留——剔它等于删掉查询本体")
+        expect(QueryUnderstanding.labelTokens("person").contains("person"),
+               "查询本身就是 person 时保留(用户点名要这个标签)")
+        expect(QueryUnderstanding.labelTokens("machine beach").contains("beach"),
+               "machine beach 保留实义词 beach")
+        expect(QueryUnderstanding.labelTokens("machine beach").contains("machine") == false,
+               "有别的实义词时 machine 照常防灌水剔除(三十九批设计不回退)")
+        expect(QueryUnderstanding.labelTokens("people beach photo").contains("people") == false,
+               "多词长查询的泛化词剔除照常生效(防全库灌水)")
+
+        print("PASS: 查询理解 24 项确定性回归断言全部通过")
     }
 }

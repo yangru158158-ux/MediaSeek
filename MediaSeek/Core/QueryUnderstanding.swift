@@ -89,6 +89,27 @@ enum QueryUnderstanding {
         "text", "structure", "outdoor", "machine", "clothing", "plant",
     ]
 
+    /// 标签通道比对词集(第四十五批自 SearchEngine 迁入,纳入 CI 断言):
+    /// 原文分词 + 词典英译分词 → 一跳同义扩展 → 泛化词剔除。
+    /// 剔除守卫:只有当查询自有词(用户实际输入+词典直译)里还存在非泛化词时
+    /// 才剔——查询本身就是 machine/person 这类泛化词时,剔它等于把查询本体
+    /// 删掉,标签命中直接归零(用户实测:词典 machine 标签 1306 张,搜
+    /// machine 仅出 6 张 OCR 文字命中,标签通道哑火)
+    static func labelTokens(_ query: String) -> Set<String> {
+        var tokens = Set(query.lowercased()
+            .components(separatedBy: .whitespacesAndNewlines)
+            .filter { !$0.isEmpty })
+        if let en = english(for: query) {
+            for t in en.lowercased().split(separator: " ") { tokens.insert(String(t)) }
+        }
+        if query.count >= 3, !tokens.subtracting(genericTokens).isEmpty {
+            tokens = expandedTokens(tokens).subtracting(genericTokens)
+        } else {
+            tokens = expandedTokens(tokens)
+        }
+        return tokens
+    }
+
     /// 证件类 OCR 别名:人像面不印证件名(身份证正面只有「公民身份号码」「姓名」等字段),
     /// 只搜证件名会漏掉全部正面照——补字段级别名供文字通道并集保召回
     static let ocrAliases: [String: [String]] = [
@@ -104,7 +125,7 @@ enum QueryUnderstanding {
     static let synonyms: [String: [String]] = [
         "person": ["people", "human", "adult", "man", "woman"],
         "people": ["person", "adult", "crowd"],
-        "man": ["male", "boy", "guy", "person", "people"], "men": ["man", "people"],
+        "man": ["male", "boy", "guy", "gentleman", "person", "people"], "men": ["man", "people"],
         "woman": ["girl", "female", "lady", "person", "people"], "women": ["woman", "people"],
         "girl": ["woman", "female", "person", "people"], "lady": ["woman", "female"],
         "guy": ["man", "male", "boy"], "gentleman": ["man", "male"],
