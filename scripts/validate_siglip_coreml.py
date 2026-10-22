@@ -74,6 +74,9 @@ def load_test_images() -> dict[str, Image.Image]:
         "dog": ["https://raw.githubusercontent.com/pytorch/hub/master/images/dog.jpg"],
         "beach": ["https://commons.wikimedia.org/wiki/Special:FilePath/Maldives%20beach.jpg",
                   "https://commons.wikimedia.org/wiki/Special:FilePath/Beach%20of%20Varkala,%20Kerala.jpg"],
+        # 第五十批:性别对比回归用真人像(网络失败仅降级警告不阻断)
+        "woman_portrait": ["https://commons.wikimedia.org/wiki/Special:FilePath/Mona%20Lisa,%20by%20Leonardo%20da%20Vinci,%20from%20C2RMF%20retouched.jpg"],
+        "man_portrait": ["https://raw.githubusercontent.com/ageitgey/face_recognition/master/examples/obama.jpg"],
     }.items():
         for u in urls:
             img = fetch(u)
@@ -139,7 +142,7 @@ def mode_extract(out_npz: Path):
                 f = model.text_model(input_ids=enc["input_ids"]).pooler_output[0]
             txt_v[t] = f.numpy()
 
-    matched = {n: max(cos(img_v[n], txt_v[t]) for t in TEXTS.get(n, [])) for n in images}
+    matched = {n: max((cos(img_v[n], txt_v[t]) for t in TEXTS.get(n, [])), default=0.0) for n in images}
     print("匹配对余弦:", {k: round(v, 4) for k, v in matched.items()})
 
     # ---- 诊断:分词器/嵌入表/图-图相似度/max_length 填充对照
@@ -171,7 +174,7 @@ def mode_extract(out_npz: Path):
                 f = model.text_model(input_ids=enc["input_ids"],
                                      attention_mask=enc.get("attention_mask")).pooler_output[0]
             txt_v_pad[t] = f.numpy()
-    matched_pad = {n: max(cos(img_v[n], txt_v_pad[t]) for t in TEXTS.get(n, [])) for n in images}
+    matched_pad = {n: max((cos(img_v[n], txt_v_pad[t]) for t in TEXTS.get(n, [])), default=0.0) for n in images}
     print("  匹配对余弦(max_length 填充):", {k: round(v, 4) for k, v in matched_pad.items()})
 
     # ---- 第四十九批阻断回归:掩码语义(SigLIP2 训练不掩码 pad) ----
@@ -221,6 +224,30 @@ def mode_extract(out_npz: Path):
     if ran == 0:
         raise SystemExit("FAIL 测试图全部加载失败,掩码回归空转")
     print("  PASS 掩码语义回归:全1掩码=训练语义,真实掩码劣化形态在案")
+
+    # ---- 第五十批阻断回归:性别对比边距(性别词对比过滤的依据) ----
+    # SigLIP 绝对分数区分男女弱(男照 0.06-0.10 与女照 0.10-0.11 同带),
+    # 相对差才可靠(实测:女照 +0.021/男照 -0.027~-0.038/中性 -0.004)。
+    # App 端按「正向分-反向分 ≥ 0.012」过滤;此回归守住边距不复崩。
+    print("== 性别对比回归(阻断) ==")
+
+    def ref_vec(text: str):
+        enc = processor(text=[text], padding="max_length", return_tensors="pt", truncation=True)
+        with torch.no_grad():
+            return model.text_model(input_ids=enc["input_ids"]).pooler_output[0].numpy()
+
+    if "woman_portrait" in img_v and "man_portrait" in img_v:
+        qw_, qm_ = ref_vec("This is a photo of a woman."), ref_vec("This is a photo of a man.")
+        m_w = cos(qw_, img_v["woman_portrait"]) - cos(qm_, img_v["woman_portrait"])
+        m_m = cos(qw_, img_v["man_portrait"]) - cos(qm_, img_v["man_portrait"])
+        print(f"  女照边距(woman分-man分)={m_w:+.4f}  男照边距={m_m:+.4f}(要求:女≥+0.012,男≤0)")
+        if m_w < 0.012:
+            raise SystemExit(f"FAIL 女照性别边距 {m_w:+.4f} < +0.012——对比过滤会漏掉真女人照")
+        if m_m > 0:
+            raise SystemExit(f"FAIL 男照性别边距 {m_m:+.4f} > 0——对比过滤拦不住男照泄漏")
+        print("  PASS 性别对比边距在案")
+    else:
+        print("  ⚠️ 人像测试图加载失败,性别对比回归跳过(不阻断)")
 
     # 官方 pipeline 示例(模型卡同款:2 cats 图 × 三候选)
     try:

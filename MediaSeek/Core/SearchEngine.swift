@@ -441,6 +441,21 @@ final class SearchEngine {
                     space: siglip.space, kinds: imageKinds, query: q, limit: 1,
                     minScore: -1, among: among))?.first?.score
             }
+            // 第五十批:性别词对比过滤——SigLIP 绝对分区分男女弱(0.08 地板
+            // 男女同放行,用户实测搜 woman 杨如程玉婷混列),相对差才可靠
+            // (实测:女照 woman分-man分=+0.021 / 男照 -0.027~-0.038 / 中性
+            // -0.004)。反义词同跑,只留正向分领先 ≥0.012 的命中;合影两性
+            // 分数相抵(差≈0)也被滤掉——性别词搜索要的是单一性别主导的照片
+            if let opp = QueryUnderstanding.genderOpposite(of: concept),
+               let qOpp = try? siglip.embedQuery(Self.siglipQuery(opp)) {
+                let oppScores = Dictionary(uniqueKeysWithValues:
+                    (try store.search(space: siglip.space, kinds: imageKinds, query: qOpp,
+                                      limit: topK, minScore: 0, among: among))
+                    .map { ($0.refKey, $0.score) })
+                hits = Self.dedupByRef(hits.filter {
+                    ($0.score - (oppScores[$0.refKey] ?? 0)) >= 0.012
+                })
+            }
             // 相对尾部截断:远弱于头部的长尾(如「人」里混入的屏幕翻拍照)直接砍掉。
             // 低置信收紧(真尺度 2026-10-12):整组最佳 <0.13 = 没有真匹配,列表全是
             // 人像/风景基线噪声(同一张海景人像 马尔代夫0.09/护照0.12/身份证0.12),
@@ -589,6 +604,9 @@ final class SearchEngine {
         guard scope != .file else { return ([], []) }   // 文件范围无照片/视频(第三十九批:视频范围原被误拦)
         let terms = Self.splitTerms(spec.body)
         guard !terms.isEmpty else { return ([], []) }
+        // 第五十批:归类器一次搜索共用一个实例——逐词各建一套会把 files/
+        // videoFrame 全表查询与 PHAsset 批查放大数倍(多词×别名×常见词数千命中)
+        let classifier = OCRRefClassifier(store: store)
 
         // 文字通道:每个词独立查 OCR,连接词决定 AND/OR。
         // and 模式标题列出全部命中词(交集里每张都含全部词,不能只显示第一个)
@@ -600,7 +618,7 @@ final class SearchEngine {
                 // 范围下照片 OCR 泄漏进结果(ocrKind 只归类不过滤)
                 // 第四十批:改用 scopeAllowedKinds 统一映射,消除并行维护的
                 // 内联 switch(其 .file 分支因上方 guard 永不可达)
-                let rows = ocrUnionHits(t, scope: scope, within: within, topK: topK)
+                let rows = ocrUnionHits(t, scope: scope, within: within, topK: topK, classifier: classifier)
                     .filter { Self.scopeAllowedKinds(scope).contains($0.kind) }
                 let connectorIsAnd = (spec.connector == .and)
                 perTerm.append(rows.enumerated().map { rank, ref in
@@ -629,7 +647,7 @@ final class SearchEngine {
             if Self.containsDigit(t) {
                 // 数字词也走 OCR 并集(带 kind 归类)再按范围过滤——此前写死
                 // .photo,视频范围下数字词命中全是照片泄漏
-                perTerm.append(ocrUnionHits(t, scope: scope, within: within, topK: topK)
+                perTerm.append(ocrUnionHits(t, scope: scope, within: within, topK: topK, classifier: classifier)
                     .filter { allowed.contains($0.kind) }
                     .enumerated().map { rank, r in
                         SearchHit(kind: r.kind, refKey: r.refKey, frameIndex: 0, space: "ocr",
@@ -646,7 +664,7 @@ final class SearchEngine {
                 // OCR(含证件别名)命中再按连接词交并;同照片双命中时语义条目
                 // 优先(带真实分),OCR 只补缺口
                 var seen = Set(hits.map(\.refKey))
-                for (rank, r) in ocrUnionHits(t, scope: scope, within: within, topK: topK)
+                for (rank, r) in ocrUnionHits(t, scope: scope, within: within, topK: topK, classifier: classifier)
                     .filter({ allowed.contains($0.kind) })
                     .enumerated() where !seen.contains(r.refKey) {
                     seen.insert(r.refKey)
@@ -714,11 +732,11 @@ final class SearchEngine {
     /// 正面照(正面不印「身份证」,只有「公民身份号码」等字段)。OCR 命中的
     /// ref 按 files/videoFrame 表归类身份;结果内模式只在基数集合里查
     private func ocrUnionHits(_ t: String, scope: SearchScope,
-                              within: Set<String>?, topK: Int)
+                              within: Set<String>?, topK: Int,
+                              classifier: OCRRefClassifier)
         -> [(kind: ItemKind, refKey: String, text: String)] {
         var out: [(kind: ItemKind, refKey: String, text: String)] = []
         var seen = Set<String>()
-        let classifier = OCRRefClassifier(store: store)
         for term in [t] + (QueryUnderstanding.ocrAliases[t] ?? []) {
             let rows: [(String, String)]
             if let among = within {
@@ -823,6 +841,17 @@ final class SearchEngine {
             }
             let best = hits.first?.score ?? 0
             if best > 0 { hits = hits.filter { $0.score >= best * 0.85 } }
+            // 第五十批:性别词对比过滤(结果内同规,见 QueryUnderstanding.genderOpposites)
+            if let opp = QueryUnderstanding.genderOpposite(of: term),
+               let qOpp = try? siglip.embedQuery(Self.siglipQuery(opp)) {
+                let oppScores = Dictionary(uniqueKeysWithValues:
+                    (try store.search(space: siglip.space, kinds: searchKinds, query: qOpp,
+                                      limit: topK, minScore: 0, among: within))
+                    .map { ($0.refKey, $0.score) })
+                hits = Self.dedupByRef(hits.filter {
+                    ($0.score - (oppScores[$0.refKey] ?? 0)) >= 0.012
+                })
+            }
             return videoFrameGuard(hits, term: term)
         }
         var hits = Self.dedupByRef((try? store.search(
@@ -839,6 +868,18 @@ final class SearchEngine {
         let best = hits.first?.score ?? 0
         // 低置信收紧与主流程同规:最佳 <0.13 = 无真匹配,只留贴近最佳的一小撮
         if best > 0 { hits = hits.filter { $0.score >= best * (best >= 0.13 ? 0.85 : 0.95) } }
+        // 第五十批:性别词对比过滤(与主管线视觉通道同规,实测依据见
+        // QueryUnderstanding.genderOpposites 注释)
+        if let opp = QueryUnderstanding.genderOpposite(of: term),
+           let qOpp = try? siglip.embedQuery(Self.siglipQuery(opp)) {
+            let oppScores = Dictionary(uniqueKeysWithValues:
+                (try store.search(space: siglip.space, kinds: searchKinds, query: qOpp,
+                                  limit: topK, minScore: 0, among: within))
+                .map { ($0.refKey, $0.score) })
+            hits = Self.dedupByRef(hits.filter {
+                ($0.score - (oppScores[$0.refKey] ?? 0)) >= 0.012
+            })
+        }
         return videoFrameGuard(hits, term: term)
     }
 

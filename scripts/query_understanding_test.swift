@@ -92,6 +92,24 @@ enum QueryUnderstandingTest {
         expect(manTokens.contains("gentleman") == true,
                "man 一跳扩展含 gentleman(与 lady 对称)")
 
+        // —— 第五十批:性别词对比过滤词表(SigLIP 绝对分不分男女,相对差分) ——
+        expect(QueryUnderstanding.genderOpposite(of: "woman") == "man",
+               "woman 反义 man")
+        expect(QueryUnderstanding.genderOpposite(of: "man") == "woman",
+               "man 反义 woman")
+        expect(QueryUnderstanding.genderOpposite(of: "WOMAN") == "man",
+               "大写归一小写后命中")
+        expect(QueryUnderstanding.genderOpposite(of: "女人") == "man",
+               "女人 反义 man")
+        expect(QueryUnderstanding.genderOpposite(of: "男人") == "woman",
+               "男人 反义 woman")
+        expect(QueryUnderstanding.genderOpposite(of: "美女") == "man",
+               "美女 反义 man")
+        expect(QueryUnderstanding.genderOpposite(of: "beach") == nil,
+               "非性别词无反义(不过滤)")
+        expect(QueryUnderstanding.genderOpposite(of: " 女人 ") == "man",
+               "空白归一后命中")
+
         // —— 全量标签词典回归(第四十七批):词典里每一个词都必须能工作 ——
         // 不是逐词救火:全部标签词(≈1566)做两个方向的穷尽断言——
         //   ①英文标签直搜不被任何逻辑剔除(含 12 个泛化词,守卫后本尊保留)
@@ -115,6 +133,6 @@ enum QueryUnderstandingTest {
         expect(passCn == zhToEns.count,
                "全量 \(zhToEns.count) 个中文词反查全部命中标签通道")
 
-        print("PASS: 查询理解 34 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词穷尽)")
+        print("PASS: 查询理解 42 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词穷尽)")
     }
 }

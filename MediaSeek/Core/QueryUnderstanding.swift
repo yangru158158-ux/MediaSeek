@@ -123,6 +123,31 @@ enum QueryUnderstanding {
         return tokens
     }
 
+    /// 性别词对照(第五十批):SigLIP 绝对分数区分男女弱(男照 0.06-0.10 与
+    /// 女照 0.10-0.11 同带,0.08 地板一起放行——用户实测搜 woman 杨如程玉婷
+    /// 混列),相对差才是可靠信号(实测:女照 woman分-man分=+0.021 / 男照
+    /// -0.027~-0.038 / 中性 -0.004)。查询是性别词时视觉通道同时跑反义词,
+    /// 只留「正向分-反向分 ≥ 0.012」的照片(见 SearchEngine 对比过滤)
+    static let genderOpposites: [String: String] = [
+        "woman": "man", "man": "woman",
+        "women": "men", "men": "women",
+        "girl": "boy", "boy": "girl",
+        "female": "male", "male": "female",
+        "lady": "gentleman", "gentleman": "lady",
+        "女人": "man", "男人": "woman",
+        "女生": "boy", "男生": "girl",
+        "女士": "gentleman", "男士": "lady",
+        "女孩": "boy", "男孩": "girl",
+        "美女": "man", "帅哥": "woman",
+        "母亲": "man", "父亲": "woman",
+    ]
+
+    /// 查询词是性别词时返回反义词(供对比过滤),非性别词返回 nil
+    static func genderOpposite(of query: String) -> String? {
+        let key = query.lowercased().trimmingCharacters(in: .whitespaces)
+        return genderOpposites[key]
+    }
+
     /// 证件类 OCR 别名:人像面不印证件名(身份证正面只有「公民身份号码」「姓名」等字段),
     /// 只搜证件名会漏掉全部正面照——补字段级别名供文字通道并集保召回
     static let ocrAliases: [String: [String]] = [
