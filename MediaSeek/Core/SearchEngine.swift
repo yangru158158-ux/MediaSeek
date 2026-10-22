@@ -845,8 +845,8 @@ final class SearchEngine {
             if let opp = QueryUnderstanding.genderOpposite(of: term),
                let qOpp = try? siglip.embedQuery(Self.siglipQuery(opp)) {
                 let oppScores = Dictionary(uniqueKeysWithValues:
-                    (try store.search(space: siglip.space, kinds: searchKinds, query: qOpp,
-                                      limit: topK, minScore: 0, among: within))
+                    ((try? store.search(space: siglip.space, kinds: searchKinds, query: qOpp,
+                                        limit: topK, minScore: 0, among: within)) ?? [])
                     .map { ($0.refKey, $0.score) })
                 hits = Self.dedupByRef(hits.filter {
                     ($0.score - (oppScores[$0.refKey] ?? 0)) >= 0.012
@@ -873,8 +873,8 @@ final class SearchEngine {
         if let opp = QueryUnderstanding.genderOpposite(of: term),
            let qOpp = try? siglip.embedQuery(Self.siglipQuery(opp)) {
             let oppScores = Dictionary(uniqueKeysWithValues:
-                (try store.search(space: siglip.space, kinds: searchKinds, query: qOpp,
-                                  limit: topK, minScore: 0, among: within))
+                ((try? store.search(space: siglip.space, kinds: searchKinds, query: qOpp,
+                                    limit: topK, minScore: 0, among: within)) ?? [])
                 .map { ($0.refKey, $0.score) })
             hits = Self.dedupByRef(hits.filter {
                 ($0.score - (oppScores[$0.refKey] ?? 0)) >= 0.012

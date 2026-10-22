@@ -265,6 +265,8 @@ def mode_extract(out_npz: Path):
     if not transformers.__version__.startswith("4"):
         with torch.no_grad():
             for name in images:
+                if name not in TEXTS:
+                    continue   # 性别对比人像(第五十批)无 TEXTS 配对,跳过
                 px = processor(images=images[name], return_tensors="pt")["pixel_values"]
                 ids = tok(TEXTS[name][0], return_tensors="pt")
                 out = model(input_ids=ids["input_ids"], attention_mask=ids.get("attention_mask"),
