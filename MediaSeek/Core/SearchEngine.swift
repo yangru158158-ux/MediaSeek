@@ -451,10 +451,10 @@ final class SearchEngine {
             if let opp = QueryUnderstanding.genderOpposite(of: concept),
                let qOpp = try? siglip.embedQuery(Self.siglipQuery(opp)) {
                 let cands = Set(hits.map(\.refKey))
-                let oppScores = Dictionary(uniqueKeysWithValues:
-                    (try store.search(space: siglip.space, kinds: imageKinds, query: qOpp,
-                                      limit: topK, minScore: 0, among: cands))
-                    .map { ($0.refKey, $0.score) })
+                let oppScores = Dictionary((try store.search(space: siglip.space, kinds: imageKinds, query: qOpp,
+                                  limit: max(topK, cands.count), minScore: 0, among: cands))
+                    .map { ($0.refKey, $0.score) },
+                uniquingKeysWith: { max($0, $1) })   // 视频多帧同 refKey,保最高反向分
                 hits = Self.dedupByRef(hits.filter {
                     ($0.score - (oppScores[$0.refKey] ?? 0)) >= 0.012
                 })
@@ -849,10 +849,10 @@ final class SearchEngine {
             if let opp = QueryUnderstanding.genderOpposite(of: term),
                let qOpp = try? siglip.embedQuery(Self.siglipQuery(opp)) {
                 let cands = Set(hits.map(\.refKey))
-                let oppScores = Dictionary(uniqueKeysWithValues:
-                    ((try? store.search(space: siglip.space, kinds: searchKinds, query: qOpp,
-                                        limit: topK, minScore: 0, among: cands)) ?? [])
-                    .map { ($0.refKey, $0.score) })
+                let oppScores = Dictionary(((try? store.search(space: siglip.space, kinds: searchKinds, query: qOpp,
+                                    limit: max(topK, cands.count), minScore: 0, among: cands)) ?? [])
+                    .map { ($0.refKey, $0.score) },
+                uniquingKeysWith: { max($0, $1) })   // 视频多帧同 refKey,保最高反向分
                 hits = Self.dedupByRef(hits.filter {
                     ($0.score - (oppScores[$0.refKey] ?? 0)) >= 0.012
                 })
@@ -879,10 +879,10 @@ final class SearchEngine {
         if let opp = QueryUnderstanding.genderOpposite(of: term),
            let qOpp = try? siglip.embedQuery(Self.siglipQuery(opp)) {
             let cands = Set(hits.map(\.refKey))
-            let oppScores = Dictionary(uniqueKeysWithValues:
-                ((try? store.search(space: siglip.space, kinds: searchKinds, query: qOpp,
-                                    limit: topK, minScore: 0, among: cands)) ?? [])
-                .map { ($0.refKey, $0.score) })
+            let oppScores = Dictionary(((try? store.search(space: siglip.space, kinds: searchKinds, query: qOpp,
+                                    limit: max(topK, cands.count), minScore: 0, among: cands)) ?? [])
+                .map { ($0.refKey, $0.score) },
+                uniquingKeysWith: { max($0, $1) })   // 视频多帧同 refKey,保最高反向分
             hits = Self.dedupByRef(hits.filter {
                 ($0.score - (oppScores[$0.refKey] ?? 0)) >= 0.012
             })

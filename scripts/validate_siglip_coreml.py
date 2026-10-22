@@ -385,7 +385,7 @@ def mode_compare(a_npz: Path, b_npz: Path):
     print("\n-- 各自空间里的匹配对余弦 --")
     print("图        v4投影    v5pooler")
     for n in imgs:
-        m = lambda d: max(cos(get(d, "img", n), get(d, "txt", t)) for t in TEXTS.get(n, []))
+        m = lambda d: max((cos(get(d, "img", n), get(d, "txt", t)) for t in TEXTS.get(n, [])), default=0.0)
         print(f"{n.ljust(9)} {m(A):<9.4f} {m(B):.4f}")
 
     print("\n-- 跨空间一致性(同一输入,两版本特征向量的余弦) --")
