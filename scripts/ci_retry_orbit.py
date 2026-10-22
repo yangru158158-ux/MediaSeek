@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-"""发版验收轨道:容量拒单自动重派,四项全绿后触发 release.yml。
+"""发版验收轨道:容量拒单自动重派,五项全绿后触发 release.yml(--no-release 可只验不发)。
 
 GitHub 免费 macOS runner 高峰期会「拒单」:run conclusion=failure、
 job conclusion=cancelled、steps 一个没跑("not acquired by runner")。
 这既不是代码问题也不自愈——必须人工重派。本脚本把重派自动化:
 
-  每 3 分钟一轮,四项(Build Check / IPA / Query Tests / Face Tests):
+  每 3 分钟一轮,五项(Build Check / IPA / Query Tests / Face Tests /
+  Model Validation):
     - 拒单(0 步) → 立即 rerun-failed-jobs / 重新 dispatch
     - 真失败(跑了步骤但挂) → 停止,不重试不发包,退出码 2
     - 全绿 → 触发 release.yml(workflow_dispatch main),退出码 0
     - 90 分钟仍未全绿 → 放弃,退出码 3(把状态留给下一班)
 
-用法: python scripts/ci_retry_orbit.py --max-min 90
+用法: python scripts/ci_retry_orbit.py --max-min 90 [--no-release]
 """
 import argparse
 import json
@@ -24,10 +25,12 @@ REPO = "yangru158158-ux/MediaSeek"
 # 验收工作流:按 HEAD sha 找各自最新 run;face/query 按需手动补派
 WANT = ["Build Check", "Build Unsigned IPA", "Query Understanding Tests",
         "Face Recovery and Align Tests", "Model Validation"]
-# 缺席时自动补派的工作流(其余靠 push 路径自动触发)
+# 缺席时自动补派的工作流(其余靠 push 路径自动触发;Model Validation 的
+# push 触发带 paths 过滤,纯 App 代码提交不会触发,故必须补派)
 MISSING_DISPATCH = {
     "Face Recovery and Align Tests": "face_test.yml",
     "Query Understanding Tests": "query_test.yml",
+    "Model Validation": "model_validation.yml",
 }
 ACCEPT_SHA = None  # main HEAD(验收目标提交)
 
@@ -90,10 +93,6 @@ def is_green(st):
 def rerun(rid, tok):
     code, _ = api(f"actions/runs/{rid}/rerun-failed-jobs", tok, method="POST")
     return code
-
-
-def dispatch_face(tok):
-    return dispatch_wf("face_test.yml", tok)
 
 
 def dispatch_wf(wf_file, tok):
@@ -170,7 +169,7 @@ def main():
                 code = rerun(st["rid"], tok)
                 print(f"  拒单→重派 {name} ({code})", flush=True)
         time.sleep(180)
-    print(f"{args.max_min} 分钟未凑齐四绿,轨道放弃;当前:\n{line}", flush=True)
+    print(f"{args.max_min} 分钟未凑齐五项全绿,轨道放弃;当前:\n{line}", flush=True)
     sys.exit(3)
 
 
