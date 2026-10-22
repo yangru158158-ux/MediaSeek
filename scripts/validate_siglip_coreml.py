@@ -393,10 +393,10 @@ def mode_compare(a_npz: Path, b_npz: Path):
         for txt in TEXTS.get(t, [])[:1]:
             print(f"  txt 「{txt[:30]}」 = {cos(get(A,'txt',txt), get(B,'txt',txt)):.4f}")
 
-    v5_img_first = get(B, "img", imgs[0])
     if len(imgs) < 2:
-        print("\n-- 单图 npz:跨空间判读无意义(无第二张可比),跳过")
+        print("\n-- 图不足两张(空/单图 npz):跨空间判读无意义,跳过")
     else:
+        v5_img_first = get(B, "img", imgs[0])
         cross = max(cos(get(A, "img", n), v5_img_first) for n in imgs[1:])
         print(f"\n-- 判读:跨空间图像向量最大互似然 {cross:.4f}")
         if cross > 0.9:
