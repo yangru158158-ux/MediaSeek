@@ -368,10 +368,6 @@ def mode_extract(out_npz: Path):
         import traceback
         print(f"  ⚠️ 该环境导出链失败: {type(e).__name__}: {e}")
         traceback.print_exc()
-    except Exception as e:
-        import traceback
-        print(f"  ⚠️ 该环境导出链失败: {type(e).__name__}: {e}")
-        traceback.print_exc()
 
 
 def mode_compare(a_npz: Path, b_npz: Path):
@@ -398,12 +394,15 @@ def mode_compare(a_npz: Path, b_npz: Path):
             print(f"  txt 「{txt[:30]}」 = {cos(get(A,'txt',txt), get(B,'txt',txt)):.4f}")
 
     v5_img_first = get(B, "img", imgs[0])
-    cross = max((cos(get(A, "img", n), v5_img_first) for n in imgs[1:]), default=0.0)
-    print(f"\n-- 判读:跨空间图像向量最大互似然 {cross:.4f}")
-    if cross > 0.9:
-        print("v4 与 v5 空间一致(已证);真正的修复=文本塔按训练约定 max_length 填充,见 extract 段匹配对对照")
+    if len(imgs) < 2:
+        print("\n-- 单图 npz:跨空间判读无意义(无第二张可比),跳过")
     else:
-        print("v4 与 v5 空间不同(意外,需排查)")
+        cross = max(cos(get(A, "img", n), v5_img_first) for n in imgs[1:])
+        print(f"\n-- 判读:跨空间图像向量最大互似然 {cross:.4f}")
+        if cross > 0.9:
+            print("v4 与 v5 空间一致(已证);真正的修复=文本塔按训练约定 max_length 填充,见 extract 段匹配对对照")
+        else:
+            print("v4 与 v5 空间不同(意外,需排查)")
 
 
 if __name__ == "__main__":

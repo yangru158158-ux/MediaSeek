@@ -446,19 +446,26 @@ final class SearchEngine {
             // (实测:女照 woman分-man分=+0.021 / 男照 -0.027~-0.038 / 中性
             // -0.004)。反义词同跑,只留正向分领先 ≥0.012 的命中;合影两性
             // 分数相抵(差≈0)也被滤掉——性别词搜索要的是单一性别主导的照片。
-            // 第五十一/五十二批收紧:①逐词探测(多词整串查单词表不命中);
+            // 第五十一/五十二/五十三批收紧:①逐词探测(多词整串查单词表不命中);
             // ②反查 among=本组命中集 + limit×8 余量(limit 截的是行数不是键数,
-            // 视频多帧行数可超 limit;×8 覆盖后仍截断者按 0 放行=与旧行为同,不劣化)
+            // 视频多帧行数可超 limit;×8 覆盖后仍截断者按 0 放行=与旧行为同,不劣化);
+            // ③正反向都用性别单词嵌入打分——hits.score 是整串 concept 的分,
+            // 多词查询下与单词反向分做差不符 0.012 的单词-单词标定口径,边距一律对称
             if let oppTerm = terms.first(where: { QueryUnderstanding.genderOpposite(of: $0) != nil }),
                let opp = QueryUnderstanding.genderOpposite(of: oppTerm),
+               let qFwd = try? siglip.embedQuery(Self.siglipQuery(oppTerm)),
                let qOpp = try? siglip.embedQuery(Self.siglipQuery(opp)) {
                 let cands = Set(hits.map(\.refKey))
-                let oppScores = Dictionary((try store.search(space: siglip.space, kinds: imageKinds, query: qOpp,
-                                  limit: max(topK, cands.count * 8), minScore: 0, among: cands))
-                    .map { ($0.refKey, $0.score) },
-                uniquingKeysWith: { max($0, $1) })   // 视频多帧同 refKey,保最高反向分
+                func scores(_ query: [Float]) -> [String: Float] {
+                    Dictionary(((try? store.search(space: siglip.space, kinds: imageKinds, query: query,
+                                  limit: max(topK, cands.count * 8), minScore: 0, among: cands)) ?? [])
+                        .map { ($0.refKey, $0.score) },
+                    uniquingKeysWith: { max($0, $1) })   // 视频多帧同 refKey,保最高分
+                }
+                let fwdScores = scores(qFwd)
+                let oppScores = scores(qOpp)
                 hits = Self.dedupByRef(hits.filter {
-                    ($0.score - (oppScores[$0.refKey] ?? 0)) >= 0.012
+                    ((fwdScores[$0.refKey] ?? $0.score) - (oppScores[$0.refKey] ?? 0)) >= 0.012
                 })
             }
             // 相对尾部截断:远弱于头部的长尾(如「人」里混入的屏幕翻拍照)直接砍掉。
