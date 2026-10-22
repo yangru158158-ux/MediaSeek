@@ -69,7 +69,7 @@ def run_state(rid, tok):
 
 
 def latest_runs(tok, sha):
-    """HEAD sha 上四个工作流各自的最新 run;缺哪个记 None。"""
+    """HEAD sha 上五个验收工作流各自的最新 run;缺哪个记 None。"""
     _, d = api(f"actions/runs?head_sha={sha}&per_page=50", tok)
     found = {}
     for r in d.get("workflow_runs", []):

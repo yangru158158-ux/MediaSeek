@@ -72,16 +72,20 @@ final class HFTokenizer {
         return ids
     }
 
-    /// SigLIP 专用:编码后右填充到定长(pad id=0),并生成 attention_mask。
-    /// SigLIP2 训练时文本统一 max_length 填充,池化锚点在末位(pad 位);
-    /// 不填充会把锚点落在 EOS 位=模型没学过的位置,文本嵌入整体退化为噪声。
+    /// SigLIP 专用:编码后右填充到定长(pad id=0)。attention_mask 恒填 1
+    /// (全部位置参与注意=训练语义)——第四十九批(2026-10-21「搜女人 4217
+    /// 全噪声/搜 woman 0」事故):SigLIP2 训练与官方 processor 都不产
+    /// attention_mask,pad 参与注意才是训练语义;导出图把掩码做成输入
+    /// ((1-mask)×-30000 加性偏置),此前传真实 0/1 掩码把 pad 掩掉,末位
+    /// 池化锚点读到偏离训练分布的上下文,文本嵌入内容失明(实测猫照对
+    /// "This is a photo of a cat." 仅 -0.0120;全 1 掩码 +0.1126,与官方
+    /// 无掩码管线一致度 1.000000)。掩码输入仅为兼容已发布模型包的图形状。
     func encodePadded(_ text: String, maxLength: Int) throws -> (ids: [Int], mask: [Int]) {
         var ids = try encode(text, maxLength: maxLength)
-        let mask = [Int](repeating: 1, count: ids.count)
         if ids.count < maxLength {
             ids.append(contentsOf: [Int](repeating: 0, count: maxLength - ids.count))
         }
-        return (ids, mask + [Int](repeating: 0, count: maxLength - mask.count))
+        return (ids, [Int](repeating: 1, count: maxLength))
     }
 }
 
@@ -156,14 +160,9 @@ final class SigLIPEmbedder {
             let pi = ids.dataPointer.assumingMemoryBound(to: Int32.self)
             let pm = mask.dataPointer.assumingMemoryBound(to: Int32.self)
             for (i, t) in padded.ids.enumerated() { pi[i] = Int32(t) }
-            // 第四十九批(2026-10-21「搜女人 4217 全噪声/搜 woman 0」事故定位):
-            // SigLIP2 训练与官方 processor 都不产 attention_mask——pad 参与注意才是
-            // 训练语义。导出图把掩码做成输入((1-mask)×-30000 加性偏置),此前传
-            // 真实掩码把 pad 掩掉,末位池化锚点读到的上下文偏离训练分布,文本嵌入
-            // 内容失明:实测 "This is a photo of a cat." 对猫照 -0.0120(死),
-            // 掩码全 1(偏置归零=不掩码)+0.1126(健康),与官方无掩码管线一致度
-            // 1.000000。mask 输入仅为兼容已发布模型包的图结构,恒填 1。
-            for i in 0..<padded.mask.count { pm[i] = 1 }
+            // 掩码在 encodePadded 恒填 1(全部位置参与注意=训练语义),直拷;
+            // 第四十九批事故与实测证据见 encodePadded 文档
+            for (i, m) in padded.mask.enumerated() { pm[i] = Int32(m) }
             return try textModel.runEmbedding(inputs: ["input_ids": ids, "attention_mask": mask])
         }
         let ids = try tokenizer.encode(text, maxLength: HFTokenizer.maxSequenceSiglip)
