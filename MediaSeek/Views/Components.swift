@@ -368,10 +368,11 @@ enum SharePresenter {
         return top
     }
 
-    /// 系统共享面板。相册资产直接传 PHAsset(系统给原件、自带 iCloud 下载);
-    /// 导入文件传物化后的临时 URL
-    static func share(items: [Any]) {
-        let vc = UIActivityViewController(activityItems: items, applicationActivities: nil)
+    /// 系统共享面板:一律传物化后的文件 URL(jpg/heic/mov/原文件)。
+    /// 210 用户实测:直接传 PHAsset 时系统面板把它降级成文本描述共享,
+    /// 只出现备忘录等文本接收方,微信等第三方 App 全部不显示
+    static func share(url: URL) {
+        let vc = UIActivityViewController(activityItems: [url], applicationActivities: nil)
         topMostViewController()?.present(vc, animated: true)
     }
 
@@ -417,22 +418,20 @@ struct ShareSaveButton: View {
 
     private func share() {
         guard !busy else { return }
-        switch item {
-        case .asset(let asset):
-            // 相册资产交系统原件,无需物化
-            SharePresenter.share(items: [asset])
-        case .file:
-            busy = true
-            Task {
-                do {
-                    let url = try await SearchExporter.materialize(item, photo: app.photoLib,
-                                                                   imports: app.imports)
-                    SharePresenter.share(items: [url])
-                } catch {
-                    app.fail(error)
-                }
-                busy = false
+        busy = true
+        Task {
+            do {
+                // 相册资产与导入文件统一物化成文件 URL 再共享:PHAsset 直传
+                // 会被系统面板降级成文本描述(210 实测只剩备忘录);文件 URL
+                // 所有共享目标(微信/AirDrop/…)都接收。iCloud 未下载的资产
+                // 在此触发下载,按钮转圈可见
+                let url = try await SearchExporter.materialize(item, photo: app.photoLib,
+                                                               imports: app.imports)
+                SharePresenter.share(url: url)
+            } catch {
+                app.fail(error)
             }
+            busy = false
         }
     }
 
