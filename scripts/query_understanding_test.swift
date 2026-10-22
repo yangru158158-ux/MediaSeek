@@ -116,6 +116,18 @@ enum QueryUnderstandingTest {
         expect(QueryUnderstanding.english(for: "屏幕截图") == "screen screenshot",
                "屏幕截图 直译去重(此前拼出四词重复串)")
 
+        // —— 第五十五批:性别对比串=文献标准形式(CVPR 2025 口径,带冠词小写) ——
+        if let pair = QueryUnderstanding.genderContrast(of: "女人") {
+            expect(pair.fwd == "a photo of a woman" && pair.opp == "a photo of a man",
+                   "女人 → 文献式对比串 woman/man 对")
+        } else { fatalError("FAIL: 女人应有性别对比串") }
+        if let pair = QueryUnderstanding.genderContrast(of: "men") {
+            expect(pair.fwd == "a photo of a man" && pair.opp == "a photo of a woman",
+                   "men 复数归一为单数 man,反向 woman")
+        } else { fatalError("FAIL: men 应有性别对比串") }
+        expect(QueryUnderstanding.genderContrast(of: "beach") == nil,
+               "非性别词无对比串")
+
         // —— 全量标签词典回归(第四十七批):词典里每一个词都必须能工作 ——
         // 不是逐词救火:全部标签词(≈1566)做两个方向的穷尽断言——
         //   ①英文标签直搜不被任何逻辑剔除(含 12 个泛化词,守卫后本尊保留)
@@ -139,7 +151,7 @@ enum QueryUnderstandingTest {
         expect(passCn == zhToEns.count,
                "全量 \(zhToEns.count) 个中文词反查全部命中标签通道")
 
-        // 断言数口径:全文 expect 调用 43 项(另含 1 行函数定义)
-        print("PASS: 查询理解 43 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词穷尽)")
+        // 断言数口径:全文 expect 调用 46 项(另含 1 行函数定义)
+        print("PASS: 查询理解 46 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词穷尽)")
     }
 }

@@ -156,6 +156,30 @@ enum QueryUnderstanding {
         return genderOpposites[key]
     }
 
+    /// 性别词→规范英文单数(第五十五批)。对比串按文献标准形式(CVPR 2025
+    /// 零样本性别分类等:"a photo of a man/woman" 带冠词小写 + argmax),
+    /// 真实照片实测边距:女 +0.030~+0.049 / 男 -0.056~-0.023 / 中性 ±0.004
+    /// (无冠词模板与画作样本都显著弱于真人照片+标准提示词,勿再混用)
+    static let genderEnglish: [String: String] = [
+        "woman": "woman", "women": "woman", "man": "man", "men": "man",
+        "girl": "girl", "boy": "boy", "female": "woman", "male": "man",
+        "lady": "lady", "gentleman": "gentleman",
+        "女人": "woman", "男人": "man", "女生": "girl", "男生": "boy",
+        "女士": "lady", "男士": "gentleman", "女孩": "girl", "男孩": "boy",
+        "美女": "woman", "帅哥": "man", "母亲": "woman", "父亲": "man",
+    ]
+
+    /// 性别词的对比串对(文献标准形式)。非性别词返回 nil。
+    /// 女性词 → (a photo of a woman, a photo of a man);男性词反向
+    static func genderContrast(of query: String) -> (fwd: String, opp: String)? {
+        let key = query.lowercased().trimmingCharacters(in: .whitespaces)
+        guard let opp = genderOpposites[key] else { return nil }
+        let fwd = genderEnglish[key]
+            ?? (key.isEmpty || !key.allSatisfy(\.isASCII) ? nil : key)
+        guard let fwd else { return nil }
+        return ("a photo of a \(fwd)", "a photo of a \(opp)")
+    }
+
     /// 证件类 OCR 别名:人像面不印证件名(身份证正面只有「公民身份号码」「姓名」等字段),
     /// 只搜证件名会漏掉全部正面照——补字段级别名供文字通道并集保召回
     static let ocrAliases: [String: [String]] = [

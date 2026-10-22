@@ -75,7 +75,9 @@ def load_test_images() -> dict[str, Image.Image]:
         "beach": ["https://commons.wikimedia.org/wiki/Special:FilePath/Maldives%20beach.jpg",
                   "https://commons.wikimedia.org/wiki/Special:FilePath/Beach%20of%20Varkala,%20Kerala.jpg"],
         # 第五十批:性别对比回归用真人像(网络失败仅降级警告不阻断)
-        "woman_portrait": ["https://commons.wikimedia.org/wiki/Special:FilePath/Mona%20Lisa,%20by%20Leonardo%20da%20Vinci,%20from%20C2RMF%20retouched.jpg"],
+        # 第五十五批:女像必须用真人照片(画作信号弱一半,勿用蒙娜丽莎类)
+        "woman_portrait": ["https://commons.wikimedia.org/wiki/Special:FilePath/Hillary%20Clinton%20official%20Secretary%20of%20State%20portrait%20portrait.jpg",
+                           "https://commons.wikimedia.org/wiki/Special:FilePath/Hillary%20Clinton.jpg"],
         "man_portrait": ["https://raw.githubusercontent.com/ageitgey/face_recognition/master/examples/obama.jpg"],
     }.items():
         for u in urls:
@@ -228,7 +230,7 @@ def mode_extract(out_npz: Path):
     # ---- 第五十批阻断回归:性别对比边距(性别词对比过滤的依据) ----
     # SigLIP 绝对分数区分男女弱(男照 0.06-0.10 与女照 0.10-0.11 同带),
     # 相对差才可靠(实测:女照 +0.021/男照 -0.027~-0.038/中性 -0.004)。
-    # App 端按「正向分-反向分 ≥ 0.012」过滤;此回归守住边距不复崩。
+    # App 端按「正向分-反向分 ≥ 0.010」过滤(文献式提示词);此回归守住边距不复崩。
     print("== 性别对比回归(阻断) ==")
 
     def ref_vec(text: str):
@@ -237,12 +239,13 @@ def mode_extract(out_npz: Path):
             return model.text_model(input_ids=enc["input_ids"]).pooler_output[0].numpy()
 
     if "woman_portrait" in img_v and "man_portrait" in img_v:
-        qw_, qm_ = ref_vec("This is a photo of a woman."), ref_vec("This is a photo of a man.")
+        # 第五十五批:文献标准提示词(CVPR 2025 零样本性别分类口径,带冠词小写)
+        qw_, qm_ = ref_vec("a photo of a woman"), ref_vec("a photo of a man")
         m_w = cos(qw_, img_v["woman_portrait"]) - cos(qm_, img_v["woman_portrait"])
         m_m = cos(qw_, img_v["man_portrait"]) - cos(qm_, img_v["man_portrait"])
-        print(f"  女照边距(woman分-man分)={m_w:+.4f}  男照边距={m_m:+.4f}(要求:女≥+0.012,男≤0)")
-        if m_w < 0.012:
-            raise SystemExit(f"FAIL 女照性别边距 {m_w:+.4f} < +0.012——对比过滤会漏掉真女人照")
+        print(f"  女照边距(woman分-man分)={m_w:+.4f}  男照边距={m_m:+.4f}(要求:女≥+0.010,男≤0)")
+        if m_w < 0.010:
+            raise SystemExit(f"FAIL 女照性别边距 {m_w:+.4f} < +0.010——对比过滤会漏掉真女人照")
         if m_m > 0:
             raise SystemExit(f"FAIL 男照性别边距 {m_m:+.4f} > 0——对比过滤拦不住男照泄漏")
         print("  PASS 性别对比边距在案")

@@ -454,9 +454,9 @@ final class SearchEngine {
             // ③正反向都用性别单词嵌入打分——hits.score 是整串 concept 的分,
             // 多词查询下与单词反向分做差不符 0.012 的单词-单词标定口径,边距一律对称
             if let oppTerm = terms.first(where: { QueryUnderstanding.genderOpposite(of: $0) != nil }),
-               let opp = QueryUnderstanding.genderOpposite(of: oppTerm),
-               let qFwd = try? siglip.embedQuery(Self.siglipQuery(oppTerm)),
-               let qOpp = try? siglip.embedQuery(Self.siglipQuery(opp)) {
+               let pair = QueryUnderstanding.genderContrast(of: oppTerm),
+               let qFwd = try? siglip.embedQuery(pair.fwd),
+               let qOpp = try? siglip.embedQuery(pair.opp) {
                 let cands = Set(hits.map(\.refKey))
                 func scores(_ query: [Float]) -> [String: Float] {
                     Dictionary(((try? store.search(space: siglip.space, kinds: imageKinds, query: query,
@@ -467,7 +467,7 @@ final class SearchEngine {
                 let fwdScores = scores(qFwd)
                 let oppScores = scores(qOpp)
                 hits = Self.dedupByRef(hits.filter {
-                    ((fwdScores[$0.refKey] ?? $0.score) - (oppScores[$0.refKey] ?? 0)) >= 0.004
+                    ((fwdScores[$0.refKey] ?? $0.score) - (oppScores[$0.refKey] ?? 0)) >= 0.010
                 })
             }
             // 相对尾部截断:远弱于头部的长尾(如「人」里混入的屏幕翻拍照)直接砍掉。
@@ -856,16 +856,21 @@ final class SearchEngine {
             let best = hits.first?.score ?? 0
             if best > 0 { hits = hits.filter { $0.score >= best * 0.85 } }
             // 第五十批:性别词对比过滤(结果内同规,见 QueryUnderstanding.genderOpposites;
-            // 反查 among=本组命中集,第五十一批大库 topK 边界修复同主管线)
-            if let opp = QueryUnderstanding.genderOpposite(of: term),
-               let qOpp = try? siglip.embedQuery(Self.siglipQuery(opp)) {
+            // 第五十五批:对比串=文献标准形式,正反向对称打分,线 0.010 见标定注释)
+            if let pair = QueryUnderstanding.genderContrast(of: term),
+               let qFwd = try? siglip.embedQuery(pair.fwd),
+               let qOpp = try? siglip.embedQuery(pair.opp) {
                 let cands = Set(hits.map(\.refKey))
-                let oppScores = Dictionary(((try? store.search(space: siglip.space, kinds: searchKinds, query: qOpp,
-                                    limit: max(topK, cands.count * 8), minScore: 0, among: cands)) ?? [])
-                    .map { ($0.refKey, $0.score) },
-                uniquingKeysWith: { max($0, $1) })   // 视频多帧同 refKey,保最高反向分
+                func litScores(_ query: [Float]) -> [String: Float] {
+                    Dictionary(((try? store.search(space: siglip.space, kinds: searchKinds, query: query,
+                                        limit: max(topK, cands.count * 8), minScore: 0, among: cands)) ?? [])
+                        .map { ($0.refKey, $0.score) },
+                    uniquingKeysWith: { max($0, $1) })   // 视频多帧同 refKey,保最高分
+                }
+                let fwdScores = litScores(qFwd)
+                let oppScores = litScores(qOpp)
                 hits = Self.dedupByRef(hits.filter {
-                    ($0.score - (oppScores[$0.refKey] ?? 0)) >= 0.004
+                    ((fwdScores[$0.refKey] ?? $0.score) - (oppScores[$0.refKey] ?? 0)) >= 0.010
                 })
             }
             return videoFrameGuard(hits, term: term)
@@ -884,18 +889,23 @@ final class SearchEngine {
         let best = hits.first?.score ?? 0
         // 低置信收紧与主流程同规:最佳 <0.13 = 无真匹配,只留贴近最佳的一小撮
         if best > 0 { hits = hits.filter { $0.score >= best * (best >= 0.13 ? 0.85 : 0.95) } }
-        // 第五十批:性别词对比过滤(与主管线视觉通道同规,实测依据见
-        // QueryUnderstanding.genderOpposites 注释;反查 among=本组命中集,
-        // 第五十一批大库 topK 边界修复同主管线)
-        if let opp = QueryUnderstanding.genderOpposite(of: term),
-           let qOpp = try? siglip.embedQuery(Self.siglipQuery(opp)) {
+        // 第五十批:性别词对比过滤(与主管线视觉通道同规;第五十五批:对比串
+        // =文献标准「a photo of a woman/man」形式+正反向对称打分+线0.010,
+        // 真实照片标定见 QueryUnderstanding.genderEnglish 注释)
+        if let pair = QueryUnderstanding.genderContrast(of: term),
+           let qFwd = try? siglip.embedQuery(pair.fwd),
+           let qOpp = try? siglip.embedQuery(pair.opp) {
             let cands = Set(hits.map(\.refKey))
-            let oppScores = Dictionary(((try? store.search(space: siglip.space, kinds: searchKinds, query: qOpp,
+            func litScores(_ query: [Float]) -> [String: Float] {
+                Dictionary(((try? store.search(space: siglip.space, kinds: searchKinds, query: query,
                                     limit: max(topK, cands.count * 8), minScore: 0, among: cands)) ?? [])
-                .map { ($0.refKey, $0.score) },
-                uniquingKeysWith: { max($0, $1) })   // 视频多帧同 refKey,保最高反向分
+                    .map { ($0.refKey, $0.score) },
+                uniquingKeysWith: { max($0, $1) })   // 视频多帧同 refKey,保最高分
+            }
+            let fwdScores = litScores(qFwd)
+            let oppScores = litScores(qOpp)
             hits = Self.dedupByRef(hits.filter {
-                ($0.score - (oppScores[$0.refKey] ?? 0)) >= 0.004
+                ((fwdScores[$0.refKey] ?? $0.score) - (oppScores[$0.refKey] ?? 0)) >= 0.010
             })
         }
         return videoFrameGuard(hits, term: term)
