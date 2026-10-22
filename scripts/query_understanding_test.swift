@@ -128,6 +128,20 @@ enum QueryUnderstandingTest {
         expect(QueryUnderstanding.genderContrast(of: "beach") == nil,
                "非性别词无对比串")
 
+        // 第五十五批补:对比串全词表穷尽(genderOpposites/genderEnglish 双表
+        // 键漂移护栏——加词漏配 genderEnglish 时 CI 立红)
+        let singulars: Set<String> = ["woman", "man", "girl", "boy", "lady", "gentleman"]
+        for (k, _) in QueryUnderstanding.genderOpposites {
+            guard let p = QueryUnderstanding.genderContrast(of: k) else {
+                fatalError("FAIL: 性别词「\(k)」无对比串(genderEnglish 漏配?)")
+            }
+            let fw = String(p.fwd.dropFirst("a photo of a ".count))
+            let ow = String(p.opp.dropFirst("a photo of a ".count))
+            if !singulars.contains(fw) || !singulars.contains(ow) || fw == ow {
+                fatalError("FAIL: 性别词「\(k)」对比串未归一/同侧:\(p.fwd) / \(p.opp)")
+            }
+        }
+
         // —— 全量标签词典回归(第四十七批):词典里每一个词都必须能工作 ——
         // 不是逐词救火:全部标签词(≈1566)做两个方向的穷尽断言——
         //   ①英文标签直搜不被任何逻辑剔除(含 12 个泛化词,守卫后本尊保留)

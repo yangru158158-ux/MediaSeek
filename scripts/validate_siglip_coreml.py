@@ -76,8 +76,8 @@ def load_test_images() -> dict[str, Image.Image]:
                   "https://commons.wikimedia.org/wiki/Special:FilePath/Beach%20of%20Varkala,%20Kerala.jpg"],
         # 第五十批:性别对比回归用真人像(网络失败仅降级警告不阻断)
         # 第五十五批:女像必须用真人照片(画作信号弱一半,勿用蒙娜丽莎类)
-        "woman_portrait": ["https://commons.wikimedia.org/wiki/Special:FilePath/Hillary%20Clinton%20official%20Secretary%20of%20State%20portrait%20portrait.jpg",
-                           "https://commons.wikimedia.org/wiki/Special:FilePath/Hillary%20Clinton.jpg"],
+        "woman_portrait": ["https://commons.wikimedia.org/wiki/Special:FilePath/Hillary%20Clinton.jpg",
+                           "https://commons.wikimedia.org/wiki/Special:FilePath/Angela%20Merkel%20official%20portrait.jpg"],
         "man_portrait": ["https://raw.githubusercontent.com/ageitgey/face_recognition/master/examples/obama.jpg"],
     }.items():
         for u in urls:
