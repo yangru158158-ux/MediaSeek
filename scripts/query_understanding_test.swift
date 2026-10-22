@@ -116,6 +116,19 @@ enum QueryUnderstandingTest {
         expect(QueryUnderstanding.english(for: "屏幕截图") == "screen screenshot",
                "屏幕截图 直译去重(此前拼出四词重复串)")
 
+        // —— 第五十六批:短词短路只护种子,扩展不得注入泛化词 ——
+        // 207 实测:搜「女人」(2字)短路分支放行同义扩展注入的 person/people,
+        // 标签通道对全库人像标签命中 4,279 张灌进语义结果(且逐张取图极慢)
+        let nv = QueryUnderstanding.labelTokens("女人")
+        expect(nv.contains("person") == false && nv.contains("people") == false,
+               "女人(2字)扩展注入的 person/people 被剔——标签通道不再灌全库人像")
+        expect(nv.contains("woman") && nv.contains("girl") && nv.contains("lady"),
+               "女人 种子与正常扩展保留(woman/girl/lady)")
+        expect(QueryUnderstanding.labelTokens("朋友").contains("people"),
+               "朋友 直译种子 people 保留(48批词典直译免疫设计不回退)")
+        expect(QueryUnderstanding.labelTokens("机器").contains("machine"),
+               "机器(2字)直译 machine 保留(短路护种子设计不回退)")
+
         // —— 第五十五批:性别对比串=文献标准形式(CVPR 2025 口径,带冠词小写) ——
         if let pair = QueryUnderstanding.genderContrast(of: "女人") {
             expect(pair.fwd == "a photo of a woman" && pair.opp == "a photo of a man",
@@ -165,7 +178,7 @@ enum QueryUnderstandingTest {
         expect(passCn == zhToEns.count,
                "全量 \(zhToEns.count) 个中文词反查全部命中标签通道")
 
-        // 断言数口径:全文 expect 调用 46 项(另含 1 行函数定义)
-        print("PASS: 查询理解 46 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词穷尽)")
+        // 断言数口径:全文 expect 调用 49 项(另含 1 行函数定义)
+        print("PASS: 查询理解 49 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词穷尽)")
     }
 }

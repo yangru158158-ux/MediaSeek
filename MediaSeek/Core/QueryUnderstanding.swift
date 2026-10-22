@@ -126,7 +126,14 @@ enum QueryUnderstanding {
                 ? expandedTokens(tokens)
                 : expandedTokens(tokens).subtracting(genericTokens.subtracting(dictTokens))
         } else {
-            tokens = expandedTokens(tokens)
+            // 第五十六批:短词(2字)短路保护只护「种子词」(原词+词典直译)——
+            // 同义扩展不得注入泛化词。「女人」(2字)走本分支,woman 的同义扩展
+            // 注入 person/people,标签通道对全库人像标签命中 4,279 张灌进语义
+            // 结果(207 用户实测,搜得还特别慢:4千张逐张取图)。剔除只针对
+            // 扩展注入的泛化词,种子里的保留:「朋友」直译 friend people 的
+            // people 是种子,不受影响(48 批设计);「机器」直译 machine 同理
+            let seed = tokens
+            tokens = expandedTokens(tokens).subtracting(genericTokens.subtracting(seed))
         }
         return tokens
     }

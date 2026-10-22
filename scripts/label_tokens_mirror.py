@@ -97,7 +97,9 @@ def label_tokens(query):
         else:
             tokens = expanded(tokens) - (GENERIC - dict_tokens)
     else:
-        tokens = expanded(tokens)
+        # 第五十六批:短词短路只护种子词,扩展注入的泛化词照剔
+        seed = set(tokens)
+        tokens = expanded(tokens) - (GENERIC - seed)
     return tokens
 
 
