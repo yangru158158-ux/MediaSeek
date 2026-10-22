@@ -189,7 +189,10 @@ enum SearchExporter {
                 }
             }
             guard let data else { throw MSError("照片导出失败") }
-            let dest = uniqueURL(folder.appendingPathComponent("photo-\(asset.localIdentifier.suffix(6)).jpg"))
+            // 同音频兜底:localIdentifier 尾部斜杠不能进文件名(验收发现)
+            let photoFallback = "photo-" + asset.localIdentifier.suffix(6)
+                .filter { $0.isLetter || $0.isNumber } + ".jpg"
+            let dest = uniqueURL(folder.appendingPathComponent(photoFallback))
             try data.write(to: dest)
             return dest
         } else if asset.mediaType == .video {
@@ -214,9 +217,11 @@ enum SearchExporter {
             guard let res = resources.first(where: { $0.type == .audio }) else {
                 throw MSError("音频导出失败(未找到原始资源)")
             }
-            let name = res.originalFilename.isEmpty
-                ? "audio-\(asset.localIdentifier.suffix(6)).m4a"
-                : res.originalFilename
+            // localIdentifier 形如 "UUID/L/P/123",尾部常含斜杠——直接拼进
+            // 文件名会落进不存在的子目录,兜底名只留字母数字(验收发现)
+            let fallback = "audio-" + asset.localIdentifier.suffix(6)
+                .filter { $0.isLetter || $0.isNumber } + ".m4a"
+            let name = res.originalFilename.isEmpty ? fallback : res.originalFilename
             let dest = uniqueURL(folder.appendingPathComponent(name))
             let opts = PHAssetResourceRequestOptions()
             opts.isNetworkAccessAllowed = true

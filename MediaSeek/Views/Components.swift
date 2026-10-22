@@ -416,8 +416,8 @@ struct ShareSaveButton: View {
         .disabled(busy)
     }
 
-    // @MainActor:Task 继承主 actor——busy 回写与 UIKit present 都在主线程
-    // (验收低位备注:Swift 5.9 无默认 MainActor 隔离,视图方法里裸 Task 不保证)
+    // @MainActor:显式化标注(验收澄清:View 方法经 SwiftUI 推断本已隔离在
+    // 主 actor,Task 亦继承——标注无行为变化;留着防未来重构挪出 View 时丢保证)
     @MainActor
     private func share() {
         guard !busy else { return }
