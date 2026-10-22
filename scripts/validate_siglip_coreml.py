@@ -351,6 +351,8 @@ def mode_extract(out_npz: Path):
             def sep(txt_model, tag):
                 print(f"  匹配对 vs 交叉对(CoreML 端到端 {tag},区分度=匹配显著高于交叉):")
                 for name in images:
+                    if name not in TEXTS:
+                        continue   # 第五十二批:人像无 TEXTS 配对,max 空序列曾炸整段导出链诊断
                     v = ml(img_ml, {"pixel_values": px_official[name].numpy().astype(np.float32)})
                     def coreml_txt(tquery):
                         ids, mask = padded_ids_mask(tquery)
@@ -396,7 +398,7 @@ def mode_compare(a_npz: Path, b_npz: Path):
             print(f"  txt 「{txt[:30]}」 = {cos(get(A,'txt',txt), get(B,'txt',txt)):.4f}")
 
     v5_img_first = get(B, "img", imgs[0])
-    cross = max(cos(get(A, "img", n), v5_img_first) for n in imgs[1:])
+    cross = max((cos(get(A, "img", n), v5_img_first) for n in imgs[1:]), default=0.0)
     print(f"\n-- 判读:跨空间图像向量最大互似然 {cross:.4f}")
     if cross > 0.9:
         print("v4 与 v5 空间一致(已证);真正的修复=文本塔按训练约定 max_length 填充,见 extract 段匹配对对照")

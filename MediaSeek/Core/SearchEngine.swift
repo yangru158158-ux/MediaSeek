@@ -446,13 +446,15 @@ final class SearchEngine {
             // (实测:女照 woman分-man分=+0.021 / 男照 -0.027~-0.038 / 中性
             // -0.004)。反义词同跑,只留正向分领先 ≥0.012 的命中;合影两性
             // 分数相抵(差≈0)也被滤掉——性别词搜索要的是单一性别主导的照片。
-            // 反查用 among=本组命中集(第五十一批):限 topK 排位时大库漏取
-            // 反向分会按 0 放行穿透过滤;限定在本组内取分,命中集 ≤topK 必全取到
-            if let opp = QueryUnderstanding.genderOpposite(of: concept),
+            // 第五十一/五十二批收紧:①逐词探测(多词整串查单词表不命中);
+            // ②反查 among=本组命中集 + limit×8 余量(limit 截的是行数不是键数,
+            // 视频多帧行数可超 limit;×8 覆盖后仍截断者按 0 放行=与旧行为同,不劣化)
+            if let oppTerm = terms.first(where: { QueryUnderstanding.genderOpposite(of: $0) != nil }),
+               let opp = QueryUnderstanding.genderOpposite(of: oppTerm),
                let qOpp = try? siglip.embedQuery(Self.siglipQuery(opp)) {
                 let cands = Set(hits.map(\.refKey))
                 let oppScores = Dictionary((try store.search(space: siglip.space, kinds: imageKinds, query: qOpp,
-                                  limit: max(topK, cands.count), minScore: 0, among: cands))
+                                  limit: max(topK, cands.count * 8), minScore: 0, among: cands))
                     .map { ($0.refKey, $0.score) },
                 uniquingKeysWith: { max($0, $1) })   // 视频多帧同 refKey,保最高反向分
                 hits = Self.dedupByRef(hits.filter {
@@ -850,7 +852,7 @@ final class SearchEngine {
                let qOpp = try? siglip.embedQuery(Self.siglipQuery(opp)) {
                 let cands = Set(hits.map(\.refKey))
                 let oppScores = Dictionary(((try? store.search(space: siglip.space, kinds: searchKinds, query: qOpp,
-                                    limit: max(topK, cands.count), minScore: 0, among: cands)) ?? [])
+                                    limit: max(topK, cands.count * 8), minScore: 0, among: cands)) ?? [])
                     .map { ($0.refKey, $0.score) },
                 uniquingKeysWith: { max($0, $1) })   // 视频多帧同 refKey,保最高反向分
                 hits = Self.dedupByRef(hits.filter {
@@ -880,7 +882,7 @@ final class SearchEngine {
            let qOpp = try? siglip.embedQuery(Self.siglipQuery(opp)) {
             let cands = Set(hits.map(\.refKey))
             let oppScores = Dictionary(((try? store.search(space: siglip.space, kinds: searchKinds, query: qOpp,
-                                    limit: max(topK, cands.count), minScore: 0, among: cands)) ?? [])
+                                    limit: max(topK, cands.count * 8), minScore: 0, among: cands)) ?? [])
                 .map { ($0.refKey, $0.score) },
                 uniquingKeysWith: { max($0, $1) })   // 视频多帧同 refKey,保最高反向分
             hits = Self.dedupByRef(hits.filter {
