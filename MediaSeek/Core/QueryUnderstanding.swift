@@ -53,41 +53,73 @@ enum QueryUnderstanding {
         return out.isEmpty ? trimmed : out
     }
 
+    /// 覆盖率计算容忍的无实义连接字:「妈妈的生日」=妈妈+的+生日,
+    /// 「的」不算未覆盖;「华研机器人」的「华」「研」不是连接字,照常判
+    /// 部分覆盖(专名)
+    private static let connectives: Set<Character> = ["的", "了", "与", "和", "及", "或", "在", "是"]
+
     /// 核心词命中的词典条目按出现位置拼成英文查询(视觉通道用),无命中返回 nil。
     /// 单字键只在整词完全相等时生效:「中华人民共和国」含「人」字,
     /// 但搜它不是在搜人像——子串匹配会让全库 people/adult 标签灌进来。
     /// 除本词典外还查 LabelZh 反查表:标签词典里展示的中文(如「消费电子」)
     /// 直接翻回英文标签(consumer_electronics),走标签精确通道。
+    ///
+    /// 第六十批覆盖率规则(「华研机器人」事故:机器/机器人两个碎片把股票
+    /// 名偷换成 robot machine,「机器」直译的 machine 又借直译免疫闯过泛化
+    /// 剔除,标签通道灌进上千张截图):
+    /// ① 按空白拆原子词,逐词独立判覆盖;
+    /// ② 一个词只有被词典碎片区间并集【盖满】(连接字除外)才捐译文——
+    ///    盖满=复合描述词(屏幕截图/机器设备/妈妈的生日);盖不满=词里
+    ///    混着词典不认识的成分,大概率专名(华研机器人=公司/股票/人名),
+    ///    碎片一个不捐,整词原样交给 SigLIP 多语言通道自己判断;
+    /// ③ 碎片区间嵌套时只留最长(机器人→robot,「机器」不再重复捐词,
+    ///    与第五十四批「woman woman」去重同理);不嵌套的照常都留
+    ///    (屏幕+截图)。
     static func english(for core: String) -> String? {
-        var matches: [(pos: Int, en: String)] = []
-        for (zh, en) in dictionary {
-            if zh.count == 1 {
-                if core == zh { matches.append((0, en)) }
-                continue
-            }
-            if let r = core.range(of: zh) {
-                matches.append((core.distance(from: core.startIndex, to: r.lowerBound), en))
-            }
-        }
-        for (cn, en) in LabelZh.englishFromZh {
-            if cn.count == 1 {
-                if core == cn { matches.append((0, en)) }
-                continue
-            }
-            if let r = core.range(of: cn) {
-                matches.append((core.distance(from: core.startIndex, to: r.lowerBound), en))
-            }
-        }
-        guard !matches.isEmpty else { return nil }
-        // 第五十四批:同词去重——「女人」同时命中 dictionary 与 englishFromZh
-        // 各拼一次得到 "woman woman",重复稀释性别/主体信号(语义通道泛化灌水
-        // 元凶之一);标签通道不受影响(token 化成 Set 本就去重)
-        var seen = Set<String>()
         var out: [String] = []
-        for m in matches.sorted(by: { $0.pos < $1.pos }) where seen.insert(m.en).inserted {
-            out.append(m.en)
+        for term in core.components(separatedBy: .whitespacesAndNewlines) where !term.isEmpty {
+            // 该原子词内的全部碎片命中(区间用字符偏移)
+            var matches: [(start: Int, end: Int, en: String)] = []
+            let tables: [[String: String]] = [Dictionary(dictionary, uniquingKeysWith: { a, _ in a }),
+                                              LabelZh.englishFromZh]
+            for table in tables {
+                for (zh, en) in table {
+                    if zh.count == 1 {
+                        if term == zh { matches.append((0, term.count, en)) }
+                        continue
+                    }
+                    if let r = term.range(of: zh) {
+                        let s = term.distance(from: term.startIndex, to: r.lowerBound)
+                        matches.append((s, s + zh.count, en))
+                    }
+                }
+            }
+            guard !matches.isEmpty else { continue }
+            // 嵌套只留最长:长度降序贪心选,被已选区间整个包含的丢弃
+            var spans: [(start: Int, end: Int, en: String)] = []
+            for m in matches.sorted(by: {
+                ($0.end - $0.start) != ($1.end - $1.start)
+                    ? ($0.end - $0.start) > ($1.end - $1.start)
+                    : $0.start < $1.start
+            }) {
+                if spans.contains(where: { $0.start <= m.start && m.end <= $0.end }) { continue }
+                spans.append(m)
+            }
+            // 覆盖率:选中区间并集 + 未覆盖字符里的连接字,须盖满全词
+            var covered = Set<Int>()
+            for s in spans { for i in s.start..<s.end { covered.insert(i) } }
+            let uncoveredNonConnective = term.enumerated().contains { i, c in
+                !covered.contains(i.offset) && !connectives.contains(c.element)
+            }
+            if uncoveredNonConnective { continue }   // 盖不满:专名,不捐碎片
+            // 捐出:按位置排序,同词去重(第五十四批)
+            var seen = Set<String>()
+            for m in spans.sorted(by: { $0.start != $1.start ? $0.start < $1.start : $0.end < $1.end })
+            where seen.insert(m.en).inserted {
+                out.append(m.en)
+            }
         }
-        return out.joined(separator: " ")
+        return out.isEmpty ? nil : out.joined(separator: " ")
     }
 
     /// 泛化标签词:长查询(≥3 字)不带这些词去匹配标签——
@@ -315,6 +347,9 @@ enum QueryUnderstanding {
         ("键盘", "keyboard"), ("鼠标", "computer mouse"), ("耳机", "headphones"),
         ("相机", "camera"), ("手表", "wristwatch"), ("眼镜", "glasses"),
         ("沙发", "sofa"), ("床", "bed"), ("椅子", "chair"), ("桌子", "table"),
+        // 第六十批:补「设备」词条,让「机器设备」这类并列复合词达成全覆盖
+        // (机器+设备),覆盖率规则下照常直译;不补则「设备」两字悬空判专名
+        ("设备", "equipment"),
         ("办公室", "office"), ("厨房", "kitchen"), ("卧室", "bedroom"),
         ("浴室", "bathroom"), ("客厅", "living room"), ("电梯", "elevator"),
         ("楼梯", "stairs"), ("窗户", "window"), ("灯", "lamp"), ("垃圾桶", "trash can"),

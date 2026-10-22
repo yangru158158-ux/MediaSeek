@@ -113,8 +113,8 @@ enum QueryUnderstandingTest {
         // —— 第五十四批:词典直译同词去重(双词稀释性别信号=「女人」4217 洪水源头) ——
         expect(QueryUnderstanding.english(for: "女人") == "woman",
                "女人 直译去重为单词(此前 dictionary+englishFromZh 各拼一次成 woman woman)")
-        expect(QueryUnderstanding.english(for: "屏幕截图") == "screen screenshot",
-               "屏幕截图 直译去重(此前拼出四词重复串)")
+        expect(QueryUnderstanding.english(for: "屏幕截图") == "screenshot",
+               "屏幕截图=全词条目最长匹配(54批曾拼重复串,60批嵌套碎片不再重复捐 screen)")
 
         // —— 第五十六批:短词短路只护种子,扩展不得注入泛化词 ——
         // 207 实测:搜「女人」(2字)短路分支放行同义扩展注入的 person/people,
@@ -128,6 +128,21 @@ enum QueryUnderstandingTest {
                "朋友 直译种子 people 保留(48批词典直译免疫设计不回退)")
         expect(QueryUnderstanding.labelTokens("机器").contains("machine"),
                "机器(2字)直译 machine 保留(短路护种子设计不回退)")
+
+        // —— 第六十批:覆盖率规则(「华研机器人」事故:机器/机器人碎片把股票名
+        // 偷换成 robot machine,「机器」直译的 machine 借直译免疫闯过泛化剔除,
+        // 标签通道灌进上千张截图,搜出 1,183 个结果里只有 2 个是真的) ——
+        expect(QueryUnderstanding.english(for: "华研机器人") == nil,
+               "华研机器人(专名)碎片盖不满全词,一个不捐——整词交 SigLIP 多语言")
+        expect(QueryUnderstanding.english(for: "机器人") == "robot",
+               "机器人 整词=词典条目全覆盖;嵌套碎片「机器」不再重复捐 machine")
+        expect(QueryUnderstanding.english(for: "机器设备") == "machine equipment",
+               "机器设备=机器+设备 并列复合词全覆盖照常直译(「设备」词条 60 批补)")
+        expect(QueryUnderstanding.english(for: "妈妈的生日") != nil,
+               "连接字「的」不计未覆盖——描述性词组照常捐译文(妈妈+的+生日)")
+        let hynTokens = QueryUnderstanding.labelTokens("华研机器人")
+        expect(hynTokens.contains("machine") == false && hynTokens.contains("robot") == false,
+               "华研机器人 标签通道不再吃 machine/robot 碎片——灌水根除")
 
         // —— 第五十五批:性别对比串=文献标准形式(CVPR 2025 口径,带冠词小写) ——
         if let pair = QueryUnderstanding.genderContrast(of: "女人") {
@@ -178,7 +193,7 @@ enum QueryUnderstandingTest {
         expect(passCn == zhToEns.count,
                "全量 \(zhToEns.count) 个中文词反查全部命中标签通道")
 
-        // 断言数口径:全文 expect 调用 50 项(另含 1 行函数定义)
-        print("PASS: 查询理解 50 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词穷尽)")
+        // 断言数口径:全文 expect 调用 55 项(另含 1 行函数定义)
+        print("PASS: 查询理解 55 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词穷尽)")
     }
 }
