@@ -205,7 +205,22 @@ enum SearchExporter {
             let dest = uniqueURL(folder.appendingPathComponent(url.lastPathComponent))
             try FileManager.default.copyItem(at: url, to: dest)
             return dest
+        } else if asset.mediaType == .audio {
+            // 语音备忘录等音频资产:编辑输入的 audioURL 即原始文件
+            // (验收发现:时间/地点浏览下音频资产会以照片姿态进结果,
+            // 此前直抛「不支持的资产类型」挡住共享/另存)
+            let opts = PHContentEditingInputRequestOptions()
+            opts.isNetworkAccessAllowed = true
+            let url: URL? = await withCheckedContinuation { cont in
+                asset.requestContentEditingInput(with: opts) { input, _ in
+                    cont.resume(returning: input?.audioURL)
+                }
+            }
+            guard let url else { throw MSError("音频导出失败") }
+            let dest = uniqueURL(folder.appendingPathComponent(url.lastPathComponent))
+            try FileManager.default.copyItem(at: url, to: dest)
+            return dest
         }
-        throw MSError("不支持的资产类型(仅照片/视频)")
+        throw MSError("不支持的资产类型(仅照片/视频/音频)")
     }
 }
