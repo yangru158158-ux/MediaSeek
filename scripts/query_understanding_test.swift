@@ -110,6 +110,12 @@ enum QueryUnderstandingTest {
         expect(QueryUnderstanding.genderOpposite(of: " 女人 ") == "man",
                "空白归一后命中")
 
+        // —— 第五十四批:词典直译同词去重(双词稀释性别信号=「女人」4217 洪水源头) ——
+        expect(QueryUnderstanding.english(for: "女人") == "woman",
+               "女人 直译去重为单词(此前 dictionary+englishFromZh 各拼一次成 woman woman)")
+        expect(QueryUnderstanding.english(for: "屏幕截图") == "screen screenshot",
+               "屏幕截图 直译去重(此前拼出四词重复串)")
+
         // —— 全量标签词典回归(第四十七批):词典里每一个词都必须能工作 ——
         // 不是逐词救火:全部标签词(≈1566)做两个方向的穷尽断言——
         //   ①英文标签直搜不被任何逻辑剔除(含 12 个泛化词,守卫后本尊保留)
@@ -133,7 +139,7 @@ enum QueryUnderstandingTest {
         expect(passCn == zhToEns.count,
                "全量 \(zhToEns.count) 个中文词反查全部命中标签通道")
 
-        // 断言数口径:全文 expect 调用 41 项(另含 1 行函数定义;父版 34/33 差一在此对齐)
-        print("PASS: 查询理解 41 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词穷尽)")
+        // 断言数口径:全文 expect 调用 43 项(另含 1 行函数定义)
+        print("PASS: 查询理解 43 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词穷尽)")
     }
 }

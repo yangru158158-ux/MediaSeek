@@ -443,8 +443,10 @@ final class SearchEngine {
             }
             // 第五十批:性别词对比过滤——SigLIP 绝对分区分男女弱(0.08 地板
             // 男女同放行,用户实测搜 woman 杨如程玉婷混列),相对差才可靠
-            // (实测:女照 woman分-man分=+0.021 / 男照 -0.027~-0.038 / 中性
-            // -0.004)。反义词同跑,只留正向分领先 ≥0.012 的命中;合影两性
+            // (第五十四批多像实测,App 实际无冠词模板口径:女照 +0.013~+0.027 /
+            // 男照 -0.025~-0.035 / 中性 -0.001~-0.011,非女性全负)。反义词同跑,
+            // 只留正向分领先 ≥0.004 的命中(旧线 0.012 拿单张理想肖像标定,
+            // 真实照片信号更弱,女照被误杀成 0 结果——206 事故);合影两性
             // 分数相抵(差≈0)也被滤掉——性别词搜索要的是单一性别主导的照片。
             // 第五十一/五十二/五十三批收紧:①逐词探测(多词整串查单词表不命中);
             // ②反查 among=本组命中集 + limit×8 余量(limit 截的是行数不是键数,
@@ -465,7 +467,7 @@ final class SearchEngine {
                 let fwdScores = scores(qFwd)
                 let oppScores = scores(qOpp)
                 hits = Self.dedupByRef(hits.filter {
-                    ((fwdScores[$0.refKey] ?? $0.score) - (oppScores[$0.refKey] ?? 0)) >= 0.012
+                    ((fwdScores[$0.refKey] ?? $0.score) - (oppScores[$0.refKey] ?? 0)) >= 0.004
                 })
             }
             // 相对尾部截断:远弱于头部的长尾(如「人」里混入的屏幕翻拍照)直接砍掉。
@@ -863,7 +865,7 @@ final class SearchEngine {
                     .map { ($0.refKey, $0.score) },
                 uniquingKeysWith: { max($0, $1) })   // 视频多帧同 refKey,保最高反向分
                 hits = Self.dedupByRef(hits.filter {
-                    ($0.score - (oppScores[$0.refKey] ?? 0)) >= 0.012
+                    ($0.score - (oppScores[$0.refKey] ?? 0)) >= 0.004
                 })
             }
             return videoFrameGuard(hits, term: term)
@@ -893,7 +895,7 @@ final class SearchEngine {
                 .map { ($0.refKey, $0.score) },
                 uniquingKeysWith: { max($0, $1) })   // 视频多帧同 refKey,保最高反向分
             hits = Self.dedupByRef(hits.filter {
-                ($0.score - (oppScores[$0.refKey] ?? 0)) >= 0.012
+                ($0.score - (oppScores[$0.refKey] ?? 0)) >= 0.004
             })
         }
         return videoFrameGuard(hits, term: term)

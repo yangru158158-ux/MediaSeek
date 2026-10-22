@@ -79,7 +79,15 @@ enum QueryUnderstanding {
             }
         }
         guard !matches.isEmpty else { return nil }
-        return matches.sorted { $0.pos < $1.pos }.map { $0.en }.joined(separator: " ")
+        // 第五十四批:同词去重——「女人」同时命中 dictionary 与 englishFromZh
+        // 各拼一次得到 "woman woman",重复稀释性别/主体信号(语义通道泛化灌水
+        // 元凶之一);标签通道不受影响(token 化成 Set 本就去重)
+        var seen = Set<String>()
+        var out: [String] = []
+        for m in matches.sorted(by: { $0.pos < $1.pos }) where seen.insert(m.en).inserted {
+            out.append(m.en)
+        }
+        return out.joined(separator: " ")
     }
 
     /// 泛化标签词:长查询(≥3 字)不带这些词去匹配标签——

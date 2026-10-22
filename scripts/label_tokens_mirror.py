@@ -64,7 +64,12 @@ def english_for(core):
     if not matches:
         return None
     matches.sort(key=lambda m: m[0])
-    return " ".join(en for _, en in matches)
+    seen, out = set(), []
+    for _, en in matches:
+        if en not in seen:
+            seen.add(en)
+            out.append(en)
+    return " ".join(out)
 
 
 def expanded(tokens):
