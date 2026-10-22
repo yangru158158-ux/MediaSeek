@@ -109,7 +109,7 @@ enum QueryUnderstanding {
             var covered = Set<Int>()
             for s in spans { for i in s.start..<s.end { covered.insert(i) } }
             let uncoveredNonConnective = term.enumerated().contains { i, c in
-                !covered.contains(i.offset) && !connectives.contains(c.element)
+                !covered.contains(i) && !connectives.contains(c)
             }
             if uncoveredNonConnective { continue }   // 盖不满:专名,不捐碎片
             // 捐出:按位置排序,同词去重(第五十四批)
