@@ -445,12 +445,15 @@ final class SearchEngine {
             // 男女同放行,用户实测搜 woman 杨如程玉婷混列),相对差才可靠
             // (实测:女照 woman分-man分=+0.021 / 男照 -0.027~-0.038 / 中性
             // -0.004)。反义词同跑,只留正向分领先 ≥0.012 的命中;合影两性
-            // 分数相抵(差≈0)也被滤掉——性别词搜索要的是单一性别主导的照片
+            // 分数相抵(差≈0)也被滤掉——性别词搜索要的是单一性别主导的照片。
+            // 反查用 among=本组命中集(第五十一批):限 topK 排位时大库漏取
+            // 反向分会按 0 放行穿透过滤;限定在本组内取分,命中集 ≤topK 必全取到
             if let opp = QueryUnderstanding.genderOpposite(of: concept),
                let qOpp = try? siglip.embedQuery(Self.siglipQuery(opp)) {
+                let cands = Set(hits.map(\.refKey))
                 let oppScores = Dictionary(uniqueKeysWithValues:
                     (try store.search(space: siglip.space, kinds: imageKinds, query: qOpp,
-                                      limit: topK, minScore: 0, among: among))
+                                      limit: topK, minScore: 0, among: cands))
                     .map { ($0.refKey, $0.score) })
                 hits = Self.dedupByRef(hits.filter {
                     ($0.score - (oppScores[$0.refKey] ?? 0)) >= 0.012
@@ -841,12 +844,14 @@ final class SearchEngine {
             }
             let best = hits.first?.score ?? 0
             if best > 0 { hits = hits.filter { $0.score >= best * 0.85 } }
-            // 第五十批:性别词对比过滤(结果内同规,见 QueryUnderstanding.genderOpposites)
+            // 第五十批:性别词对比过滤(结果内同规,见 QueryUnderstanding.genderOpposites;
+            // 反查 among=本组命中集,第五十一批大库 topK 边界修复同主管线)
             if let opp = QueryUnderstanding.genderOpposite(of: term),
                let qOpp = try? siglip.embedQuery(Self.siglipQuery(opp)) {
+                let cands = Set(hits.map(\.refKey))
                 let oppScores = Dictionary(uniqueKeysWithValues:
                     ((try? store.search(space: siglip.space, kinds: searchKinds, query: qOpp,
-                                        limit: topK, minScore: 0, among: within)) ?? [])
+                                        limit: topK, minScore: 0, among: cands)) ?? [])
                     .map { ($0.refKey, $0.score) })
                 hits = Self.dedupByRef(hits.filter {
                     ($0.score - (oppScores[$0.refKey] ?? 0)) >= 0.012
@@ -869,12 +874,14 @@ final class SearchEngine {
         // 低置信收紧与主流程同规:最佳 <0.13 = 无真匹配,只留贴近最佳的一小撮
         if best > 0 { hits = hits.filter { $0.score >= best * (best >= 0.13 ? 0.85 : 0.95) } }
         // 第五十批:性别词对比过滤(与主管线视觉通道同规,实测依据见
-        // QueryUnderstanding.genderOpposites 注释)
+        // QueryUnderstanding.genderOpposites 注释;反查 among=本组命中集,
+        // 第五十一批大库 topK 边界修复同主管线)
         if let opp = QueryUnderstanding.genderOpposite(of: term),
            let qOpp = try? siglip.embedQuery(Self.siglipQuery(opp)) {
+            let cands = Set(hits.map(\.refKey))
             let oppScores = Dictionary(uniqueKeysWithValues:
                 ((try? store.search(space: siglip.space, kinds: searchKinds, query: qOpp,
-                                    limit: topK, minScore: 0, among: within)) ?? [])
+                                    limit: topK, minScore: 0, among: cands)) ?? [])
                 .map { ($0.refKey, $0.score) })
             hits = Self.dedupByRef(hits.filter {
                 ($0.score - (oppScores[$0.refKey] ?? 0)) >= 0.012

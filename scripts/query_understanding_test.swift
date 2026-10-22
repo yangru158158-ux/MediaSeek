@@ -133,6 +133,7 @@ enum QueryUnderstandingTest {
         expect(passCn == zhToEns.count,
                "全量 \(zhToEns.count) 个中文词反查全部命中标签通道")
 
-        print("PASS: 查询理解 42 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词穷尽)")
+        // 断言数口径:expect( 全文 42 处 - 函数定义 1 行 = 41 项调用(父版 34/33 差一在此对齐)
+        print("PASS: 查询理解 41 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词穷尽)")
     }
 }
