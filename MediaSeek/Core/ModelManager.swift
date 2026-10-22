@@ -83,6 +83,16 @@ final class ModelManager: ObservableObject {
         useProImage && proInstalled ? .imagePro : .image
     }
 
+    /// SigLIP 分数门槛缩放系数(so400m 校准,2026-10-22 CI 双模型分布实测):
+    /// so400m 命中带均值 = base × 0.87(0.0838 vs 0.0963),噪声带同向下移
+    /// (0.0635 vs 0.0731)——绝对门槛不可跨模型迁移,按激活槽位整体缩放。
+    /// 性别对比线 0.010 是边距制且 so400m 实测边距 女照+0.039/男照-0.047
+    /// 余量充足,不缩。搜索侧 SigLIP 门槛全部乘此系数;Gemma 文件门槛
+    /// 与图像模型无关,不缩
+    var siglipGateScale: Float {
+        activeImageSlot == .imagePro ? 0.87 : 1.0
+    }
+
     init() {
         refreshProInstalled()
     }

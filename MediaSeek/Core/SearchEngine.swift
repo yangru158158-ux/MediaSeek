@@ -398,11 +398,15 @@ final class SearchEngine {
         // 显式「语义:」查询门槛放宽到 0.14(用户点名要语义召回)
         // 文字: 前缀排他:视觉通道(照片/视频帧)不参与
         if !imageKinds.isEmpty, spec.channel != .text, let siglip {
+            // so400m 校准(第六十一批):SigLIP 绝对门槛按激活模型缩放
+            // (so400m 命中带 = base × 0.87,CI 双模型分布实测,详见
+            // ModelManager.siglipGateScale 注释)
+            let gate = await MainActor.run { models.siglipGateScale }
             let q = try siglip.embedQuery(Self.siglipQuery(concept))
             // 照片与视频帧分开走各自的门槛阶梯:分数分布不同,且照片行为已验收冻结
             var hits: [SearchHit] = []
             if imageKinds.contains(.photo) {
-                let floor: Float = semanticOnly ? 0.25 : 0.30
+                let floor: Float = (semanticOnly ? 0.25 : 0.30) * gate
                 hits = Self.dedupByRef(try store.search(
                     space: siglip.space, kinds: [.photo], query: q, limit: topK,
                     minScore: floor, among: among))
@@ -411,13 +415,13 @@ final class SearchEngine {
                 if hits.isEmpty {
                     hits = Self.dedupByRef(try store.search(
                         space: siglip.space, kinds: [.photo], query: q, limit: topK,
-                        minScore: 0.18, among: among))
+                        minScore: 0.18 * gate, among: among))
                 }
                 if hits.isEmpty {
                     // 第三档分两种:全局地板 0.08(高于无关带上沿、低于命中带下沿);
                     // 结果内 0.03——用户点名的小集合里相对排名优先,弱分真匹配(证件照
                     // 对「身份证」只有 0.05-0.08)也要浮顶,噪声由低置信尾线 0.95 收
-                    let floor: Float = among != nil ? 0.03 : 0.08
+                    let floor: Float = (among != nil ? 0.03 : 0.08) * gate
                     hits = Self.dedupByRef(try store.search(
                         space: siglip.space, kinds: [.photo], query: q, limit: topK,
                         minScore: floor, among: among))
@@ -430,8 +434,8 @@ final class SearchEngine {
                 // 帧标签与查询词有交集,或分数 ≥0.15 的强信号
                 var vHits = Self.dedupByRef(try store.search(
                     space: siglip.space, kinds: [.videoFrame], query: q, limit: topK,
-                    minScore: 0.08, among: among))
-                vHits = vHits.filter { videoLabelRefs.contains($0.refKey) || $0.score >= 0.15 }
+                    minScore: 0.08 * gate, among: among))
+                vHits = vHits.filter { videoLabelRefs.contains($0.refKey) || $0.score >= 0.15 * gate }
                 hits.append(contentsOf: vHits)
                 hits = Self.dedupByRef(hits)
             }
@@ -476,7 +480,7 @@ final class SearchEngine {
             // 人像/风景基线噪声(同一张海景人像 马尔代夫0.09/护照0.12/身份证0.12),
             // 此时尾线收到 best×0.95 只留贴近最佳的一小撮,不灌整屏
             let best = hits.first?.score ?? 0
-            let tailFactor: Float = best >= 0.13 ? 0.85 : 0.95
+            let tailFactor: Float = best >= 0.13 * gate ? 0.85 : 0.95
             channels.append((1.0, best > 0 ? hits.filter { $0.score >= best * tailFactor } : hits))
         }
 
@@ -619,6 +623,8 @@ final class SearchEngine {
         guard scope != .file else { return ([], []) }   // 文件范围无照片/视频(第三十九批:视频范围原被误拦)
         let terms = Self.splitTerms(spec.body)
         guard !terms.isEmpty else { return ([], []) }
+        // so400m 校准(第六十一批):SigLIP 门槛按激活模型缩放,透传给 semanticHits
+        let gate = await MainActor.run { models.siglipGateScale }
         // 第五十批:归类器一次搜索共用一个实例——逐词各建一套会把 files/
         // videoFrame 全表查询与 PHAsset 批查放大数倍(多词×别名×常见词数千命中)
         let classifier = OCRRefClassifier(store: store)
@@ -671,7 +677,8 @@ final class SearchEngine {
                     })
             } else {
                 // 结果内时语义分数限定在基数集合内算(同 searchWithin 的修正)
-                var hits = semanticHits(t, siglip: siglip, topK: topK, within: within, scope: scope)
+                var hits = semanticHits(t, siglip: siglip, topK: topK, within: within, scope: scope,
+                                         gateScale: gate)
                 if let within { hits = hits.filter { within.contains($0.refKey) } }
                 // 「像或含字」同构(第十六批):裸搜模式里每个词 = OCR∪视觉任一
                 // 命中即算,and:/or: 自动通道此前只送语义——证件/文件类词语义
@@ -824,10 +831,12 @@ final class SearchEngine {
         return concept
     }
 
-    /// 单词语义命中(SigLIP 视觉,门槛 0.14 + 0.08 弱信号兜底 + 相对尾部截断)
+    /// 单词语义命中(SigLIP 视觉,门槛 0.14 + 0.08 弱信号兜底 + 相对尾部截断)。
+    /// gateScale=激活模型的门槛缩放系数(so400m 0.87,第六十一批校准)
     private func semanticHits(_ term: String, siglip: SigLIPEmbedder?, topK: Int,
                               within: Set<String>? = nil,
-                              scope: SearchScope = .all) -> [SearchHit] {
+                              scope: SearchScope = .all,
+                              gateScale: Float = 1.0) -> [SearchHit] {
         guard let siglip else { return [] }
         guard let q = try? siglip.embedQuery(Self.siglipQuery(term)) else { return [] }
         // 第三十九批:按范围取 kinds(与主管线 imageKinds 同构,.file→[] 空)——
@@ -840,11 +849,11 @@ final class SearchEngine {
         if let within, !within.isEmpty {
             var hits = Self.dedupByRef((try? store.search(
                 space: siglip.space, kinds: searchKinds, query: q, limit: topK,
-                minScore: 0.20, among: within)) ?? [])
+                minScore: 0.20 * gateScale, among: within)) ?? [])
             if hits.isEmpty {
                 hits = Self.dedupByRef((try? store.search(
                     space: siglip.space, kinds: searchKinds, query: q, limit: topK,
-                    minScore: 0.10, among: within)) ?? [])
+                    minScore: 0.10 * gateScale, among: within)) ?? [])
             }
             if hits.isEmpty {
                 // 结果内第三档:0.20/0.10 在命中带上悬空 → 结果内语义词恒空;
@@ -852,7 +861,7 @@ final class SearchEngine {
                 // 尾部由 best×0.95 低置信尾线截断
                 hits = Self.dedupByRef((try? store.search(
                     space: siglip.space, kinds: searchKinds, query: q, limit: topK,
-                    minScore: 0.03, among: within)) ?? [])
+                    minScore: 0.03 * gateScale, among: within)) ?? [])
             }
             let best = hits.first?.score ?? 0
             if best > 0 { hits = hits.filter { $0.score >= best * 0.85 } }
@@ -877,19 +886,22 @@ final class SearchEngine {
             return videoFrameGuard(hits, term: term)
         }
         var hits = Self.dedupByRef((try? store.search(
-            space: siglip.space, kinds: searchKinds, query: q, limit: topK, minScore: 0.25)) ?? [])
+            space: siglip.space, kinds: searchKinds, query: q, limit: topK,
+            minScore: 0.25 * gateScale)) ?? [])
         if hits.isEmpty {
             hits = Self.dedupByRef((try? store.search(
-                space: siglip.space, kinds: searchKinds, query: q, limit: topK, minScore: 0.15)) ?? [])
+                space: siglip.space, kinds: searchKinds, query: q, limit: topK,
+                minScore: 0.15 * gateScale)) ?? [])
         }
         if hits.isEmpty {
             // 真尺度地板 0.08(与主流程照片第三档同规)
             hits = Self.dedupByRef((try? store.search(
-                space: siglip.space, kinds: searchKinds, query: q, limit: topK, minScore: 0.08)) ?? [])
+                space: siglip.space, kinds: searchKinds, query: q, limit: topK,
+                minScore: 0.08 * gateScale)) ?? [])
         }
         let best = hits.first?.score ?? 0
         // 低置信收紧与主流程同规:最佳 <0.13 = 无真匹配,只留贴近最佳的一小撮
-        if best > 0 { hits = hits.filter { $0.score >= best * (best >= 0.13 ? 0.85 : 0.95) } }
+        if best > 0 { hits = hits.filter { $0.score >= best * (best >= 0.13 * gateScale ? 0.85 : 0.95) } }
         // 第五十批:性别词对比过滤(与主管线视觉通道同规;第五十五批:对比串
         // =文献标准「a photo of a woman/man」形式+正反向对称打分+线0.010,
         // 真实照片标定见 QueryUnderstanding.genderEnglish 注释)
