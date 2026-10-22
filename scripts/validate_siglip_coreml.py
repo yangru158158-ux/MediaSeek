@@ -12,8 +12,11 @@ SigLIP2 产线管道体检 v4:transformers 4 vs 5 嵌入空间对质。
 用法(同一脚本两种环境各跑一次):
   python validate_siglip_coreml.py extract v5.npz   # 当前环境 canonical 特征
   python validate_siglip_coreml.py compare v4.npz v5.npz
+  python validate_siglip_coreml.py dist             # 门槛校准分布(SIGLIP_MODEL 切
+                                                     # base/so400m;纯测量不阻断)
 """
 import io
+import json
 import os
 import sys
 import urllib.request
@@ -408,11 +411,100 @@ def mode_compare(a_npz: Path, b_npz: Path):
             print("v4 与 v5 空间不同(意外,需排查)")
 
 
+# ---- so400m 门槛校准(2026-10-22 启动):真实词集分数分布 ----
+# 依据:门槛不可跨模型迁移(zudolab/vector-image-detection#18 实测 SigLIP 原始
+# 余弦 -0.005~0.092,门槛悬空=静默 0 结果;OpenAI 社区实测换模型分布整体
+# 移动,阈值必须重标)。设备实测 so400m 搜 woman=46 vs base=482=十倍召回
+# 崩塌,与评估报告「22 项门槛常数按 base 真尺度标定」的预测一致。
+# 本模式纯测量不阻断:跑 App 真实查询路径(词典英译+官方模板)与多语言
+# 兜底路径(专名整词原文)两套变体 × 全部探针图,输出命中/噪声带与性别
+# 边距,供 base vs so400m 双模型分布对拍与门槛重标。
+DIST_WORDS = [
+    # (中文词, App 词典英译, 匹配探针图(None=只测噪声带))
+    ("女人", "woman", "woman_portrait"),
+    ("男人", "man", "man_portrait"),
+    ("猫", "cat", "cat"),
+    ("狗", "dog", "dog"),
+    ("海滩", "beach", "beach"),
+    ("宝宝", "baby", None),
+    ("身份证", "id card", "document"),
+    ("屏幕截图", "screenshot", "screen"),
+    ("电脑屏幕", "computer screen", "screen"),
+    ("食物", "food", None),
+    ("汽车", "car", None),
+    ("风景", "landscape scenery", "beach"),
+    ("微信", "wechat chat app", "screen"),
+    ("地图", "map", "document"),
+]
+
+
+def mode_dist(out_json: Path):
+    import transformers
+    from transformers import AutoModel, AutoProcessor
+
+    print(f"== dist @ {MODEL_ID} / transformers {transformers.__version__} ==")
+    if transformers.__version__.startswith("4"):
+        raise SystemExit("dist 模式仅支持 transformers 5(49 批掩码约定)")
+    try:
+        model = AutoModel.from_pretrained(MODEL_ID, dtype=torch.float32).eval()
+    except TypeError:
+        model = AutoModel.from_pretrained(MODEL_ID, torch_dtype=torch.float32).eval()
+    processor = AutoProcessor.from_pretrained(MODEL_ID)
+
+    images = load_test_images()
+    img_v = {}
+    with torch.no_grad():
+        for name, img in images.items():
+            px = processor(images=img, return_tensors="pt")["pixel_values"]
+            img_v[name] = model.vision_model(pixel_values=px).pooler_output[0].numpy()
+
+    def text_vec(text: str):
+        enc = processor(text=[text], padding="max_length", return_tensors="pt", truncation=True)
+        with torch.no_grad():
+            # 49 批约定:官方 processor 不产掩码,pad 参与注意=训练语义
+            return model.text_model(input_ids=enc["input_ids"]).pooler_output[0].numpy()
+
+    rows = []
+    print(f"\n{'词':<6}{'变体':<13}{'命中图分':>9}  {'最佳噪声':>9}  {'噪声中位':>9}")
+    for zh, en, hit in DIST_WORDS:
+        for vname, qtext in (("template_en", f"This is a photo of {en}."),
+                             ("raw_zh", zh)):
+            tv = text_vec(qtext)
+            scores = {n: round(cos(tv, iv), 4) for n, iv in img_v.items()}
+            noise = [v for n, v in scores.items() if n != hit] if hit else list(scores.values())
+            row = {"word": zh, "variant": vname, "hit_image": hit,
+                   "hit_score": scores.get(hit), "best_noise": max(noise) if noise else None,
+                   "median_noise": round(float(np.median(noise)), 4) if noise else None,
+                   "scores": scores}
+            rows.append(row)
+            hs = f"{row['hit_score']:.4f}" if hit else "-"
+            bn = f"{row['best_noise']:.4f}" if row['best_noise'] is not None else "-"
+            mn = f"{row['median_noise']:.4f}" if row['median_noise'] is not None else "-"
+            print(f"{zh:<6}{vname:<13}{hs:>10}  {bn:>10}  {mn:>10}")
+
+    # 性别对比边距(so400m 下 0.010 过滤线是否仍成立,实测数据)
+    gender = {}
+    if "woman_portrait" in img_v and "man_portrait" in img_v:
+        qw, qm = text_vec("a photo of a woman"), text_vec("a photo of a man")
+        gender = {
+            "woman_margin": round(cos(qw, img_v["woman_portrait"]) - cos(qm, img_v["woman_portrait"]), 4),
+            "man_margin": round(cos(qw, img_v["man_portrait"]) - cos(qm, img_v["man_portrait"]), 4),
+        }
+        print(f"\n性别边距(女照={gender['woman_margin']:+.4f} 男照={gender['man_margin']:+.4f};"
+              f" App 过滤线 0.010 按 base 标定)")
+
+    payload = {"model": MODEL_ID, "gender": gender, "rows": rows}
+    out_json.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+    print(f"\n已写出 {out_json}")
+
+
 if __name__ == "__main__":
     if len(sys.argv) >= 3 and sys.argv[1] == "extract":
         mode_extract(OUT_DIR / sys.argv[2])
     elif len(sys.argv) >= 4 and sys.argv[1] == "compare":
         mode_compare(Path(sys.argv[2]), Path(sys.argv[3]))
+    elif len(sys.argv) >= 2 and sys.argv[1] == "dist":
+        mode_dist(OUT_DIR / f"dist_{MODEL_ID.split('/')[-1]}.json")
     else:
         print(__doc__)
         sys.exit(2)

@@ -48,3 +48,46 @@ jobs:
           path: "*.npz"
           retention-days: 90
           if-no-files-found: ignore
+
+  dist:
+    # so400m 门槛校准(2026-10-22):base 与 so400m 并行跑真实词集分数分布
+    # (词典英译+模板 与 多语言整词 两套变体 × 全部探针图),纯测量不阻断。
+    # 依据:门槛不可跨模型迁移(zudolab 实测门槛悬空=静默0结果;OpenAI 社区
+    # 实测换模型分布整体移动)——重标必须拿双模型各自真尺度。仅手动触发。
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-15
+    timeout-minutes: 40
+    strategy:
+      matrix:
+        include:
+          - id: base
+            model: google/siglip2-base-patch16-256
+          - id: so400m
+            model: google/siglip2-so400m-patch16-384
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安装依赖(dist 只需推理栈,不装 coremltools)
+        run: |
+          pip install --upgrade pip
+          pip install torch==2.7.0 "transformers>=5.0" sentencepiece pillow
+
+      - name: 跑分布测量
+        run: python scripts/validate_siglip_coreml.py dist
+        env:
+          SIGLIP_MODEL: ${{ matrix.model }}
+
+      - name: 上传分布 JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.id }}
+          path: dist_*.json
+          retention-days: 90
+          if-no-files-found: ignore
