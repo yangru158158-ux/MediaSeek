@@ -136,8 +136,10 @@ enum QueryUnderstandingTest {
                "华研机器人(专名)碎片盖不满全词,一个不捐——整词交 SigLIP 多语言")
         expect(QueryUnderstanding.english(for: "机器人") == "robot",
                "机器人 整词=词典条目全覆盖;嵌套碎片「机器」不再重复捐 machine")
-        expect(QueryUnderstanding.english(for: "机器设备") == "machine equipment",
-               "机器设备=机器+设备 并列复合词全覆盖照常直译(「设备」词条 60 批补)")
+        let jsb = QueryUnderstanding.english(for: "机器设备") ?? ""
+        expect(jsb.contains("machine") && jsb.contains("equipment"),
+               "机器设备=机器+设备 全覆盖并列复合词照常直译(「设备」词条 60 批补;"
+               + "同区间标签译词 device 一并捐,与蔬菜 vegetables/vegetable 同理)")
         expect(QueryUnderstanding.english(for: "妈妈的生日") != nil,
                "连接字「的」不计未覆盖——描述性词组照常捐译文(妈妈+的+生日)")
         let hynTokens = QueryUnderstanding.labelTokens("华研机器人")
