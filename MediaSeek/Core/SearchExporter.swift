@@ -60,6 +60,65 @@ enum SearchExporter {
         return fetch.count
     }
 
+    // MARK: - 单项物化(详情页「共享 / 存储到文件」,第五十七批)
+
+    /// 详情页里被打开的任意内容:相册照片/视频 或 导入文件
+    enum ShareItem {
+        case asset(PHAsset)
+        case file(ImportedFile)
+
+        init(target: SearchTarget) {
+            switch target {
+            case .asset(let a): self = .asset(a)
+            case .file(let f): self = .file(f)
+            }
+        }
+    }
+
+    /// 临时共享目录:单项共享/另存的物化落点。副本本就是一次性的
+    /// (共享完成/被「文件」导出移走后即无用),放 tmp 让系统也可回收
+    private static var shareDir: URL {
+        let d = FileManager.default.temporaryDirectory
+            .appendingPathComponent("share", isDirectory: true)
+        try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        return d
+    }
+
+    /// 清掉旧的物化副本(>24h)。共享面板(AirDrop 等)在面板关闭后
+    /// 系统可能仍在读文件,只按年龄清,绝不碰刚生成的
+    static func purgeStaleShareCopies(olderThan hours: Double = 24) {
+        let dir = shareDir
+        guard let children = try? FileManager.default.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: [.contentModificationDateKey]) else { return }
+        let cutoff = Date().addingTimeInterval(-hours * 3600)
+        for child in children {
+            if let m = (try? child.resourceValues(forKeys: [.contentModificationDateKey]))?
+                .contentModificationDate, m < cutoff {
+                try? FileManager.default.removeItem(at: child)
+            }
+        }
+    }
+
+    /// 把任意目标物化成临时目录里的独立文件,返回其 URL。
+    /// 共享面板与「存储到文件」都要文件 URL:相册资产的原件在系统照片
+    /// 库内部;导入文件带安全域书签,共享/导出过程中作用域不保证仍在,
+    /// 先落一个自有副本最稳。iCloud 未下载的资产会在此触发下载,耗时
+    /// 由调用方以 busy 态展示
+    static func materialize(_ item: ShareItem,
+                            photo: PhotoLibraryService,
+                            imports: ImportLibrary) async throws -> URL {
+        switch item {
+        case .asset(let asset):
+            return try await exportAsset(asset, to: shareDir, photo: photo)
+        case .file(let record):
+            let url = try imports.resolveURL(record)
+            defer { url.stopAccessingSecurityScopedResource() }
+            let dest = uniqueURL(shareDir.appendingPathComponent(record.name))
+            try FileManager.default.copyItem(at: url, to: dest)
+            return dest
+        }
+    }
+
     // MARK: - 导出到「文件」App(文件 → 智搜 → 导出/<名字>/)
 
     static func exportToFiles(folderName: String, hits: [DisplayHit],
@@ -101,7 +160,10 @@ enum SearchExporter {
         return candidate
     }
 
-    private static func exportAsset(_ asset: PHAsset, to folder: URL, photo: PhotoLibraryService) async throws {
+    /// 导出单个相册资产到目标文件夹,返回落盘文件 URL(批量导出忽略,
+    /// 单项物化「共享/存储到文件」要用)
+    @discardableResult
+    private static func exportAsset(_ asset: PHAsset, to folder: URL, photo: PhotoLibraryService) async throws -> URL {
         if asset.mediaType == .image {
             // 优先取原片文件直拷
             let opts = PHContentEditingInputRequestOptions()
@@ -115,7 +177,7 @@ enum SearchExporter {
             if let originalURL {
                 let dest = uniqueURL(folder.appendingPathComponent(originalURL.lastPathComponent))
                 try FileManager.default.copyItem(at: originalURL, to: dest)
-                return
+                return dest
             }
             // 兜底:渲染导出 JPEG
             let data: Data? = await withCheckedContinuation { cont in
@@ -129,6 +191,7 @@ enum SearchExporter {
             guard let data else { throw MSError("照片导出失败") }
             let dest = uniqueURL(folder.appendingPathComponent("photo-\(asset.localIdentifier.suffix(6)).jpg"))
             try data.write(to: dest)
+            return dest
         } else if asset.mediaType == .video {
             let url: URL? = await withCheckedContinuation { cont in
                 let vopts = PHVideoRequestOptions()
@@ -141,6 +204,8 @@ enum SearchExporter {
             guard let url else { throw MSError("视频导出失败") }
             let dest = uniqueURL(folder.appendingPathComponent(url.lastPathComponent))
             try FileManager.default.copyItem(at: url, to: dest)
+            return dest
         }
+        throw MSError("不支持的资产类型(仅照片/视频)")
     }
 }

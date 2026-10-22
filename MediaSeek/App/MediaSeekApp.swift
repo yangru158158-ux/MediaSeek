@@ -140,5 +140,7 @@ final class AppModel: ObservableObject {
         }
         await models.loadAll()
         indexing.startAutoSyncIfAuthorized()
+        // 清理上次会话留下的旧共享副本(单项共享/另存物化到 tmp 的文件)
+        Task.detached(priority: .utility) { SearchExporter.purgeStaleShareCopies() }
     }
 }

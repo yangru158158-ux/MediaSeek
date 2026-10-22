@@ -64,6 +64,9 @@ struct LibraryView: View {
                 NavigationStack {
                     FilePreviewScreen(record: f)
                         .toolbar {
+                            ToolbarItem(placement: .topBarLeading) {
+                                ShareSaveButton(item: .file(f))
+                            }
                             ToolbarItem(placement: .topBarTrailing) {
                                 Button("完成") { previewFile = nil }
                             }

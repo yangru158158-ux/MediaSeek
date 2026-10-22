@@ -225,6 +225,9 @@ struct DetailSheet: View {
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
+                    ShareSaveButton(item: SearchExporter.ShareItem(target: hit.target))
+                }
+                ToolbarItem(placement: .topBarTrailing) {
                     Button("完成") { dismiss() }
                 }
             }
@@ -341,6 +344,121 @@ struct DetailSheet: View {
             }
         case .file(let record):
             FilePreviewScreen(record: record)
+        }
+    }
+}
+
+
+// MARK: - 单项共享 / 存储到「文件」(第五十七批:任何入口打开的照片/视频/文件统一动作)
+
+/// 系统共享面板。相册资产直接传 PHAsset(系统给原件、自带 iCloud 下载);
+/// 导入文件传物化后的临时 URL
+struct ShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ vc: UIActivityViewController, context: Context) {}
+}
+
+/// 「存储到文件」:系统文档导出面板,用户自选目标位置。
+/// 拿到的永远是物化出来的临时副本(asCopy:false=直接移走,省一次大文件
+/// 拷贝);原件(相册资产/用户文件夹里的导入文件)绝不经过这条路径
+struct DocumentExportPicker: UIViewControllerRepresentable {
+    let url: URL
+
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        let picker = UIDocumentPickerViewController(forExporting: [url], asCopy: false)
+        return picker
+    }
+
+    func updateUIViewController(_ vc: UIDocumentPickerViewController, context: Context) {}
+}
+
+/// 详情页「共享 / 存储到文件」按钮:覆盖相册照片、相册视频、导入文件。
+/// 「存储到文件」需先把内容物化成文件(iCloud 大视频可能要下载几分钟),
+/// 按钮转圈直到弹系统面板
+struct ShareSaveButton: View {
+    let item: SearchExporter.ShareItem
+    @EnvironmentObject var app: AppModel
+    @State private var busy = false
+    @State private var shareItems: [Any]?
+    @State private var showShare = false
+    @State private var exportTarget: ExportTarget?
+
+    /// 「存储到文件」目标(物化完成后才弹系统面板;URL 非 Identifiable 需包装)
+    struct ExportTarget: Identifiable {
+        let id = UUID()
+        let url: URL
+    }
+
+    var body: some View {
+        Menu {
+            Button {
+                share()
+            } label: {
+                Label("共享…", systemImage: "square.and.arrow.up")
+            }
+            Button {
+                saveToFiles()
+            } label: {
+                Label("存储到「文件」…", systemImage: "folder.badge.arrow.down")
+            }
+        } label: {
+            if busy {
+                ProgressView()
+            } else {
+                Image(systemName: "square.and.arrow.up")
+            }
+        }
+        .disabled(busy)
+        .sheet(isPresented: $showShare) {
+            if let items = shareItems {
+                ShareSheet(items: items)
+            }
+        }
+        .sheet(item: $exportTarget) { target in
+            DocumentExportPicker(url: target.url)
+        }
+    }
+
+    private func share() {
+        guard !busy else { return }
+        switch item {
+        case .asset(let asset):
+            // 相册资产交系统原件,无需物化
+            shareItems = [asset]
+            showShare = true
+        case .file:
+            busy = true
+            Task {
+                do {
+                    let url = try await SearchExporter.materialize(item, photo: app.photoLib,
+                                                                   imports: app.imports)
+                    shareItems = [url]
+                    showShare = true
+                } catch {
+                    app.fail(error)
+                }
+                busy = false
+            }
+        }
+    }
+
+    private func saveToFiles() {
+        guard !busy else { return }
+        busy = true
+        Task {
+            do {
+                let url = try await SearchExporter.materialize(item, photo: app.photoLib,
+                                                               imports: app.imports)
+                exportTarget = ExportTarget(url: url)
+            } catch {
+                app.fail(error)
+            }
+            busy = false
         }
     }
 }
