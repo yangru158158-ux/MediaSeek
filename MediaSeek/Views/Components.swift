@@ -349,32 +349,40 @@ struct DetailSheet: View {
 }
 
 
-// MARK: - 单项共享 / 存储到「文件」(第五十七批:任何入口打开的照片/视频/文件统一动作)
+// MARK: - 单项共享 / 存储到「文件」(第五十七批:任何入口打开的照片/视频/文件统一动作;
+// 第五十八批修复:直接从最顶层 UIKit 控制器 present 系统面板)
 
-/// 系统共享面板。相册资产直接传 PHAsset(系统给原件、自带 iCloud 下载);
-/// 导入文件传物化后的临时 URL
-struct ShareSheet: UIViewControllerRepresentable {
-    let items: [Any]
-
-    func makeUIViewController(context: Context) -> UIActivityViewController {
-        UIActivityViewController(activityItems: items, applicationActivities: nil)
+/// 系统共享/文件导出面板的原生呈现器。
+/// 实测 iOS 26 上把 UIActivityViewController 包成 UIViewControllerRepresentable
+/// 塞进 SwiftUI .sheet 只会渲染一张空白页(209 用户实测:共享弹出后一直白屏,
+/// 系统共享 UI 根本没画出来)——必须走 UIKit 原生 present:从 key window 根
+/// 控制器一路找到最顶层已呈现控制器(详情页本身就是 sheet,共享面板要在
+/// 它之上)再弹
+enum SharePresenter {
+    private static func topMostViewController() -> UIViewController? {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let root = scenes.flatMap(\.windows)
+            .first(where: { $0.isKeyWindow })?.rootViewController
+        var top = root
+        while let presented = top?.presentedViewController { top = presented }
+        return top
     }
 
-    func updateUIViewController(_ vc: UIActivityViewController, context: Context) {}
-}
+    /// 系统共享面板。相册资产直接传 PHAsset(系统给原件、自带 iCloud 下载);
+    /// 导入文件传物化后的临时 URL
+    static func share(items: [Any]) {
+        let vc = UIActivityViewController(activityItems: items, applicationActivities: nil)
+        topMostViewController()?.present(vc, animated: true)
+    }
 
-/// 「存储到文件」:系统文档导出面板,用户自选目标位置。
-/// 拿到的永远是物化出来的临时副本(asCopy:false=直接移走,省一次大文件
-/// 拷贝);原件(相册资产/用户文件夹里的导入文件)绝不经过这条路径
-struct DocumentExportPicker: UIViewControllerRepresentable {
-    let url: URL
-
-    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+    /// 「存储到文件」:系统文档导出面板,用户自选目标位置。
+    /// 拿到的永远是物化出来的临时副本(asCopy:false=直接移走,省一次大文件
+    /// 拷贝);原件(相册资产/用户文件夹里的导入文件)绝不经过这条路径。
+    /// 导出/取消由系统自行收场,无需 delegate
+    static func exportToFiles(url: URL) {
         let picker = UIDocumentPickerViewController(forExporting: [url], asCopy: false)
-        return picker
+        topMostViewController()?.present(picker, animated: true)
     }
-
-    func updateUIViewController(_ vc: UIDocumentPickerViewController, context: Context) {}
 }
 
 /// 详情页「共享 / 存储到文件」按钮:覆盖相册照片、相册视频、导入文件。
@@ -384,15 +392,6 @@ struct ShareSaveButton: View {
     let item: SearchExporter.ShareItem
     @EnvironmentObject var app: AppModel
     @State private var busy = false
-    @State private var shareItems: [Any]?
-    @State private var showShare = false
-    @State private var exportTarget: ExportTarget?
-
-    /// 「存储到文件」目标(物化完成后才弹系统面板;URL 非 Identifiable 需包装)
-    struct ExportTarget: Identifiable {
-        let id = UUID()
-        let url: URL
-    }
 
     var body: some View {
         Menu {
@@ -414,14 +413,6 @@ struct ShareSaveButton: View {
             }
         }
         .disabled(busy)
-        .sheet(isPresented: $showShare) {
-            if let items = shareItems {
-                ShareSheet(items: items)
-            }
-        }
-        .sheet(item: $exportTarget) { target in
-            DocumentExportPicker(url: target.url)
-        }
     }
 
     private func share() {
@@ -429,16 +420,14 @@ struct ShareSaveButton: View {
         switch item {
         case .asset(let asset):
             // 相册资产交系统原件,无需物化
-            shareItems = [asset]
-            showShare = true
+            SharePresenter.share(items: [asset])
         case .file:
             busy = true
             Task {
                 do {
                     let url = try await SearchExporter.materialize(item, photo: app.photoLib,
                                                                    imports: app.imports)
-                    shareItems = [url]
-                    showShare = true
+                    SharePresenter.share(items: [url])
                 } catch {
                     app.fail(error)
                 }
@@ -454,7 +443,7 @@ struct ShareSaveButton: View {
             do {
                 let url = try await SearchExporter.materialize(item, photo: app.photoLib,
                                                                imports: app.imports)
-                exportTarget = ExportTarget(url: url)
+                SharePresenter.exportToFiles(url: url)
             } catch {
                 app.fail(error)
             }
