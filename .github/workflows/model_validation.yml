@@ -2,8 +2,17 @@ name: Model Validation
 # SigLIP2 产线管道体检(transformers 5 单环境):
 # ①官方 processor+pipeline 对拍(模型健康度) ②真值匹配对/交叉对尺度 ③产线导出链
 #   (文本塔定长64双输入+手工4D掩码直通 encoder)CoreML 一致性与端到端区分度
+# ④掩码语义阻断回归(第四十九批:SigLIP2 训练不掩码 pad,全1掩码=训练语义,
+#   真实掩码=内容失明事故形态,不一致即退出非零)
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "scripts/validate_siglip_coreml.py"
+      - "scripts/export_models.py"
+      - "scripts/patch_transformers_for_coreml.py"
+      - ".github/workflows/model_validation.yml"
 
 jobs:
   validate:

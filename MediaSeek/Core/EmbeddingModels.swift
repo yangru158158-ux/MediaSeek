@@ -156,7 +156,14 @@ final class SigLIPEmbedder {
             let pi = ids.dataPointer.assumingMemoryBound(to: Int32.self)
             let pm = mask.dataPointer.assumingMemoryBound(to: Int32.self)
             for (i, t) in padded.ids.enumerated() { pi[i] = Int32(t) }
-            for (i, m) in padded.mask.enumerated() { pm[i] = Int32(m) }
+            // 第四十九批(2026-10-21「搜女人 4217 全噪声/搜 woman 0」事故定位):
+            // SigLIP2 训练与官方 processor 都不产 attention_mask——pad 参与注意才是
+            // 训练语义。导出图把掩码做成输入((1-mask)×-30000 加性偏置),此前传
+            // 真实掩码把 pad 掩掉,末位池化锚点读到的上下文偏离训练分布,文本嵌入
+            // 内容失明:实测 "This is a photo of a cat." 对猫照 -0.0120(死),
+            // 掩码全 1(偏置归零=不掩码)+0.1126(健康),与官方无掩码管线一致度
+            // 1.000000。mask 输入仅为兼容已发布模型包的图结构,恒填 1。
+            for i in 0..<padded.mask.count { pm[i] = 1 }
             return try textModel.runEmbedding(inputs: ["input_ids": ids, "attention_mask": mask])
         }
         let ids = try tokenizer.encode(text, maxLength: HFTokenizer.maxSequenceSiglip)

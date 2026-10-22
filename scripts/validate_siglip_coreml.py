@@ -128,13 +128,15 @@ def mode_extract(out_npz: Path):
                 f = model.vision_model(pixel_values=px).pooler_output[0]
             img_v[name] = f.numpy()
         for t in all_texts:
-            enc = tok(t, return_tensors="pt")
+            enc = processor(text=[t], padding="max_length", return_tensors="pt", truncation=True)
             if transformers.__version__.startswith("4"):
                 f = model.get_text_features(input_ids=enc["input_ids"],
                                             attention_mask=enc.get("attention_mask"))[0]
             else:
-                f = model.text_model(input_ids=enc["input_ids"],
-                                     attention_mask=enc.get("attention_mask")).pooler_output[0]
+                # 第四十九批定案:SigLIP2 官方 processor 不产 attention_mask——
+                # pad 参与注意才是训练语义。传真实掩码会让文本嵌入内容失明
+                # (「搜女人 4217 全噪声/搜 woman 0」事故),参考向量必须走无掩码
+                f = model.text_model(input_ids=enc["input_ids"]).pooler_output[0]
             txt_v[t] = f.numpy()
 
     matched = {n: max(cos(img_v[n], txt_v[t]) for t in TEXTS.get(n, [])) for n in images}
@@ -156,7 +158,7 @@ def mode_extract(out_npz: Path):
     for a in names:
         print(a.ljust(8) + "".join(f"{cos(img_v[a], img_v[b]):<10.4f}" for b in names))
 
-    print("\n== 文 max_length 填充对照(padding='max_length', 训练约定) ==")
+    print("\n== 文 max_length 填充+显式掩码(反例诊断:此约定内容失明,勿作参考) ==")
     txt_v_pad = {}
     with torch.no_grad():
         for t in all_texts:
@@ -171,6 +173,52 @@ def mode_extract(out_npz: Path):
             txt_v_pad[t] = f.numpy()
     matched_pad = {n: max(cos(img_v[n], txt_v_pad[t]) for t in TEXTS.get(n, [])) for n in images}
     print("  匹配对余弦(max_length 填充):", {k: round(v, 4) for k, v in matched_pad.items()})
+
+    # ---- 第四十九批阻断回归:掩码语义(SigLIP2 训练不掩码 pad) ----
+    # 设备 CoreML 文本塔 = 定长64输入 + (1-mask)×-30000 加性掩码 + 末位池化。
+    # 此前体检两侧同错(参考向量也传掩码),对拍一致、静默放行——本段用导出图
+    # 原式三方对拍:全1掩码(偏置归零=训练语义)必须与官方无掩码管线一致且
+    # 图文分健康;真实掩码(203 事故形态)必须显著劣化。任一不满足即阻断退出。
+    print("\n== 掩码语义回归(阻断) ==")
+
+    def traced_formula(text: str, ones_mask: bool):
+        real = tok(text)["input_ids"]
+        pad_id = int(tok.pad_token_id) if tok.pad_token_id is not None else 0
+        ids = torch.tensor([real + [pad_id] * (64 - len(real))], dtype=torch.int32)
+        if ones_mask:
+            mask = torch.ones((1, 64), dtype=torch.int32)
+        else:
+            mask = torch.zeros((1, 64), dtype=torch.int32)
+            mask[0, :len(real)] = 1
+        tm = model.text_model
+        with torch.no_grad():
+            emb = tm.embeddings(input_ids=ids)
+            m4 = (1.0 - mask[:, None, None, :].to(emb.dtype)) * -30000.0
+            out = tm.encoder(inputs_embeds=emb, attention_mask=m4)
+            h = tm.final_layer_norm(out.last_hidden_state)
+            return torch.nn.functional.normalize(tm.head(h[:, -1, :]), dim=-1).numpy()[0]
+
+    ran = 0
+    for img_key, text in [("cat", "This is a photo of a cat."),
+                          ("dog", "This is a photo of a dog."),
+                          ("screen", "This is a photo of a computer screen.")]:
+        if img_key not in img_v:
+            continue
+        ran += 1
+        official = txt_v[text]  # 上面已改为官方无掩码参考
+        ones_v, real_v = traced_formula(text, True), traced_formula(text, False)
+        c_ones = cos(ones_v, official)
+        s_ones, s_real = cos(ones_v, img_v[img_key]), cos(real_v, img_v[img_key])
+        print(f"  {img_key:<7} 全1掩码vs官方={c_ones:.6f}  图文分(全1)={s_ones:+.4f}  图文分(真实掩码)={s_real:+.4f}")
+        if c_ones < 0.999:
+            raise SystemExit(f"FAIL 全1掩码偏离官方无掩码管线({c_ones:.6f})——导出图掩码语义被改坏")
+        if s_ones < 0.09:
+            raise SystemExit(f"FAIL {img_key} 健康图文分过低({s_ones:.4f}<0.09)——文本塔内容失明复发")
+        if s_real > s_ones:
+            print(f"  ⚠️ 真实掩码不劣于全1({s_real:.4f}≥{s_ones:.4f}),请人工确认上游训练约定是否变化")
+    if ran == 0:
+        raise SystemExit("FAIL 测试图全部加载失败,掩码回归空转")
+    print("  PASS 掩码语义回归:全1掩码=训练语义,真实掩码劣化形态在案")
 
     # 官方 pipeline 示例(模型卡同款:2 cats 图 × 三候选)
     try:

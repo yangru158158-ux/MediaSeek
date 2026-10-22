@@ -21,10 +21,14 @@ import time
 import urllib.request
 
 REPO = "yangru158158-ux/MediaSeek"
-# 四项验收工作流:按 HEAD sha 找各自最新 run(face test 需手动派发)
+# 验收工作流:按 HEAD sha 找各自最新 run;face/query 按需手动补派
 WANT = ["Build Check", "Build Unsigned IPA", "Query Understanding Tests",
-        "Face Recovery and Align Tests"]
-FACE_WF = "face_test.yml"
+        "Face Recovery and Align Tests", "Model Validation"]
+# 缺席时自动补派的工作流(其余靠 push 路径自动触发)
+MISSING_DISPATCH = {
+    "Face Recovery and Align Tests": "face_test.yml",
+    "Query Understanding Tests": "query_test.yml",
+}
 ACCEPT_SHA = None  # main HEAD(验收目标提交)
 
 
@@ -89,8 +93,12 @@ def rerun(rid, tok):
 
 
 def dispatch_face(tok):
+    return dispatch_wf("face_test.yml", tok)
+
+
+def dispatch_wf(wf_file, tok):
     req = urllib.request.Request(
-        f"https://api.github.com/repos/{REPO}/actions/workflows/face_test.yml/dispatches",
+        f"https://api.github.com/repos/{REPO}/actions/workflows/{wf_file}/dispatches",
         headers={"Authorization": f"token {tok}",
                  "Accept": "application/vnd.github+json"},
         data=json.dumps({"ref": "main"}).encode(), method="POST")
@@ -112,6 +120,8 @@ def main():
     global ACCEPT_SHA
     ap = argparse.ArgumentParser()
     ap.add_argument("--max-min", type=int, default=90)
+    ap.add_argument("--no-release", action="store_true",
+                    help="只验收不发包(发版须用户明示「发」,轨道默认仍会自动触发)")
     args = ap.parse_args()
     ACCEPT_SHA = subprocess.run(
         ["git", "rev-parse", "main"], capture_output=True,
@@ -123,8 +133,10 @@ def main():
     while time.time() < deadline:
         rnd += 1
         rids = latest_runs(tok, ACCEPT_SHA)
-        if rids.get("Face Recovery and Align Tests") is None:
-            print(f"  Face Tests 缺席→补派发 ({dispatch_face(tok)})", flush=True)
+        for name, wf in MISSING_DISPATCH.items():
+            if rids.get(name) is None:
+                code = dispatch_wf(wf, tok)
+                print(f"  {name} 缺席→补派发 ({code})", flush=True)
         states = {}
         for name, rid in rids.items():
             if rid:
@@ -146,8 +158,11 @@ def main():
                   "\n".join(f"  {s['name']}" for s in reals), flush=True)
             sys.exit(2)
         if states and all(is_green(s) for s in states.values()):
+            if args.no_release:
+                print(f"{len(states)} 项全绿(--no-release:不自动发包,等用户口令)", flush=True)
+                sys.exit(0)
             code = dispatch_release(tok)
-            print(f"四项全绿 → 已触发 release.yml (HTTP {code})", flush=True)
+            print(f"{len(states)} 项全绿 → 已触发 release.yml (HTTP {code})", flush=True)
             sys.exit(0)
 
         for name, st in states.items():
