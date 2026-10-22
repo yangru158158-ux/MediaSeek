@@ -18,7 +18,10 @@ on:
 
 jobs:
   test:
-    runs-on: macos-15
+    # ubuntu 迁移(2026-10-23):纯 Foundation 逻辑不需要苹果框架;macOS runner
+    # 高峰拥堵时本工作流被容量拒单连坐(第六十一批验收曾判 none 未决)。
+    # ubuntu runner 免排免费用,swift 预装
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - name: 检出代码

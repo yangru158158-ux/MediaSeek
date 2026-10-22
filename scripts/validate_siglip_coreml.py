@@ -477,7 +477,9 @@ def mode_dist(out_json: Path):
                    "median_noise": round(float(np.median(noise)), 4) if noise else None,
                    "scores": scores}
             rows.append(row)
-            hs = f"{row['hit_score']:.4f}" if hit else "-"
+            # 探针图下载失败时 hit_score=None(fetch 不阻断)——格式化前判 None,
+            # 否则 f"{None:.4f}" 抛 TypeError 整个 dist 中止(验收发现)
+            hs = f"{row['hit_score']:.4f}" if row['hit_score'] is not None else "-"
             bn = f"{row['best_noise']:.4f}" if row['best_noise'] is not None else "-"
             mn = f"{row['median_noise']:.4f}" if row['median_noise'] is not None else "-"
             print(f"{zh:<6}{vname:<13}{hs:>10}  {bn:>10}  {mn:>10}")

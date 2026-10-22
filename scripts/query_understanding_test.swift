@@ -137,7 +137,7 @@ enum QueryUnderstandingTest {
         expect(QueryUnderstanding.english(for: "机器人") == "robot",
                "机器人 整词=词典条目全覆盖;嵌套碎片「机器」不再重复捐 machine")
         let jsb = QueryUnderstanding.english(for: "机器设备") ?? ""
-        expect(jsb.contains("machine") && jsb.contains("equipment"),
+        expect(jsb.contains("machine") && jsb.contains("equipment") && jsb.contains("device"),
                "机器设备=机器+设备 全覆盖并列复合词照常直译(「设备」词条 60 批补;"
                + "同区间标签译词 device 一并捐,与蔬菜 vegetables/vegetable 同理)")
         expect(QueryUnderstanding.english(for: "妈妈的生日") != nil,

@@ -77,6 +77,9 @@ enum QueryUnderstanding {
     ///    (屏幕+截图)。
     static func english(for core: String) -> String? {
         var out: [String] = []
+        // 同词去重是全 core 全局口径(第五十四批,验收发现曾降级为词内局部:
+        // 「沙滩 沙滩」会拼出 beach beach)
+        var seen = Set<String>()
         for term in core.components(separatedBy: .whitespacesAndNewlines) where !term.isEmpty {
             // 该原子词内的全部碎片命中(区间用字符偏移)
             var matches: [(start: Int, end: Int, en: String)] = []
@@ -117,8 +120,7 @@ enum QueryUnderstanding {
                 !covered.contains(i) && !connectives.contains(c)
             }
             if uncoveredNonConnective { continue }   // 盖不满:专名,不捐碎片
-            // 捐出:按位置排序,同词去重(第五十四批)
-            var seen = Set<String>()
+            // 捐出:按位置排序(seen 已提升到全 core 作用域,同词全局只捐一次)
             for m in spans.sorted(by: { $0.start != $1.start ? $0.start < $1.start : $0.end < $1.end })
             where seen.insert(m.en).inserted {
                 out.append(m.en)

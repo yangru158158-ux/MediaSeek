@@ -883,7 +883,7 @@ final class SearchEngine {
                     ((fwdScores[$0.refKey] ?? $0.score) - (oppScores[$0.refKey] ?? 0)) >= 0.010
                 })
             }
-            return videoFrameGuard(hits, term: term)
+            return videoFrameGuard(hits, term: term, gateScale: gateScale)
         }
         var hits = Self.dedupByRef((try? store.search(
             space: siglip.space, kinds: searchKinds, query: q, limit: topK,
@@ -921,13 +921,15 @@ final class SearchEngine {
                 ((fwdScores[$0.refKey] ?? $0.score) - (oppScores[$0.refKey] ?? 0)) >= 0.010
             })
         }
-        return videoFrameGuard(hits, term: term)
+        return videoFrameGuard(hits, term: term, gateScale: gateScale)
     }
 
     /// 视频帧实据护栏(第四十批,与主管线 392-400 同规):SigLIP 对视频帧
     /// 区分度不足,0.08-0.15 是噪声带(2026-10-12 马尔代夫实测)——帧标签
     /// 与查询词有交集或分数 ≥0.15 强信号才入场,否则剔除视频帧命中
-    private func videoFrameGuard(_ hits: [SearchHit], term: String) -> [SearchHit] {
+    /// gateScale=SigLIP 门槛缩放(so400m 0.87,验收拦下强信号线 0.15 漏缩)
+    private func videoFrameGuard(_ hits: [SearchHit], term: String,
+                                  gateScale: Float = 1.0) -> [SearchHit] {
         guard hits.contains(where: { $0.kind == .videoFrame }) else { return hits }
         let tokens = QueryUnderstanding.labelTokens(term)
         var labelRefs = Set<String>()
@@ -939,7 +941,7 @@ final class SearchEngine {
             }
         }
         return hits.filter { $0.kind != .videoFrame
-            || labelRefs.contains($0.refKey) || $0.score >= 0.15 }
+            || labelRefs.contains($0.refKey) || $0.score >= 0.15 * gateScale }
     }
 
     /// 按连接词合并各词命中列表:and=交集,or/无=并集(去重保序),最后相对化显示分

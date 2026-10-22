@@ -44,32 +44,44 @@ for en, cn in list(BASE.items()) + list(EXTRA.items()):
 
 
 def english_for(core):
-    matches = []
-    for zh, en in DICTIONARY:
-        if len(zh) == 1:
-            if core == zh:
-                matches.append((0, en))
+    """第六十批覆盖率规则逐语义复刻:逐原子词碎片匹配→长度降序贪心选区间
+    (只剔严格内含,同区间多译词都留)→连接字容忍的覆盖判定(盖不满=专名不捐)
+    →按位置捐出,同词全 core 全局只捐一次(验收发现曾漏更新,靠捐超集假绿)。"""
+    CONNECTIVES = set("的了与及或在是")
+    out = []
+    seen = set()
+    for term in core.split():
+        if not term:
             continue
-        pos = core.find(zh)
-        if pos >= 0:
-            matches.append((pos, en))
-    for cn, en in EN_FROM_ZH.items():
-        if len(cn) == 1:
-            if core == cn:
-                matches.append((0, en))
+        matches = []  # (start, end, en) 字符偏移
+        tables = list(DICTIONARY) + list(EN_FROM_ZH.items())
+        for zh, en in tables:
+            if len(zh) == 1:
+                if term == zh:
+                    matches.append((0, len(term), en))
+                continue
+            pos = term.find(zh)
+            if pos >= 0:
+                matches.append((pos, pos + len(zh), en))
+        if not matches:
             continue
-        pos = core.find(cn)
-        if pos >= 0:
-            matches.append((pos, en))
-    if not matches:
-        return None
-    matches.sort(key=lambda m: m[0])
-    seen, out = set(), []
-    for _, en in matches:
-        if en not in seen:
-            seen.add(en)
-            out.append(en)
-    return " ".join(out)
+        matches.sort(key=lambda m: (-(m[1] - m[0]), m[0]))
+        spans = []
+        for m in matches:
+            if any(s[0] <= m[0] and m[1] <= s[1] and (s[1] - s[0]) > (m[1] - m[0])
+                   for s in spans):
+                continue
+            spans.append(m)
+        covered = set()
+        for s in spans:
+            covered.update(range(s[0], s[1]))
+        if any(i not in covered and c not in CONNECTIVES for i, c in enumerate(term)):
+            continue   # 盖不满:专名,碎片不捐
+        for m in sorted(spans, key=lambda m: (m[0], m[1])):
+            if m[2] not in seen:
+                seen.add(m[2])
+                out.append(m[2])
+    return " ".join(out) if out else None
 
 
 def expanded(tokens):
