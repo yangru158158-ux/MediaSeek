@@ -18,3 +18,6 @@ bc_logs/
 bc_logs.zip
 runs_check.json
 .mimosa/
+
+# validate 本地产物(CI 有 artifact 留档)
+*.npz
