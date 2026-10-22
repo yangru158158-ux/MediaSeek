@@ -170,13 +170,15 @@ enum QueryUnderstanding {
     ]
 
     /// 性别词的对比串对(文献标准形式)。非性别词返回 nil。
-    /// 女性词 → (a photo of a woman, a photo of a man);男性词反向
+    /// 女性词 → (a photo of a woman, a photo of a man);男性词反向。
+    /// 两侧都过 genderEnglish 归一(复数→单数:men 的反义 women → woman)
     static func genderContrast(of query: String) -> (fwd: String, opp: String)? {
         let key = query.lowercased().trimmingCharacters(in: .whitespaces)
-        guard let opp = genderOpposites[key] else { return nil }
+        guard let oppRaw = genderOpposites[key] else { return nil }
         let fwd = genderEnglish[key]
             ?? (key.isEmpty || !key.allSatisfy(\.isASCII) ? nil : key)
         guard let fwd else { return nil }
+        let opp = genderEnglish[oppRaw] ?? oppRaw
         return ("a photo of a \(fwd)", "a photo of a \(opp)")
     }
 
