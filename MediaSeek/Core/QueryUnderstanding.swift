@@ -95,14 +95,19 @@ enum QueryUnderstanding {
                 }
             }
             guard !matches.isEmpty else { continue }
-            // 嵌套只留最长:长度降序贪心选,被已选区间整个包含的丢弃
+            // 嵌套只留最长:长度降序贪心选。只剔【严格内含】的(机器⊂机器人);
+            // 同区间不同译词不剔(蔬菜=词典 vegetables+标签表 vegetable,单复数
+            // 都要捐,标签通道才对得上)——CI 穷尽断言拦下的回归
             var spans: [(start: Int, end: Int, en: String)] = []
             for m in matches.sorted(by: {
                 ($0.end - $0.start) != ($1.end - $1.start)
                     ? ($0.end - $0.start) > ($1.end - $1.start)
                     : $0.start < $1.start
             }) {
-                if spans.contains(where: { $0.start <= m.start && m.end <= $0.end }) { continue }
+                if spans.contains(where: {
+                    $0.start <= m.start && m.end <= $0.end
+                        && ($0.end - $0.start) > (m.end - m.start)
+                }) { continue }
                 spans.append(m)
             }
             // 覆盖率:选中区间并集 + 未覆盖字符里的连接字,须盖满全词
