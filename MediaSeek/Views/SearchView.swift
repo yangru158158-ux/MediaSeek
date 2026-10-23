@@ -27,7 +27,12 @@ struct SearchView: View {
     @State private var swipeFrames: [String: CGRect] = [:]
     @State private var refineMode = false
     @State private var refineBaseIDs = Set<String>()  // 拨动「结果内」瞬间锁定的搜索范围(清空输入框/改词不丢)
-    @State private var lastRoundCount = 0   // 结果内搜索的上一轮结果数(计数行展示/refine 校验)
+    @State private var lastRoundCount = 0   // 结果内:本轮实际搜索的基数(轮次开始时锁定;第六十七批改,见 runSearch)
+    // 第六十七批:眼前结果是否来自一场真正跑过的结果内搜索。拨开关瞬间
+    // 不换帽子——此前旧全局轮的计数被立刻标成「结果内命中 82 / 上一轮 71」,
+    // 82>71 字面违背「输出≤基数」不变量(216 用户实测截图),其实 82 属于
+    // 开关前的全局轮、71 是刚锁的基数,两个数字来自两个世界
+    @State private var lastRoundWasRefine = false
     // 结果内收窄历史:每次收窄前压栈,可逐步退回上一轮
     @State private var refineHistory: [(query: String, results: [DisplayHit], baseIDs: Set<String>, lastCount: Int, textIDs: Set<String>)] = []
     @State private var lastExecutedQuery = ""
@@ -253,7 +258,9 @@ struct SearchView: View {
                     } else {
                         Text(colorFilter == nil && scope == .all
                              ? (refineMode
-                                ? "结果内命中 \(results.count) / 上一轮 \(lastRoundCount) 个 · \(elapsedMs) ms"
+                                ? (lastRoundWasRefine
+                                   ? "结果内命中 \(results.count) / 范围 \(lastRoundCount) 个 · \(elapsedMs) ms"
+                                   : "已锁定范围 \(refineBaseIDs.count) 个 · 当前 \(results.count) 个 · \(elapsedMs) ms")
                                 : "找到 \(results.count) 个结果 · \(elapsedMs) ms")
                              : "\(visibleResults.count) / \(results.count) 个结果 · \(elapsedMs) ms")
                             .font(.footnote)
@@ -364,7 +371,7 @@ struct SearchView: View {
     private func emptyStateHint(_ query: String, refining: Bool) -> String {
         let q = query.lowercased()
         if refining {
-            return "结果内搜索无命中:上一轮结果与新条件没有交集\n可点「↩返回」退回上一轮结果换词再搜\n或关闭「结果内」改回全局搜索"
+            return "结果内搜索无命中:锁定范围与新条件没有交集\n可点「↩返回」退回上一轮结果换词再搜\n或关闭「结果内」改回全局搜索"
         }
         if q.hasPrefix("语义:") {
             if let top = app.search.lastSemanticTopScore {
@@ -763,6 +770,7 @@ struct SearchView: View {
         refineBaseIDs = prev.baseIDs
         lastRoundCount = prev.lastCount
         textHitIDs = prev.textIDs   // 文字命中集合同步恢复,否则返回后文字维度计数错乱
+        lastRoundWasRefine = false  // 恢复的画面未必来自结果内轮——不换帽子,按「已锁定范围/当前」诚实显示(第六十七批)
         resultTab = .all
     }
 
@@ -862,6 +870,11 @@ struct SearchView: View {
             if refineHistory.count > 20 { refineHistory.removeFirst() }
             // 颜色/维度筛过的可见集就是下一轮的搜索范围
             refineBaseIDs = Set(lensHits.map(\.refKey))
+            // 第六十七批:「范围」=本轮实际搜索的基数,轮始定格(此前轮末把它
+            // 改写成命中数,导致「上一轮 N」名不副实;拨开关瞬间的旧计数还被
+            // 扣上「结果内命中」帽子说谎)
+            lastRoundCount = refineBaseIDs.count
+            lastRoundWasRefine = true
             if refineBaseIDs.isEmpty {
                 results = []
                 elapsedMs = 0
@@ -910,7 +923,8 @@ struct SearchView: View {
                 // 空了之后的恢复=「返回」退回保存的历史轮次,或关「结果内」改全局
                 if refining {
                     refineBaseIDs = Set(hits.map(\.refKey))
-                    lastRoundCount = hits.count
+                    // lastRoundCount 不改写成命中数(第六十七批)——它是「范围」,
+                    // 本轮搜索的基数已在轮始定格;下一轮开始时按新基数重锁
                 }
             }
         }
