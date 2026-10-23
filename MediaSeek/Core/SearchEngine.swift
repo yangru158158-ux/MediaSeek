@@ -357,8 +357,14 @@ final class SearchEngine {
             // 的嵌入都是「中文女性人名」互相同义),语义对人名只有噪声(213 用户
             // 实测:结果内搜管雯混入大量程玉婷);名字→脸的绑定只在标签与 OCR
             // 文字里,这两条通道照常。判据与标签通道同一调用(searchUserTags
-            // 子串匹配)——标签通道能命中的词,语义对它只会添乱
-            if QueryUnderstanding.english(for: term) == nil,
+            // 子串匹配)——标签通道能命中的词,语义对它只会添乱。
+            // 判据边界(验收拦下后收窄):①只对真零命中(isDictionaryUnknown)
+            // 生效——english==nil 还涵盖盖不满的修饰词(红裙子),批 62 的
+            // 原文兜底承诺不破;②性别词豁免(genderOpposite 命中即非人名)——
+            // 裸英文性别词(woman/man)也是零命中,不豁免会在标签含其子串的
+            // 边角废掉性别深潜
+            if QueryUnderstanding.isDictionaryUnknown(term),
+               QueryUnderstanding.genderOpposite(of: term) == nil,
                !((try? store.searchUserTags(query: term)) ?? []).isEmpty {
                 return false
             }
@@ -895,10 +901,11 @@ final class SearchEngine {
         // 第六十二批:专名词整词跳过视觉(与主管线 semanticTerms 同规)——
         // 整词原文兜底=SigLIP 品类语义噪声带捞全库,只走文字通道
         if QueryUnderstanding.isProperNoun(term) { return [] }
-        // 第六十四批人名闸:零命中+命中用户标签=人名,跳过视觉(标签/OCR 照常;
-        // 依据与措辞见主管线 semanticTerms 注释)——无标签零命中词(财报类)
-        // 不受影响,照走多语言
-        if QueryUnderstanding.english(for: term) == nil,
+        // 第六十四批人名闸:零命中(isDictionaryUnknown)+命中用户标签=人名,
+        // 且非性别词 → 跳过视觉(标签/OCR 照常;依据与判据边界见主管线
+        // semanticTerms 注释);无标签零命中词(财报类)不受影响,照走多语言
+        if QueryUnderstanding.isDictionaryUnknown(term),
+           QueryUnderstanding.genderOpposite(of: term) == nil,
            !((try? store.searchUserTags(query: term)) ?? []).isEmpty {
             return []
         }

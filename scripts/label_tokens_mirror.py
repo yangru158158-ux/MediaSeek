@@ -108,6 +108,13 @@ def is_proper_noun(term):
     return kind == "partial" and longest_run >= 2
 
 
+def is_dictionary_unknown(term):
+    """第六十四批人名闸判据:真零命中(无任何碎片)。english_for()==None
+    比它宽(还涵盖盖不满的修饰词红裙子),闸只认这个窄口径。"""
+    kind, _, _ = term_coverage(term)
+    return kind == "no"
+
+
 def expanded(tokens):
     out = set(tokens)
     for t in tokens:
@@ -191,6 +198,13 @@ expect(not is_proper_noun("woman"), "ASCII 零命中非专名")
 expect(not is_proper_noun("财报"), "中文零命中非专名(词典没收)")
 expect(english_for("红裙子") is None, "红裙子盖不满不捐(60 批规则不变)")
 expect(not is_proper_noun("红裙子"), "单生字符「红」=修饰词,不判专名")
+# ---- 第六十四批:人名闸零命中判据对拍(与 Swift 断言同集) ----
+expect(is_dictionary_unknown("管雯"), "管雯=真零命中(人名)")
+expect(is_dictionary_unknown("财报"), "财报=零命中(普通词)")
+expect(is_dictionary_unknown("woman"), "裸英文=零命中")
+expect(not is_dictionary_unknown("红裙子"), "红裙子=partial,不是零命中")
+expect(not is_dictionary_unknown("机器人"), "机器人=complete,不是零命中")
+expect(not is_dictionary_unknown("华研机器人"), "华研机器人=专名,不是零命中")
 fail_pn = [zh for zh, _ in DICTIONARY if is_proper_noun(zh)] \
     + [zh for zh in EN_FROM_ZH if is_proper_noun(zh)]
 expect(not fail_pn, f"词条自身被判专名(覆盖评估回归): {fail_pn[:5]}")

@@ -173,6 +173,16 @@ enum QueryUnderstanding {
         return false
     }
 
+    /// 词典「零命中」判定(第六十四批人名闸配套):词内没有任何词典/标签
+    /// 碎片命中(管雯/财报/woman)。注意 english(for:)==nil 比它宽——还涵盖
+    /// 盖不满的修饰词(红裙子:命中裙子但红裸露);人名闸只对真零命中生效,
+    /// 批 62「单生字符修饰词照旧整词原文给 SigLIP」的承诺在任何条件下不破
+    /// (验收拦下:闸用 english==nil 时红裙子类词在命中标签条件下会被误伤)
+    static func isDictionaryUnknown(_ term: String) -> Bool {
+        if case .noMatches = termCoverage(term) { return true }
+        return false
+    }
+
     /// 泛化标签词:长查询(≥3 字)不带这些词去匹配标签——
     /// 它们什么照片都能沾上,是「一个词灌出全库」的元凶
     static let genericTokens: Set<String> = [

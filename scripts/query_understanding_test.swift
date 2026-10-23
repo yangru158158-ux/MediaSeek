@@ -182,6 +182,20 @@ enum QueryUnderstandingTest {
             }
         }
 
+        // —— 第六十四批:人名闸的零命中判据(english==nil 比它宽,验收拦下) ——
+        expect(QueryUnderstanding.isDictionaryUnknown("管雯"),
+               "管雯=真零命中(人名,词典/标签表无任何碎片)——人名闸目标形态")
+        expect(QueryUnderstanding.isDictionaryUnknown("财报"),
+               "财报=零命中(词典没收的普通词,无标签时照走语义)")
+        expect(QueryUnderstanding.isDictionaryUnknown("woman"),
+               "裸英文=零命中(性别词有人名闸豁免,深潜不废)")
+        expect(QueryUnderstanding.isDictionaryUnknown("红裙子") == false,
+               "红裙子=盖不满的修饰词,不是零命中——批 62 原文兜底承诺不因人名闸破")
+        expect(QueryUnderstanding.isDictionaryUnknown("机器人") == false,
+               "机器人=全覆盖复合词,不是零命中")
+        expect(QueryUnderstanding.isDictionaryUnknown("华研机器人") == false,
+               "华研机器人=专名(盖不满),不是零命中(批 62 专名闸已管)")
+
         // —— 第五十五批:性别对比串=文献标准形式(CVPR 2025 口径,带冠词小写) ——
         if let pair = QueryUnderstanding.genderContrast(of: "女人") {
             expect(pair.fwd == "a photo of a woman" && pair.opp == "a photo of a man",
@@ -231,7 +245,7 @@ enum QueryUnderstandingTest {
         expect(passCn == zhToEns.count,
                "全量 \(zhToEns.count) 个中文词反查全部命中标签通道")
 
-        // 断言数口径:全文 expect 调用 64 项(另含 1 行函数定义)
-        print("PASS: 查询理解 64 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词穷尽)")
+        // 断言数口径:全文 expect 调用 70 项(另含 1 行函数定义)
+        print("PASS: 查询理解 70 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词穷尽)")
     }
 }
