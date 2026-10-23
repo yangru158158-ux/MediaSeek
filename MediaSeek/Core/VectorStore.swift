@@ -564,6 +564,33 @@ final class VectorStore {
         return String(cString: sqlite3_column_text(stmt, 0))
     } }
 
+    /// 批量取一批 ref 的主色调(第六十八批)。items 只有 (kind,ref_key,frame_index)
+    /// 复合唯一索引,WHERE ref_key=? 走全表扫——resolve 对每条命中逐个 colorForRef,
+    /// OCR 洪泛类大结果集(id 实测 1,690 条)被拖到 22s。一次 IN 分块把扫描次数
+    /// 从 O(命中数) 压到 O(块数)。行为与逐条取一致:无色行/缺行者不进结果表
+    func colors(for refs: [String]) -> [String: String] { try serialized {
+        guard let db, !refs.isEmpty else { return [:] }
+        var out: [String: String] = [:]
+        let unique = Array(Set(refs))
+        // 900/块:留在 SQLite 变量数上限(999)之内,跨版本安全
+        for start in stride(from: 0, to: unique.count, by: 900) {
+            let chunk = Array(unique[start..<min(start + 900, unique.count)])
+            let placeholders = String(repeating: ",?", count: chunk.count - 1) + "?"
+            guard let stmt = try? prepare(
+                "SELECT ref_key, color FROM items WHERE color IS NOT NULL AND ref_key IN (\(placeholders))")
+            else { continue }
+            defer { sqlite3_finalize(stmt) }
+            for (i, r) in chunk.enumerated() {
+                sqlite3_bind_text(stmt, Int32(i + 1), r, -1, Self.transient)
+            }
+            while sqlite3_step(stmt) == SQLITE_ROW,
+                  let key = sqlite3_column_text(stmt, 0), let color = sqlite3_column_text(stmt, 1) {
+                out[String(cString: key)] = String(cString: color)
+            }
+        }
+        return out
+    } }
+
     /// 某照片的整图 SigLIP 向量(合影计数兜底用;与检索/查重同源)。
     /// blob 字节数与 dim 不一致(截断/坏行)返回 nil,不越界读。
     func clipVector(ref: String) -> [Float]? { try serialized {

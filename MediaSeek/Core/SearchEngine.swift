@@ -332,6 +332,24 @@ final class SearchEngine {
     /// 性别对比过滤与低置信尾线收口,不会灌屏。30=结果页首屏量级
     private static let tierMinResults = 30
 
+    /// 第六十八批:第三档底网(全局 0.08×gate)从「薄了就换网」收紧为反空兜底。
+    /// 旧逻辑命中不足 tierMinResults 就整网换到噪声带底网,而 so400m 分数压缩后
+    /// 真命中与噪声挤在 15% 带宽内、尾线切不开——「智搜」187 张/「id」15 张/
+    /// 「动物」尾部文档全是底网杂音(2026-10-23 用户实测三案)。允许降档,满足其一:
+    ///   ① 结果内(among 非空)或证件类词(ocrAliases 在册):小集合/人像面的
+    ///      弱分真命中仍靠这档浮顶(证件照对「身份证」只有 0.05-0.08,批 43 先例)
+    ///   ② 纯反空:上两档零命中,且该词文字通道也零命中(财报类生词先例保留);
+    ///      文字已有命中时底网只剩噪声,不启用
+    /// 语义: 前缀(semanticOnly)排他跳过文字通道,文字覆盖按「无」计
+    static func floorTierPermitted(among: Set<String>?, semanticOnly: Bool,
+                                   upperTierEmpty: Bool, aliasExempt: Bool,
+                                   textCovered: Bool) -> Bool {
+        if among != nil { return true }
+        if aliasExempt { return true }
+        if semanticOnly { return upperTierEmpty }
+        return upperTierEmpty && !textCovered
+    }
+
     private func runMainSearch(query: String, spec: QuerySpec, semanticOnly: Bool,
                                scope: SearchScope, topK: Int, siglip: SigLIPEmbedder?,
                                dateRange: QueryDateRange?, placeRegion: CLCircularRegion?,
@@ -468,13 +486,24 @@ final class SearchEngine {
                         minScore: 0.18 * gate, among: among))
                 }
                 if hits.count < Self.tierMinResults {
-                    // 第三档分两种:全局地板 0.08(高于无关带上沿、低于命中带下沿);
-                    // 结果内 0.03——用户点名的小集合里相对排名优先,弱分真匹配(证件照
-                    // 对「身份证」只有 0.05-0.08)也要浮顶,噪声由低置信尾线 0.95 收
+                    // 第三档分两种:全局地板 0.08(旧注释称「高于无关带上沿」,
+                    // so400m 实测噪声带已越过此线——智搜 187/id 15/动物尾部三案,
+                    // 故不再常规启用);结果内 0.03——用户点名的小集合里相对排名
+                    // 优先,弱分真匹配(证件照对「身份证」只有 0.05-0.08)也要
+                    // 浮顶,噪声由低置信尾线 0.95 收。
+                    // 第六十八批:全局模式改反空兜底——文字通道已有命中或上两档
+                    // 已有命中时不再换底网(判据与三案实测见 floorTierPermitted)
                     let floor: Float = (among != nil ? 0.03 : 0.08) * gate
-                    hits = Self.dedupByRef(try store.search(
-                        space: siglip.space, kinds: [.photo], query: q, limit: topK,
-                        minScore: floor, among: among))
+                    let probeTerms = terms.isEmpty ? [query] : terms
+                    if Self.floorTierPermitted(
+                        among: among, semanticOnly: semanticOnly, upperTierEmpty: hits.isEmpty,
+                        aliasExempt: probeTerms.contains { QueryUnderstanding.ocrAliases[$0] != nil },
+                        textCovered: !semanticOnly && probeTerms.contains {
+                            !((try? store.searchOCR(query: $0)) ?? []).isEmpty }) {
+                        hits = Self.dedupByRef(try store.search(
+                            space: siglip.space, kinds: [.photo], query: q, limit: topK,
+                            minScore: floor, among: among))
+                    }
                 }
                 }
             }
@@ -1018,7 +1047,14 @@ final class SearchEngine {
                 space: siglip.space, kinds: searchKinds, query: q, limit: topK,
                 minScore: 0.15 * gateScale)) ?? [])
         }
-        if hits.count < Self.tierMinResults {
+        if hits.count < Self.tierMinResults,
+           // 第六十八批:改反空兜底(与主流程照片第三档同规,判据见
+           // floorTierPermitted);and:/or: 每词必并 OCR 命中(第十六批),
+           // 文字覆盖探测与该通道同源
+           Self.floorTierPermitted(
+               among: nil, semanticOnly: false, upperTierEmpty: hits.isEmpty,
+               aliasExempt: QueryUnderstanding.ocrAliases[term] != nil,
+               textCovered: !((try? store.searchOCR(query: term)) ?? []).isEmpty) {
             // 真尺度地板 0.08(与主流程照片第三档同规)
             hits = Self.dedupByRef((try? store.search(
                 space: siglip.space, kinds: searchKinds, query: q, limit: topK,
@@ -1161,6 +1197,11 @@ final class SearchEngine {
         }
 
         var out: [DisplayHit] = []
+        // 颜色一次批量查回(第六十八批):逐条 colorForRef 是每条一次全表扫,
+        // 大结果集线性放大(id 实测 1,690 条/22s);文件分支不走颜色,不参与
+        let colorMap = store.colors(for: hits.filter {
+            $0.kind != .face && $0.kind != .file && $0.kind != .fileChunk
+        }.map { $0.refKey })
         for hit in hits {
             switch hit.kind {
             case .face:
@@ -1176,7 +1217,7 @@ final class SearchEngine {
                                       title: hit.title ?? name,
                                       score: hit.score,
                                       date: asset.creationDate,
-                                      color: hit.color ?? store.colorForRef(hit.refKey)))
+                                      color: hit.color ?? colorMap[hit.refKey]))
             case .file, .fileChunk:
                 guard let file = try? store.file(id: hit.refKey) else { continue }
                 guard fileMatchesFilters(file, dateRange: dateRange) else { continue }
