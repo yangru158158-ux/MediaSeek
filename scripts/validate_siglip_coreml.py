@@ -522,9 +522,11 @@ def mode_dist(out_json: Path):
             print(f"{zh:<6}{vname:<13}{hs:>10}  {bn:>10}  {mn:>10}")
 
     # 性别对比边距(so400m 下 0.010 过滤线是否仍成立,实测数据)
+    # 对比串向量只算一份(验收发现:双份字面量将来重标只改一处,高分段
+    # 与低分段边距会静默不可比)——text_vec 不依赖探针图,无条件计算
+    qw, qm = text_vec("a photo of a woman"), text_vec("a photo of a man")
     gender = {}
     if "woman_portrait" in img_v and "man_portrait" in img_v:
-        qw, qm = text_vec("a photo of a woman"), text_vec("a photo of a man")
         gender = {
             "woman_margin": round(cos(qw, img_v["woman_portrait"]) - cos(qm, img_v["woman_portrait"]), 4),
             "man_margin": round(cos(qw, img_v["man_portrait"]) - cos(qm, img_v["man_portrait"]), 4),
@@ -543,7 +545,8 @@ def mode_dist(out_json: Path):
     if all(k in images for k in ("woman_portrait", "man_portrait", "beach")):
         comps = gender_composites(images)
         qt = text_vec("This is a photo of woman.")
-        qw2, qm2 = text_vec("a photo of a woman"), text_vec("a photo of a man")
+        # 复用上方 gender 段的对比串向量(同一份,见该处注释)
+        qw2, qm2 = qw, qm
         with torch.no_grad():
             for tag, img in comps.items():
                 px = processor(images=img, return_tensors="pt")["pixel_values"]
