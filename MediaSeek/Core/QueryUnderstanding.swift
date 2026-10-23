@@ -69,64 +69,108 @@ enum QueryUnderstanding {
     /// 剔除,标签通道灌进上千张截图):
     /// ① 按空白拆原子词,逐词独立判覆盖;
     /// ② 一个词只有被词典碎片区间并集【盖满】(连接字除外)才捐译文——
-    ///    盖满=复合描述词(屏幕截图/机器设备/妈妈的生日);盖不满=词里
-    ///    混着词典不认识的成分,大概率专名(华研机器人=公司/股票/人名),
-    ///    碎片一个不捐,整词原样交给 SigLIP 多语言通道自己判断;
+    ///    盖满=复合描述词(屏幕截图/机器设备/妈妈的生日);盖不满=碎片
+    ///    一个不捐,通道归属见 isProperNoun(第六十二批:连续生字符≥2 判
+    ///    专名跳过视觉通道;单生字符/零命中照旧整词原文给 SigLIP 多语言);
     /// ③ 碎片区间嵌套时只留最长(机器人→robot,「机器」不再重复捐词,
     ///    与第五十四批「woman woman」去重同理);不嵌套的照常都留
     ///    (屏幕+截图)。
+    /// 单个原子词的覆盖率评估(第六十批规则内核,english(for:) 与
+    /// isProperNoun(_:) 共用):
+    /// - noMatches:词内没有任何词典/标签碎片命中(词典没收的普通词,如财报)
+    /// - complete:盖满(连接字可裸露);spans 已做嵌套剔除(只剔严格内含)
+    ///   与位置排序,直接可捐
+    /// - partial:盖不满;携带最长「连续生字符」数(未覆盖且非连接字的
+    ///   连续段,连接字/已覆盖字符都会断开计数)——供 isProperNoun 区分
+    ///   专名(华研=2 连续生字符)与单字修饰词(红裙子的红=1)
+    private enum TermCoverage {
+        case noMatches
+        case complete(spans: [(start: Int, end: Int, en: String)])
+        case partial(longestUnknownRun: Int)
+    }
+
+    private static func termCoverage(_ term: String) -> TermCoverage {
+        // 该原子词内的全部碎片命中(区间用字符偏移)
+        var matches: [(start: Int, end: Int, en: String)] = []
+        let tables: [[String: String]] = [Dictionary(dictionary, uniquingKeysWith: { a, _ in a }),
+                                          LabelZh.englishFromZh]
+        for table in tables {
+            for (zh, en) in table {
+                if zh.count == 1 {
+                    if term == zh { matches.append((0, term.count, en)) }
+                    continue
+                }
+                if let r = term.range(of: zh) {
+                    let s = term.distance(from: term.startIndex, to: r.lowerBound)
+                    matches.append((s, s + zh.count, en))
+                }
+            }
+        }
+        guard !matches.isEmpty else { return .noMatches }
+        // 嵌套只留最长:长度降序贪心选。只剔【严格内含】的(机器⊂机器人);
+        // 同区间不同译词不剔(蔬菜=词典 vegetables+标签表 vegetable,单复数
+        // 都要捐,标签通道才对得上)——CI 穷尽断言拦下的回归
+        var spans: [(start: Int, end: Int, en: String)] = []
+        for m in matches.sorted(by: {
+            ($0.end - $0.start) != ($1.end - $1.start)
+                ? ($0.end - $0.start) > ($1.end - $1.start)
+                : $0.start < $1.start
+        }) {
+            if spans.contains(where: {
+                $0.start <= m.start && m.end <= $0.end
+                    && ($0.end - $0.start) > (m.end - m.start)
+            }) { continue }
+            spans.append(m)
+        }
+        // 覆盖率:选中区间并集 + 未覆盖字符里的连接字,须盖满全词
+        var covered = Set<Int>()
+        for s in spans { for i in s.start..<s.end { covered.insert(i) } }
+        // 最长连续生字符段(连接字与已覆盖字符断开计数)
+        var longestRun = 0, run = 0
+        for (i, c) in term.enumerated() {
+            if !covered.contains(i) && !connectives.contains(c) {
+                run += 1
+                longestRun = max(longestRun, run)
+            } else {
+                run = 0
+            }
+        }
+        if longestRun > 0 {
+            return .partial(longestUnknownRun: longestRun)   // 盖不满:不捐碎片
+        }
+        return .complete(spans: spans.sorted(by: {
+            $0.start != $1.start ? $0.start < $1.start : $0.end < $1.end
+        }))
+    }
+
     static func english(for core: String) -> String? {
         var out: [String] = []
         // 同词去重是全 core 全局口径(第五十四批,验收发现曾降级为词内局部:
         // 「沙滩 沙滩」会拼出 beach beach)
         var seen = Set<String>()
         for term in core.components(separatedBy: .whitespacesAndNewlines) where !term.isEmpty {
-            // 该原子词内的全部碎片命中(区间用字符偏移)
-            var matches: [(start: Int, end: Int, en: String)] = []
-            let tables: [[String: String]] = [Dictionary(dictionary, uniquingKeysWith: { a, _ in a }),
-                                              LabelZh.englishFromZh]
-            for table in tables {
-                for (zh, en) in table {
-                    if zh.count == 1 {
-                        if term == zh { matches.append((0, term.count, en)) }
-                        continue
-                    }
-                    if let r = term.range(of: zh) {
-                        let s = term.distance(from: term.startIndex, to: r.lowerBound)
-                        matches.append((s, s + zh.count, en))
-                    }
-                }
-            }
-            guard !matches.isEmpty else { continue }
-            // 嵌套只留最长:长度降序贪心选。只剔【严格内含】的(机器⊂机器人);
-            // 同区间不同译词不剔(蔬菜=词典 vegetables+标签表 vegetable,单复数
-            // 都要捐,标签通道才对得上)——CI 穷尽断言拦下的回归
-            var spans: [(start: Int, end: Int, en: String)] = []
-            for m in matches.sorted(by: {
-                ($0.end - $0.start) != ($1.end - $1.start)
-                    ? ($0.end - $0.start) > ($1.end - $1.start)
-                    : $0.start < $1.start
-            }) {
-                if spans.contains(where: {
-                    $0.start <= m.start && m.end <= $0.end
-                        && ($0.end - $0.start) > (m.end - m.start)
-                }) { continue }
-                spans.append(m)
-            }
-            // 覆盖率:选中区间并集 + 未覆盖字符里的连接字,须盖满全词
-            var covered = Set<Int>()
-            for s in spans { for i in s.start..<s.end { covered.insert(i) } }
-            let uncoveredNonConnective = term.enumerated().contains { i, c in
-                !covered.contains(i) && !connectives.contains(c)
-            }
-            if uncoveredNonConnective { continue }   // 盖不满:专名,不捐碎片
-            // 捐出:按位置排序(seen 已提升到全 core 作用域,同词全局只捐一次)
-            for m in spans.sorted(by: { $0.start != $1.start ? $0.start < $1.start : $0.end < $1.end })
-            where seen.insert(m.en).inserted {
+            guard case .complete(let spans) = termCoverage(term) else { continue }
+            // 捐出(spans 已按位置排序;seen 全 core 作用域,同词只捐一次)
+            for m in spans where seen.insert(m.en).inserted {
                 out.append(m.en)
             }
         }
         return out.isEmpty ? nil : out.joined(separator: " ")
+    }
+
+    /// 专名判定(第六十二批,211 用户实测:华研机器人裸搜仍出 96 张「语义」
+    /// 命中——第六十批只管住了碎片捐赠,整词原文兜底还是把词交给了 SigLIP
+    /// 多语言,行业相关截图的噪声带分数(≥第三档地板)整批捞进结果)。
+    /// 判据=覆盖率规则的通道延伸:词内有词典碎片命中、但盖不住的连续生字符
+    /// ≥2(华研机器人里的「华研」)→ 专名,整词只走文字通道(OCR/用户标签),
+    /// 视觉通道整词跳过——SigLIP 只能把专名嵌成品类语义(机器人/科技/金融),
+    /// 区分不了「关于这家公司」和「关于这个行业」,真命中全来自 OCR。
+    /// 只 1 个生字符(红裙子的「红」)是普通修饰词形态,保持批 60 现状
+    /// (整词原文给 SigLIP);零命中(财报)不是专名,词典没收的普通词,
+    /// 照走多语言原文。
+    static func isProperNoun(_ term: String) -> Bool {
+        if case .partial(let run) = termCoverage(term) { return run >= 2 }
+        return false
     }
 
     /// 泛化标签词:长查询(≥3 字)不带这些词去匹配标签——

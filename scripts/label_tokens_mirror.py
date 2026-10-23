@@ -43,45 +43,69 @@ for en, cn in list(BASE.items()) + list(EXTRA.items()):
     EN_FROM_ZH.setdefault(cn, en)
 
 
-def english_for(core):
-    """第六十批覆盖率规则逐语义复刻:逐原子词碎片匹配→长度降序贪心选区间
-    (只剔严格内含,同区间多译词都留)→连接字容忍的覆盖判定(盖不满=专名不捐)
-    →按位置捐出,同词全 core 全局只捐一次(验收发现曾漏更新,靠捐超集假绿)。"""
+def term_coverage(term):
+    """第六十二批与 Swift termCoverage 同构:碎片匹配→长度降序贪心选区间
+    (只剔严格内含,同区间多译词都留)→连接字容忍的覆盖判定。
+    返回 (kind, longest_run, spans):kind=no(零命中)/partial(盖不满,
+    longest_run=最长连续生字符段,连接字与已覆盖字符断开计数)/complete。"""
     CONNECTIVES = set("的了与和及或在是")
+    matches = []  # (start, end, en) 字符偏移
+    tables = list(DICTIONARY) + list(EN_FROM_ZH.items())
+    for zh, en in tables:
+        if len(zh) == 1:
+            if term == zh:
+                matches.append((0, len(term), en))
+            continue
+        pos = term.find(zh)
+        if pos >= 0:
+            matches.append((pos, pos + len(zh), en))
+    if not matches:
+        return ("no", 0, [])
+    matches.sort(key=lambda m: (-(m[1] - m[0]), m[0]))
+    spans = []
+    for m in matches:
+        if any(s[0] <= m[0] and m[1] <= s[1] and (s[1] - s[0]) > (m[1] - m[0])
+               for s in spans):
+            continue
+        spans.append(m)
+    covered = set()
+    for s in spans:
+        covered.update(range(s[0], s[1]))
+    longest_run = run = 0
+    for i, c in enumerate(term):
+        if i not in covered and c not in CONNECTIVES:
+            run += 1
+            longest_run = max(longest_run, run)
+        else:
+            run = 0
+    if longest_run > 0:
+        return ("partial", longest_run, spans)
+    return ("complete", 0, sorted(spans, key=lambda m: (m[0], m[1])))
+
+
+def english_for(core):
+    """第六十批覆盖率规则逐语义复刻(经 term_coverage):盖满才捐,同词
+    全 core 全局只捐一次(验收发现曾漏更新,靠捐超集假绿)。"""
     out = []
     seen = set()
     for term in core.split():
         if not term:
             continue
-        matches = []  # (start, end, en) 字符偏移
-        tables = list(DICTIONARY) + list(EN_FROM_ZH.items())
-        for zh, en in tables:
-            if len(zh) == 1:
-                if term == zh:
-                    matches.append((0, len(term), en))
-                continue
-            pos = term.find(zh)
-            if pos >= 0:
-                matches.append((pos, pos + len(zh), en))
-        if not matches:
-            continue
-        matches.sort(key=lambda m: (-(m[1] - m[0]), m[0]))
-        spans = []
-        for m in matches:
-            if any(s[0] <= m[0] and m[1] <= s[1] and (s[1] - s[0]) > (m[1] - m[0])
-                   for s in spans):
-                continue
-            spans.append(m)
-        covered = set()
-        for s in spans:
-            covered.update(range(s[0], s[1]))
-        if any(i not in covered and c not in CONNECTIVES for i, c in enumerate(term)):
-            continue   # 盖不满:专名,碎片不捐
-        for m in sorted(spans, key=lambda m: (m[0], m[1])):
+        kind, _, spans = term_coverage(term)
+        if kind != "complete":
+            continue   # 盖不满/零命中:不捐
+        for m in spans:
             if m[2] not in seen:
                 seen.add(m[2])
                 out.append(m[2])
     return " ".join(out) if out else None
+
+
+def is_proper_noun(term):
+    """第六十二批:连续生字符≥2=专名(华研),整词只走文字通道;
+    单生字符(红裙子的红)与零命中(财报)不判,保持原文兜底。"""
+    kind, longest_run, _ = term_coverage(term)
+    return kind == "partial" and longest_run >= 2
 
 
 def expanded(tokens):
@@ -156,5 +180,20 @@ for cn, ens in zh_to_ens.items():
         fail_cn.append((cn, ens))
 expect(not fail_cn, f"中文反查哑火: {fail_cn[:5]}")
 print(f"中文反查穷尽: {len(zh_to_ens) - len(fail_cn)}/{len(zh_to_ens)} 全命中")
+
+# ---- 第六十二批:专名判定对拍(与 Swift 断言同集) ----
+expect(is_proper_noun("华研机器人"), "华研机器人:华研 2 连续生字符 → 专名")
+expect(not is_proper_noun("机器设备"), "机器设备全覆盖=复合词,非专名")
+expect(not is_proper_noun("妈妈的生日"), "连接字不算生字符,非专名")
+expect(not is_proper_noun("屏幕和截图"), "「和」连接字,非专名")
+expect(not is_proper_noun("机器人"), "词典条目自身全覆盖,非专名")
+expect(not is_proper_noun("woman"), "ASCII 零命中非专名")
+expect(not is_proper_noun("财报"), "中文零命中非专名(词典没收)")
+expect(english_for("红裙子") is None, "红裙子盖不满不捐(60 批规则不变)")
+expect(not is_proper_noun("红裙子"), "单生字符「红」=修饰词,不判专名")
+fail_pn = [zh for zh, _ in DICTIONARY if is_proper_noun(zh)] \
+    + [zh for zh in EN_FROM_ZH if is_proper_noun(zh)]
+expect(not fail_pn, f"词条自身被判专名(覆盖评估回归): {fail_pn[:5]}")
+print(f"专名不变量: 词典 {len(DICTIONARY)} 条 + 反查 {len(EN_FROM_ZH)} 词 全部非专名")
 
 print("PASS: 镜像全绿(词典", len(DICTIONARY), "条/标签", len(ZH), "词/泛化", len(GENERIC), "个)")

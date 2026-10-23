@@ -146,6 +146,42 @@ enum QueryUnderstandingTest {
         expect(hynTokens.contains("machine") == false && hynTokens.contains("robot") == false,
                "华研机器人 标签通道不再吃 machine/robot 碎片——灌水根除")
 
+        // —— 第六十二批:专名判定(覆盖率规则的通道延伸) ——
+        // 211 实测:华研机器人裸搜仍出 96 张「语义」命中——碎片不捐了,但
+        // 整词原文兜底把词交给 SigLIP 多语言,行业截图噪声带分数全数过第三档
+        // 地板。连续生字符≥2 判专名,整词只走文字通道;单生字符(修饰词)
+        // 与零命中(词典没收)照旧原文兜底,不误杀
+        expect(QueryUnderstanding.isProperNoun("华研机器人"),
+               "华研机器人=华研(2 连续生字符)+机器人 → 专名,视觉通道整词跳过")
+        expect(QueryUnderstanding.isProperNoun("机器设备") == false,
+               "机器设备 全覆盖=复合词,不是专名(前置过滤器照常捐译)")
+        expect(QueryUnderstanding.isProperNoun("妈妈的生日") == false,
+               "连接字不算生字符,描述性词组不是专名")
+        expect(QueryUnderstanding.isProperNoun("屏幕和截图") == false,
+               "「和」是连接字,复合词不是专名")
+        expect(QueryUnderstanding.isProperNoun("机器人") == false,
+               "整词即词典条目,不是专名")
+        expect(QueryUnderstanding.isProperNoun("woman") == false,
+               "ASCII 零命中不是专名(裸英文照走模板)")
+        expect(QueryUnderstanding.isProperNoun("财报") == false,
+               "中文零命中不是专名(词典没收的普通词,整词原文交 SigLIP 多语言)")
+        expect(QueryUnderstanding.english(for: "红裙子") == nil,
+               "红裙子 盖不满不捐碎片(60 批规则不变)")
+        expect(QueryUnderstanding.isProperNoun("红裙子") == false,
+               "单生字符「红」=修饰词形态,不判专名(保持原文兜底)")
+        // 全词典不变量:任何词条自身必然全覆盖 → 不判专名(键漂移护栏,
+        // 以后改覆盖评估/词典让词条自判专名时 CI 立红)
+        for (zh, _) in QueryUnderstanding.dictionary {
+            if QueryUnderstanding.isProperNoun(zh) {
+                fatalError("FAIL: 词典条目「\(zh)」自身被判专名(覆盖评估回归)")
+            }
+        }
+        for (zh, _) in LabelZh.englishFromZh {
+            if QueryUnderstanding.isProperNoun(zh) {
+                fatalError("FAIL: 标签反查条目「\(zh)」自身被判专名(覆盖评估回归)")
+            }
+        }
+
         // —— 第五十五批:性别对比串=文献标准形式(CVPR 2025 口径,带冠词小写) ——
         if let pair = QueryUnderstanding.genderContrast(of: "女人") {
             expect(pair.fwd == "a photo of a woman" && pair.opp == "a photo of a man",
@@ -195,7 +231,7 @@ enum QueryUnderstandingTest {
         expect(passCn == zhToEns.count,
                "全量 \(zhToEns.count) 个中文词反查全部命中标签通道")
 
-        // 断言数口径:全文 expect 调用 55 项(另含 1 行函数定义)
-        print("PASS: 查询理解 55 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词穷尽)")
+        // 断言数口径:全文 expect 调用 64 项(另含 1 行函数定义)
+        print("PASS: 查询理解 64 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词穷尽)")
     }
 }

@@ -324,6 +324,14 @@ final class SearchEngine {
                                        placeLabel: placeLabel, among: among)
     }
 
+    /// 门槛阶梯的降档判据(第六十二批):「捞到 0 条才降档」→「捞不足 30 条
+    /// 就降档」。61 批按模型缩放把各档地板整体下移后,分数分布上沿恰好越过
+    /// 新一档地板的查询,会在高一档捞到顶部一小撮(非空即停),把更宽的低档
+    /// 彻底堵死——so400m 搜 woman 46→8(211 用户实测)。低档结果天然是高档
+    /// 的超集(同查询同 limit 只降地板),替换即合并;放宽进来的命中仍受
+    /// 性别对比过滤与低置信尾线收口,不会灌屏。30=结果页首屏量级
+    private static let tierMinResults = 30
+
     private func runMainSearch(query: String, spec: QuerySpec, semanticOnly: Bool,
                                scope: SearchScope, topK: Int, siglip: SigLIPEmbedder?,
                                dateRange: QueryDateRange?, placeRegion: CLCircularRegion?,
@@ -336,6 +344,13 @@ final class SearchEngine {
         let terms = Self.splitTerms(query)
         let visualTerms = terms.filter { !Self.containsDigit($0) }
         let concept = visualTerms.isEmpty ? query : visualTerms.joined(separator: " ")
+        // 第六十二批:专名词(华研机器人——连续生字符≥2,判据见
+        // QueryUnderstanding.isProperNoun)整词只走文字通道。第六十批管住了
+        // 碎片捐赠,但整词原文兜底仍把词交给 SigLIP 多语言,行业相关截图的
+        // 噪声带分数(≥第三档地板)整批捞成「语义」命中(211 实测 96 张)。
+        // 多词「或」语义:剩下的词照常走视觉;全专名时整条视觉通道跳过
+        // (纯数字词同此:SigLIP 嵌数字串只有噪声,211 前靠门槛挡、如今直接不跑)
+        let semanticTerms = visualTerms.filter { !QueryUnderstanding.isProperNoun($0) }
 
         let imageKinds: [ItemKind] = scope == .all ? [.photo, .videoFrame]
             : (scope == .photo ? [.photo] : (scope == .video ? [.videoFrame] : []))
@@ -397,12 +412,12 @@ final class SearchEngine {
         // 以 ≥0.60 命中,造成整库截图照灌进结果(「医学出生证明」事故)
         // 显式「语义:」查询门槛放宽到 0.14(用户点名要语义召回)
         // 文字: 前缀排他:视觉通道(照片/视频帧)不参与
-        if !imageKinds.isEmpty, spec.channel != .text, let siglip {
+        if !imageKinds.isEmpty, spec.channel != .text, !semanticTerms.isEmpty, let siglip {
             // so400m 校准(第六十一批):SigLIP 绝对门槛按激活模型缩放
             // (so400m 命中带 = base × 0.87,CI 双模型分布实测,详见
             // ModelManager.siglipGateScale 注释)
             let gate = await MainActor.run { models.siglipGateScale }
-            let q = try siglip.embedQuery(Self.siglipQuery(concept))
+            let q = try siglip.embedQuery(Self.siglipQuery(semanticTerms.joined(separator: " ")))
             // 照片与视频帧分开走各自的门槛阶梯:分数分布不同,且照片行为已验收冻结
             var hits: [SearchHit] = []
             if imageKinds.contains(.photo) {
@@ -411,13 +426,14 @@ final class SearchEngine {
                     space: siglip.space, kinds: [.photo], query: q, limit: topK,
                     minScore: floor, among: among))
                 // 弱信号兜底:品牌词/抽象词(「微信」「聊天」)对截图的视觉相似度
-                // 天然低于常规门槛,一刀切会整词清零(2026-10-10 用户实测三个词全空)
-                if hits.isEmpty {
+                // 天然低于常规门槛,一刀切会整词清零(2026-10-10 用户实测三个词全空);
+                // 降档条件=薄判(不足 tierMinResults,第六十二批)
+                if hits.count < Self.tierMinResults {
                     hits = Self.dedupByRef(try store.search(
                         space: siglip.space, kinds: [.photo], query: q, limit: topK,
                         minScore: 0.18 * gate, among: among))
                 }
-                if hits.isEmpty {
+                if hits.count < Self.tierMinResults {
                     // 第三档分两种:全局地板 0.08(高于无关带上沿、低于命中带下沿);
                     // 结果内 0.03——用户点名的小集合里相对排名优先,弱分真匹配(证件照
                     // 对「身份证」只有 0.05-0.08)也要浮顶,噪声由低置信尾线 0.95 收
@@ -538,10 +554,15 @@ final class SearchEngine {
         func add(_ hit: SearchHit, weight: Double, rank: Int) {
             let s = weight / (K + Double(rank + 1))
             if let cur = fused[hit.refKey] {
-                // 标题优先取语义通道命中(「含…文字」标记只留给纯 OCR 命中)
-                let winner: SearchHit
-                if cur.hit.space == "ocr", hit.space != "ocr" { winner = hit }
-                else { winner = hit.score > cur.hit.score ? hit : cur.hit }
+                // 第六十二批文字先行:已被 OCR 文字命中的照片归文字通道,
+                // 语义/标签/用户标签通道不再叠加它(so400m 门槛下移后,含
+                // 查询词文字的截图——搜索结果截图之类——同时被视觉通道捞到,
+                // 旧规则把双命中条目的归属翻成语义、融合分又带着 OCR 权重 8
+                // 的底子,语义栏前排全是文字截图,真照片被压到尾部;211 用户
+                // 实测搜 woman 语义栏前两名是 100%/97% 的文字截图)。
+                // OCR 块先于通道循环 add,cur 只可能是先落座的 OCR 条目
+                if cur.hit.space == "ocr" { return }
+                let winner = hit.score > cur.hit.score ? hit : cur.hit
                 fused[hit.refKey] = (winner, cur.score + s)
             } else {
                 fused[hit.refKey] = (hit, s)
@@ -838,6 +859,9 @@ final class SearchEngine {
                               scope: SearchScope = .all,
                               gateScale: Float = 1.0) -> [SearchHit] {
         guard let siglip else { return [] }
+        // 第六十二批:专名词整词跳过视觉(与主管线 semanticTerms 同规)——
+        // 整词原文兜底=SigLIP 品类语义噪声带捞全库,只走文字通道
+        if QueryUnderstanding.isProperNoun(term) { return [] }
         guard let q = try? siglip.embedQuery(Self.siglipQuery(term)) else { return [] }
         // 第三十九批:按范围取 kinds(与主管线 imageKinds 同构,.file→[] 空)——
         // 此前全部写死 [.photo],视频范围下视频帧向量从不被查询
@@ -850,12 +874,13 @@ final class SearchEngine {
             var hits = Self.dedupByRef((try? store.search(
                 space: siglip.space, kinds: searchKinds, query: q, limit: topK,
                 minScore: 0.20 * gateScale, among: within)) ?? [])
-            if hits.isEmpty {
+            // 降档=薄判(tierMinResults,第六十二批,与主流程阶梯同规)
+            if hits.count < Self.tierMinResults {
                 hits = Self.dedupByRef((try? store.search(
                     space: siglip.space, kinds: searchKinds, query: q, limit: topK,
                     minScore: 0.10 * gateScale, among: within)) ?? [])
             }
-            if hits.isEmpty {
+            if hits.count < Self.tierMinResults {
                 // 结果内第三档:0.20/0.10 在命中带上悬空 → 结果内语义词恒空;
                 // 地板 0.03(结果内=点名小集合,相对排名优先,与主流程照片第三档同规),
                 // 尾部由 best×0.95 低置信尾线截断
@@ -888,12 +913,13 @@ final class SearchEngine {
         var hits = Self.dedupByRef((try? store.search(
             space: siglip.space, kinds: searchKinds, query: q, limit: topK,
             minScore: 0.25 * gateScale)) ?? [])
-        if hits.isEmpty {
+        // 降档=薄判(tierMinResults,第六十二批,与主流程阶梯同规)
+        if hits.count < Self.tierMinResults {
             hits = Self.dedupByRef((try? store.search(
                 space: siglip.space, kinds: searchKinds, query: q, limit: topK,
                 minScore: 0.15 * gateScale)) ?? [])
         }
-        if hits.isEmpty {
+        if hits.count < Self.tierMinResults {
             // 真尺度地板 0.08(与主流程照片第三档同规)
             hits = Self.dedupByRef((try? store.search(
                 space: siglip.space, kinds: searchKinds, query: q, limit: topK,

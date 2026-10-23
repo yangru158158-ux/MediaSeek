@@ -1,5 +1,5 @@
 @echo off
-rem Local logic assertions (Windows): 55 query-understanding checks + Python mirror.
+rem Local logic assertions (Windows): 64 query-understanding checks + Python mirror.
 rem Runs in seconds before pushing - no macOS CI queue (created 2026-10-23 after
 rem repeated capacity rejections on macOS runners during US peak hours).
 rem One-time deps:
@@ -20,7 +20,7 @@ set "PATH=%TC%\usr\bin;%RT%\usr\bin;%PATH%"
 set "SDKROOT=%PLAT%\Windows.platform\Developer\SDKs\Windows.sdk"
 cd /d "%~dp0.."
 
-echo == Query understanding 55 assertions (local swiftc) ==
+echo == Query understanding 64 assertions (local swiftc) ==
 swiftc -O -o "%TEMP%\mediaseek_qtest.exe" scripts\query_understanding_test.swift MediaSeek\Core\QueryUnderstanding.swift MediaSeek\Core\LabelZh.swift MediaSeek\Core\LabelZhExtra.swift
 if errorlevel 1 echo [FAIL] compile error & exit /b 1
 "%TEMP%\mediaseek_qtest.exe"
