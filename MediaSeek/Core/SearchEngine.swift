@@ -748,11 +748,12 @@ final class SearchEngine {
                 var seen = Set(hits.map(\.refKey))
                 // 第六十五批:视频帧标签通道(与主管线 runMainSearch 同构)——
                 // 帧标签与查询词有交集的视频直接命中,零幻觉、不依赖分数。
-                // 此前结果内路径没有这条通道,视频只剩 semanticHits→实据护栏
-                // 一跳:Vision 没打对应标签且帧分低于强线的视频(内容短暂出现
-                // 的形态)在结果内永远出不来。标签条目只补缺口(语义条目带真实
-                // 分排前,与 OCR 补缺口同规);照片范围不并入(视频侧数据,
-                // 与下方人名标签的照片侧同规)
+                // 此前结果内路径没有这条通道,视频只剩 semanticHits 一跳:打了
+                // 对应标签但帧分低于各档门槛的形态(结果内 0.20/0.10/0.03×gate、
+                // 全局 and:/or: 0.25/0.15/0.08×gate)出不来。「无对应标签」形态
+                // 本通道同样无解(命中前提就是标签∩),根治属挂起的相对证据
+                // 重设计。标签条目只补缺口(语义条目带真实分排前,与 OCR 补
+                // 缺口同规);照片范围不并入(视频侧数据,与下方人名标签同规)
                 if allowed.contains(.videoFrame), let rows = try? store.allVideoFrameLabels() {
                     let tokens = QueryUnderstanding.labelTokens(t)
                     if !tokens.isEmpty {
@@ -809,8 +810,11 @@ final class SearchEngine {
             var info: [String: [String]] = [:]
             for (t, list) in zip(terms, perTerm) {
                 for h in list {
+                    // 第六十五批:space=="label"(视频帧标签通道)标「帧标签」,
+                    // 与 userTag 的「标签」区分——命中方式来源不可错标(验收拦下)
                     let way = h.space == "ocr" ? "文字"
-                        : (h.space == "userTag" ? "标签" : "语义")
+                        : (h.space == "userTag" ? "标签"
+                           : (h.space == "label" ? "帧标签" : "语义"))
                     info[h.refKey, default: []].append("\(t)·\(way)")
                 }
             }
