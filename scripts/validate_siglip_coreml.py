@@ -432,7 +432,9 @@ DIST_WORDS = [
     ("电脑屏幕", "computer screen", "screen"),
     ("食物", "food", None),
     ("汽车", "car", None),
-    ("风景", "landscape scenery", "beach"),
+    # 第六十批同区间双捐后 App 对「风景」实发 landscape scenery landscape
+    # (词典 landscape scenery + 标签反查 landscape 同区间都捐)——探针跟实况
+    ("风景", "landscape scenery landscape", "beach"),
     ("微信", "wechat chat app", "screen"),
     ("地图", "map", "document"),
 ]
@@ -494,6 +496,8 @@ def mode_dist(out_json: Path):
         }
         print(f"\n性别边距(女照={gender['woman_margin']:+.4f} 男照={gender['man_margin']:+.4f};"
               f" App 过滤线 0.010 按 base 标定)")
+    else:
+        print("⚠️ 人像探针图加载失败,性别边距未产出(不阻断)")
 
     payload = {"model": MODEL_ID, "gender": gender, "rows": rows}
     out_json.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")

@@ -47,7 +47,7 @@ def english_for(core):
     """第六十批覆盖率规则逐语义复刻:逐原子词碎片匹配→长度降序贪心选区间
     (只剔严格内含,同区间多译词都留)→连接字容忍的覆盖判定(盖不满=专名不捐)
     →按位置捐出,同词全 core 全局只捐一次(验收发现曾漏更新,靠捐超集假绿)。"""
-    CONNECTIVES = set("的了与及或在是")
+    CONNECTIVES = set("的了与和及或在是")
     out = []
     seen = set()
     for term in core.split():
