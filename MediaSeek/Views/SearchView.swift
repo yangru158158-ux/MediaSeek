@@ -251,7 +251,7 @@ struct SearchView: View {
                             .font(.footnote)
                             .foregroundStyle(.secondary)
                     } else {
-                        Text(colorFilter == nil
+                        Text(colorFilter == nil && scope == .all
                              ? (refineMode
                                 ? "结果内命中 \(results.count) / 上一轮 \(lastRoundCount) 个 · \(elapsedMs) ms"
                                 : "找到 \(results.count) 个结果 · \(elapsedMs) ms")
@@ -531,6 +531,17 @@ struct SearchView: View {
         case .semantic: out = out.filter { !textHitIDs.contains($0.id) }
         }
         out = out.filter { !blockedRefs.contains($0.refKey) || revealBlocked }
+        // 第六十五批:范围标签=当前结果的活筛子(类型镜头)。此前范围只喂给
+        // 下一次提交的搜索,点了「视频」眼前结果纹丝不动——用户只能拿「视频」
+        // 当查询词去筛,而内容搜索匹配的是画面/文字不是条目类型,必然筛空。
+        // 现在点击即筛(与颜色镜头同族:筛过的可见集=下一轮「结果内」的范围,
+        // 既有语义保持);范围作为下一次提交的作用域职责不变
+        switch scope {
+        case .all: break
+        case .photo: out = out.filter { $0.kind == .photo }
+        case .video: out = out.filter { $0.kind == .videoFrame || $0.kind == .videoFrameLabel }
+        case .file: out = out.filter { $0.kind == .file || $0.kind == .fileChunk }
+        }
         guard let cf = colorFilter else { return out }
         return out.filter { $0.color == cf }
     }
@@ -743,6 +754,7 @@ struct SearchView: View {
         lastRoundCount = prev.lastCount
         textHitIDs = prev.textIDs   // 文字命中集合同步恢复,否则返回后文字维度计数错乱
         colorFilter = nil           // 返回=完整恢复上一轮画面,不清镜头会继续滤成 0(2026-10-11 用户实测"无法返回")
+        scope = .all                // 类型镜头同规清空(第六十五批):不清会继续滤,上一轮画面回不来
         resultTab = .all
     }
 

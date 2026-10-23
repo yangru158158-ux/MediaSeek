@@ -746,6 +746,29 @@ final class SearchEngine {
                 // OCR(含证件别名)命中再按连接词交并;同照片双命中时语义条目
                 // 优先(带真实分),OCR 只补缺口
                 var seen = Set(hits.map(\.refKey))
+                // 第六十五批:视频帧标签通道(与主管线 runMainSearch 同构)——
+                // 帧标签与查询词有交集的视频直接命中,零幻觉、不依赖分数。
+                // 此前结果内路径没有这条通道,视频只剩 semanticHits→实据护栏
+                // 一跳:Vision 没打对应标签且帧分低于强线的视频(内容短暂出现
+                // 的形态)在结果内永远出不来。标签条目只补缺口(语义条目带真实
+                // 分排前,与 OCR 补缺口同规);照片范围不并入(视频侧数据,
+                // 与下方人名标签的照片侧同规)
+                if allowed.contains(.videoFrame), let rows = try? store.allVideoFrameLabels() {
+                    let tokens = QueryUnderstanding.labelTokens(t)
+                    if !tokens.isEmpty {
+                        for row in rows
+                        where (within?.contains(row.refKey) ?? true) && !seen.contains(row.refKey) {
+                            let rowTokens = Set(row.title.lowercased()
+                                .components(separatedBy: CharacterSet(charactersIn: ", ")))
+                            if !tokens.intersection(rowTokens).isEmpty {
+                                seen.insert(row.refKey)
+                                hits.append(SearchHit(kind: .videoFrameLabel, refKey: row.refKey,
+                                                      frameIndex: 0, space: "label", title: row.title,
+                                                      date: nil, score: 1.0, color: nil))
+                            }
+                        }
+                    }
+                }
                 for (rank, r) in ocrUnionHits(t, scope: scope, within: within, topK: topK, classifier: classifier)
                     .filter({ allowed.contains($0.kind) })
                     .enumerated() where !seen.contains(r.refKey) {
