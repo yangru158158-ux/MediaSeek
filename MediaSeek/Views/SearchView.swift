@@ -743,8 +743,18 @@ struct SearchView: View {
         }
     }
 
-    /// 结果内搜索退回:弹出一轮历史,恢复上一次的结果/查询词/基数(可连按逐步退回)
+    /// 结果内搜索退回:一次只剥一层(第六十六批)。最里层=显示镜头(类型/颜色),
+    /// 有镜头时先只清镜头、留在本轮完整画面——植物→汽车→点「视频」→返回=
+    /// 回到汽车全集,再按一次才退回植物轮(215 用户实测:一次返回连撤两层,
+    /// 直接跳回了植物集合)。无镜头才弹历史轮次。2026-10-11「无法返回」陷阱
+    /// 依然治住:返回永远落在完整画面,绝不停在被滤过的画面上。
+    /// 文字/语义维度标签不属镜头层(历史行为=弹轮次时一并归位,无人诟病,不扩面)
     private func refineBack() {
+        if scope != .all || colorFilter != nil {
+            scope = .all
+            colorFilter = nil
+            return
+        }
         guard let prev = refineHistory.popLast() else { return }
         searching = false
         query = prev.query
@@ -753,8 +763,6 @@ struct SearchView: View {
         refineBaseIDs = prev.baseIDs
         lastRoundCount = prev.lastCount
         textHitIDs = prev.textIDs   // 文字命中集合同步恢复,否则返回后文字维度计数错乱
-        colorFilter = nil           // 返回=完整恢复上一轮画面,不清镜头会继续滤成 0(2026-10-11 用户实测"无法返回")
-        scope = .all                // 类型镜头同规清空(第六十五批):不清会继续滤,上一轮画面回不来
         resultTab = .all
     }
 
