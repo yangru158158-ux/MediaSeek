@@ -440,6 +440,41 @@ DIST_WORDS = [
 ]
 
 
+def gender_composites(images: dict) -> dict:
+    """第六十三批量测:低分段性别合成探针(纯图像合成,便于本机离线自测)。
+
+    212 设备实测:搜 woman=42 全卡在一档(≥0.261×gate),~700 张真命中躺在
+    低分段没人捞;修复方案=性别词直接下探第三档噪声地板+豁免尾线,「是不
+    是女人」交给对比边距裁决。但 0.010 过滤线是在高分段(0.10-0.14)标定的,
+    低分段边距分布从未量过——本函数合成三类低分段形态:
+      woman_distant/man_distant  风景+14% 宽人像(远景小脸)
+      woman_tiny/man_tiny        风景+8% 宽人像(树前风景照形态)
+      couple_distant             男女并排小像(合影,两性信号应相抵)
+    """
+    bg = images["beach"].convert("RGB").copy().resize((1024, 768))
+    W, H = 1024, 768
+
+    def distant(portrait: Image.Image, width_pct: float, x_pct: float) -> Image.Image:
+        canvas = bg.copy()
+        w = int(W * width_pct)
+        h = int(portrait.height * w / portrait.width)
+        canvas.paste(portrait.resize((w, h)), (int(W * x_pct) - w // 2, H - h - 40))
+        return canvas
+
+    out = {
+        "woman_distant": distant(images["woman_portrait"], 0.14, 0.5),
+        "man_distant": distant(images["man_portrait"], 0.14, 0.5),
+        "woman_tiny": distant(images["woman_portrait"], 0.08, 0.5),
+        "man_tiny": distant(images["man_portrait"], 0.08, 0.5),
+        "couple_distant": distant(images["woman_portrait"], 0.12, 0.35),
+    }
+    m = images["man_portrait"]
+    w2 = int(W * 0.12)
+    h2 = int(m.height * w2 / m.width)
+    out["couple_distant"].paste(m.resize((w2, h2)), (int(W * 0.62), H - h2 - 40))
+    return out
+
+
 def mode_dist(out_json: Path):
     import transformers
     from transformers import AutoModel, AutoProcessor
@@ -499,7 +534,45 @@ def mode_dist(out_json: Path):
     else:
         print("⚠️ 人像探针图加载失败,性别边距未产出(不阻断)")
 
-    payload = {"model": MODEL_ID, "gender": gender, "rows": rows}
+    # 第六十三批追测:低分段性别边距(gender_composites 形态说明见其 docstring)。
+    # 落带分数用 App 实发查询串——siglipQuery 对裸英文/词典英译都是
+    # "This is a photo of woman."(无冠词);对比边距用文献式串(带冠词,
+    # 与 App genderContrast 逐字一致)。判据:远景/极小女照 margin≥0.010
+    # (可召回),男照 ≤0(可排除),合影 |margin|<0.010(对比线挡住=设计)
+    lowband = {}
+    if all(k in images for k in ("woman_portrait", "man_portrait", "beach")):
+        comps = gender_composites(images)
+        qt = text_vec("This is a photo of woman.")
+        qw2, qm2 = text_vec("a photo of a woman"), text_vec("a photo of a man")
+        with torch.no_grad():
+            for tag, img in comps.items():
+                px = processor(images=img, return_tensors="pt")["pixel_values"]
+                v = model.vision_model(pixel_values=px).pooler_output[0].numpy()
+                lowband[tag] = {
+                    "woman_template": round(cos(qt, v), 4),
+                    "margin": round(cos(qw2, v) - cos(qm2, v), 4),
+                }
+        print("\n低分段性别边距(woman_template=落带分数;App 三档地板"
+              f" base 0.08/so400m 0.0696,二档 0.18/0.157):")
+        verdicts = []
+        for tag, m in lowband.items():
+            note = ""
+            if tag.startswith("woman"):
+                ok = m["margin"] >= 0.010
+                note = "可召回" if ok else "⚠️低分段女照边距不足,下探会漏真命中"
+            elif tag.startswith("man"):
+                ok = m["margin"] <= 0
+                note = "可排除" if ok else "⚠️低分段男照边距>0,下探会混入男照"
+            else:
+                ok = abs(m["margin"]) < 0.010
+                note = "合影被挡(设计如此)" if ok else "⚠️合影边距越线,会被误收"
+            verdicts.append(ok)
+            print(f"  {tag:<16} woman_template={m['woman_template']:.4f}  margin={m['margin']:+.4f}  {note}")
+        print(f"  低分段判据:{'全部成立' if all(verdicts) else '存在不成立项——下探前须解决'}")
+    else:
+        print("⚠️ 人像/风景探针缺失,低分段性别边距未产出(不阻断)")
+
+    payload = {"model": MODEL_ID, "gender": gender, "lowband": lowband, "rows": rows}
     out_json.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
     print(f"\n已写出 {out_json}")
 
