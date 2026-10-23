@@ -350,7 +350,20 @@ final class SearchEngine {
         // 噪声带分数(≥第三档地板)整批捞成「语义」命中(211 实测 96 张)。
         // 多词「或」语义:剩下的词照常走视觉;全专名时整条视觉通道跳过
         // (纯数字词同此:SigLIP 嵌数字串只有噪声,211 前靠门槛挡、如今直接不跑)
-        let semanticTerms = visualTerms.filter { !QueryUnderstanding.isProperNoun($0) }
+        let semanticTerms = visualTerms.filter { term in
+            if QueryUnderstanding.isProperNoun(term) { return false }
+            // 第六十四批人名闸(与 semanticHits 同规):零命中词命中用户标签
+            // (归组命名的名字)→ 人名。SigLIP 分不开同段人名(「管雯」「程玉婷」
+            // 的嵌入都是「中文女性人名」互相同义),语义对人名只有噪声(213 用户
+            // 实测:结果内搜管雯混入大量程玉婷);名字→脸的绑定只在标签与 OCR
+            // 文字里,这两条通道照常。判据与标签通道同一调用(searchUserTags
+            // 子串匹配)——标签通道能命中的词,语义对它只会添乱
+            if QueryUnderstanding.english(for: term) == nil,
+               !((try? store.searchUserTags(query: term)) ?? []).isEmpty {
+                return false
+            }
+            return true
+        }
         // 第六十三批性别词深潜:查询含性别词(woman/女人/美女…)时照片档直接
         // 下探第三档噪声地板并豁免尾线。一档收网对品类词是召回天花板(212 实测
         // 搜 woman=42 全卡一档,~700 张真命中躺在低分段没人捞);「是不是该性别」
@@ -882,6 +895,13 @@ final class SearchEngine {
         // 第六十二批:专名词整词跳过视觉(与主管线 semanticTerms 同规)——
         // 整词原文兜底=SigLIP 品类语义噪声带捞全库,只走文字通道
         if QueryUnderstanding.isProperNoun(term) { return [] }
+        // 第六十四批人名闸:零命中+命中用户标签=人名,跳过视觉(标签/OCR 照常;
+        // 依据与措辞见主管线 semanticTerms 注释)——无标签零命中词(财报类)
+        // 不受影响,照走多语言
+        if QueryUnderstanding.english(for: term) == nil,
+           !((try? store.searchUserTags(query: term)) ?? []).isEmpty {
+            return []
+        }
         // 第六十三批性别词深潜(与主管线 genderDive 同规):第三档地板+豁免
         // 尾线,性别裁决交给下方对比边距(低分段实测依据见主管线注释)
         let genderDive = QueryUnderstanding.genderContrast(of: term) != nil
