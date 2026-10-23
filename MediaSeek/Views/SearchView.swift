@@ -276,6 +276,10 @@ struct SearchView: View {
                             // 锁定所见集(含颜色/维度镜头):所见即所搜
                             refineBaseIDs = refineMode ? Set(visibleResults.map(\.refKey)) : []
                             lastRoundCount = refineMode ? visibleResults.count : 0
+                            // 拨动瞬间眼前结果必不是刚跑完的结果内轮——按未搜索
+                            // 口径诚实显示(第六十七批验收拦下:关→全局搜→重开后
+                            // 旧全局轮被扣「结果内命中」帽子复活)
+                            lastRoundWasRefine = false
                             if !refineMode { refineHistory.removeAll() }
                         } label: {
                             Text(refineMode ? "结果内:开" : "结果内")
@@ -403,6 +407,7 @@ struct SearchView: View {
                             refineMode = false
                             refineBaseIDs = []
                             lastRoundCount = 0
+                            lastRoundWasRefine = false   // 离场重置(第六十七批验收:不清则重跑的全局轮被扣结果内帽子)
                             runSearch()
                         } label: {
                             Text("关闭结果内,全局重搜")
@@ -909,6 +914,9 @@ struct SearchView: View {
                 if refining, hits.count > refineBaseIDs.count {
                     hits = Array(hits.prefix(refineBaseIDs.count))
                 }
+                // 帽子跟着真身走:全局轮一律摘掉「结果内命中」帽子(第六十七批
+                // 验收拦下:全局轮不清标志,重开开关后旧全局数冒充结果内命中)
+                lastRoundWasRefine = refining
                 results = hits
                 elapsedMs = ms
                 lastExecutedQuery = q
