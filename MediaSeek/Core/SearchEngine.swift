@@ -756,16 +756,22 @@ final class SearchEngine {
                 if allowed.contains(.videoFrame), let rows = try? store.allVideoFrameLabels() {
                     let tokens = QueryUnderstanding.labelTokens(t)
                     if !tokens.isEmpty {
-                        for row in rows
-                        where (within?.contains(row.refKey) ?? true) && !seen.contains(row.refKey) {
+                        // 与主管线同通道完全同构(验收拦下初版无界返回):命中数
+                        // 降序 + topK 截断——全局 and:/or: 路径 within=nil 时
+                        // 命中全库标签行也必须有界;分数=命中数(与主管线一致)
+                        var scored: [(refKey: String, title: String, matches: Int)] = []
+                        for row in rows where (within?.contains(row.refKey) ?? true) {
                             let rowTokens = Set(row.title.lowercased()
                                 .components(separatedBy: CharacterSet(charactersIn: ", ")))
-                            if !tokens.intersection(rowTokens).isEmpty {
-                                seen.insert(row.refKey)
-                                hits.append(SearchHit(kind: .videoFrameLabel, refKey: row.refKey,
-                                                      frameIndex: 0, space: "label", title: row.title,
-                                                      date: nil, score: 1.0, color: nil))
-                            }
+                            let m = tokens.intersection(rowTokens).count
+                            if m > 0 { scored.append((row.refKey, row.title, m)) }
+                        }
+                        for row in scored.sorted(by: { $0.matches > $1.matches }).prefix(topK)
+                        where !seen.contains(row.refKey) {
+                            seen.insert(row.refKey)
+                            hits.append(SearchHit(kind: .videoFrameLabel, refKey: row.refKey,
+                                                  frameIndex: 0, space: "label", title: row.title,
+                                                  date: nil, score: Float(row.matches), color: nil))
                         }
                     }
                 }
