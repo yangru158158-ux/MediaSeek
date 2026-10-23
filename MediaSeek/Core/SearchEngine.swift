@@ -351,6 +351,13 @@ final class SearchEngine {
         // 多词「或」语义:剩下的词照常走视觉;全专名时整条视觉通道跳过
         // (纯数字词同此:SigLIP 嵌数字串只有噪声,211 前靠门槛挡、如今直接不跑)
         let semanticTerms = visualTerms.filter { !QueryUnderstanding.isProperNoun($0) }
+        // 第六十三批性别词深潜:查询含性别词(woman/女人/美女…)时照片档直接
+        // 下探第三档噪声地板并豁免尾线。一档收网对品类词是召回天花板(212 实测
+        // 搜 woman=42 全卡一档,~700 张真命中躺在低分段没人捞);「是不是该性别」
+        // 交给对比边距(≥0.010)裁决。低分段可行性已双模型实测(run 39898534426
+        // dist:远景女照 margin +0.019~+0.030/男照 -0.006~-0.030/合影 +0.005~+0.006
+        // 被 0.010 挡住;中性物体历史标定 ±0.004 同样过不了线)
+        let genderDive = terms.contains { QueryUnderstanding.genderOpposite(of: $0) != nil }
 
         let imageKinds: [ItemKind] = scope == .all ? [.photo, .videoFrame]
             : (scope == .photo ? [.photo] : (scope == .video ? [.videoFrame] : []))
@@ -421,6 +428,14 @@ final class SearchEngine {
             // 照片与视频帧分开走各自的门槛阶梯:分数分布不同,且照片行为已验收冻结
             var hits: [SearchHit] = []
             if imageKinds.contains(.photo) {
+                if genderDive {
+                    // 深潜:第三档地板直取(阶梯与薄判都不适用——品类词要的是
+                    // 全量召回,质量裁决交给下方性别对比线)
+                    let floor: Float = (among != nil ? 0.03 : 0.08) * gate
+                    hits = Self.dedupByRef(try store.search(
+                        space: siglip.space, kinds: [.photo], query: q, limit: topK,
+                        minScore: floor, among: among))
+                } else {
                 let floor: Float = (semanticOnly ? 0.25 : 0.30) * gate
                 hits = Self.dedupByRef(try store.search(
                     space: siglip.space, kinds: [.photo], query: q, limit: topK,
@@ -441,6 +456,7 @@ final class SearchEngine {
                     hits = Self.dedupByRef(try store.search(
                         space: siglip.space, kinds: [.photo], query: q, limit: topK,
                         minScore: floor, among: among))
+                }
                 }
             }
             if imageKinds.contains(.videoFrame) {
@@ -496,8 +512,12 @@ final class SearchEngine {
             // 人像/风景基线噪声(同一张海景人像 马尔代夫0.09/护照0.12/身份证0.12),
             // 此时尾线收到 best×0.95 只留贴近最佳的一小撮,不灌整屏
             let best = hits.first?.score ?? 0
-            let tailFactor: Float = best >= 0.13 * gate ? 0.85 : 0.95
-            channels.append((1.0, best > 0 ? hits.filter { $0.score >= best * tailFactor } : hits))
+            // 性别词深潜豁免尾线(第六十三批):尾线以最佳分为基准,最佳 0.35 时
+            // 85% 线=0.298,下探捞回的低分段真命中会被一刀全砍,深潜白做;
+            // 性别词的噪声闸=对比边距(0.010),尾线职责由它接管
+            let tailFactor: Float = genderDive ? 0 : (best >= 0.13 * gate ? 0.85 : 0.95)
+            channels.append((1.0, best > 0 && tailFactor > 0
+                ? hits.filter { $0.score >= best * tailFactor } : hits))
         }
 
         // 用户标签通道:中文子串精确匹配(文字: 排他,不参与)
@@ -862,6 +882,9 @@ final class SearchEngine {
         // 第六十二批:专名词整词跳过视觉(与主管线 semanticTerms 同规)——
         // 整词原文兜底=SigLIP 品类语义噪声带捞全库,只走文字通道
         if QueryUnderstanding.isProperNoun(term) { return [] }
+        // 第六十三批性别词深潜(与主管线 genderDive 同规):第三档地板+豁免
+        // 尾线,性别裁决交给下方对比边距(低分段实测依据见主管线注释)
+        let genderDive = QueryUnderstanding.genderContrast(of: term) != nil
         guard let q = try? siglip.embedQuery(Self.siglipQuery(term)) else { return [] }
         // 第三十九批:按范围取 kinds(与主管线 imageKinds 同构,.file→[] 空)——
         // 此前全部写死 [.photo],视频范围下视频帧向量从不被查询
@@ -871,7 +894,14 @@ final class SearchEngine {
         // 否则全局排名的尾部截断会在取交集前把候选砍光(「行情图 ∩ 语义:电脑屏幕=0」事故:
         // 全库最高分是实拍屏幕,行情截图全被 85% 线砍掉,交集自然为空)
         if let within, !within.isEmpty {
-            var hits = Self.dedupByRef((try? store.search(
+            var hits: [SearchHit]
+            if genderDive {
+                // 深潜:结果内第三档地板直取(0.03),性别裁决交对比边距
+                hits = Self.dedupByRef((try? store.search(
+                    space: siglip.space, kinds: searchKinds, query: q, limit: topK,
+                    minScore: 0.03 * gateScale, among: within)) ?? [])
+            } else {
+            hits = Self.dedupByRef((try? store.search(
                 space: siglip.space, kinds: searchKinds, query: q, limit: topK,
                 minScore: 0.20 * gateScale, among: within)) ?? [])
             // 降档=薄判(tierMinResults,第六十二批,与主流程阶梯同规)
@@ -888,8 +918,10 @@ final class SearchEngine {
                     space: siglip.space, kinds: searchKinds, query: q, limit: topK,
                     minScore: 0.03 * gateScale, among: within)) ?? [])
             }
+            }
             let best = hits.first?.score ?? 0
-            if best > 0 { hits = hits.filter { $0.score >= best * 0.85 } }
+            // 深潜豁免尾线(低分段真命中会被 best×0.85 一刀砍光,与主管线同规)
+            if best > 0, !genderDive { hits = hits.filter { $0.score >= best * 0.85 } }
             // 第五十批:性别词对比过滤(结果内同规,见 QueryUnderstanding.genderOpposites;
             // 第五十五批:对比串=文献标准形式,正反向对称打分,线 0.010 见标定注释)
             if let pair = QueryUnderstanding.genderContrast(of: term),
@@ -910,7 +942,14 @@ final class SearchEngine {
             }
             return videoFrameGuard(hits, term: term, gateScale: gateScale)
         }
-        var hits = Self.dedupByRef((try? store.search(
+        var hits: [SearchHit]
+        if genderDive {
+            // 深潜:第三档地板直取(0.08),性别裁决交对比边距
+            hits = Self.dedupByRef((try? store.search(
+                space: siglip.space, kinds: searchKinds, query: q, limit: topK,
+                minScore: 0.08 * gateScale)) ?? [])
+        } else {
+        hits = Self.dedupByRef((try? store.search(
             space: siglip.space, kinds: searchKinds, query: q, limit: topK,
             minScore: 0.25 * gateScale)) ?? [])
         // 降档=薄判(tierMinResults,第六十二批,与主流程阶梯同规)
@@ -925,9 +964,13 @@ final class SearchEngine {
                 space: siglip.space, kinds: searchKinds, query: q, limit: topK,
                 minScore: 0.08 * gateScale)) ?? [])
         }
+        }
         let best = hits.first?.score ?? 0
-        // 低置信收紧与主流程同规:最佳 <0.13 = 无真匹配,只留贴近最佳的一小撮
-        if best > 0 { hits = hits.filter { $0.score >= best * (best >= 0.13 * gateScale ? 0.85 : 0.95) } }
+        // 低置信收紧与主流程同规:最佳 <0.13 = 无真匹配,只留贴近最佳的一小撮;
+        // 深潜豁免(性别词的噪声闸=对比边距,与主管线同规)
+        if best > 0, !genderDive {
+            hits = hits.filter { $0.score >= best * (best >= 0.13 * gateScale ? 0.85 : 0.95) }
+        }
         // 第五十批:性别词对比过滤(与主管线视觉通道同规;第五十五批:对比串
         // =文献标准「a photo of a woman/man」形式+正反向对称打分+线0.010,
         // 真实照片标定见 QueryUnderstanding.genderEnglish 注释)
