@@ -210,4 +210,31 @@ fail_pn = [zh for zh, _ in DICTIONARY if is_proper_noun(zh)] \
 expect(not fail_pn, f"词条自身被判专名(覆盖评估回归): {fail_pn[:5]}")
 print(f"专名不变量: 词典 {len(DICTIONARY)} 条 + 反查 {len(EN_FROM_ZH)} 词 全部非专名")
 
+# ---- 第六十九批:英文证件桥对拍(与 Swift 断言同集,表从源码解析) ----
+cc_block = QU.split("static let chineseCounterparts: [String: String] = [", 1)[1]
+COUNTERPARTS = dict(re.findall(r'"([^"]+)":\s*"([^"]+)"', cc_block.split("\n    ]", 1)[0]))
+al_block = QU.split("static let ocrAliases: [String: [String]] = [", 1)[1]
+al_block = al_block.split("\n    ]", 1)[0]
+OCR_ALIASES = {k: re.findall(r'"([^"]+)"', vals)
+               for k, vals in re.findall(r'"([^"]+)":\s*\[([^\]]*)\]', al_block)}
+expect(COUNTERPARTS.get("id") == "身份证" and COUNTERPARTS.get("ID") is None,
+       "镜像口径:表键全小写,id→身份证(大小写归一在函数层)")
+expect(COUNTERPARTS.get("identity card") == "身份证"
+    and COUNTERPARTS.get("identity document") == "身份证",
+       "identity 族短语键在表")
+expect(COUNTERPARTS.get("passport") == "护照", "passport→护照")
+expect("licence" not in COUNTERPARTS and "license" not in COUNTERPARTS
+    and "driving" not in COUNTERPARTS and "card" not in COUNTERPARTS,
+       "已验证可自走的英文词不入表(218 实测 licence/driving license 不桥)")
+def bridged_variants(term):
+    zh = COUNTERPARTS.get(term.lower().strip())
+    return [zh] + OCR_ALIASES.get(zh, []) if zh else []
+expect(bridged_variants("identity") == ["身份证", "公民身份", "居民身份证", "签发机关", "身份證"],
+       "bridgedVariants(identity)=身份证+全部别名(含繁体)")
+expect(bridged_variants("beach") == [], "表外词零追加")
+expect(OCR_ALIASES.get("驾照") == OCR_ALIASES.get("驾驶证"),
+       "驾照/驾驶证别名同表(兄弟缺口已补)")
+expect(dict(DICTIONARY).get("护照") == "passport", "护照词典对已补(语义模板)")
+print(f"证件桥: 表 {len(COUNTERPARTS)} 键 / 别名 {len(OCR_ALIASES)} 组 对拍一致")
+
 print("PASS: 镜像全绿(词典", len(DICTIONARY), "条/标签", len(ZH), "词/泛化", len(GENERIC), "个)")

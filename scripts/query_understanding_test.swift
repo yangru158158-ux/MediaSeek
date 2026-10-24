@@ -196,6 +196,39 @@ enum QueryUnderstandingTest {
         expect(QueryUnderstanding.isDictionaryUnknown("华研机器人") == false,
                "华研机器人=专名(盖不满),不是零命中(批 62 专名闸已管)")
 
+        // —— 第六十九批:英文→中文证件桥(纯加法) ——
+        expect(QueryUnderstanding.chineseCounterpart(for: "id") == "身份证"
+            && QueryUnderstanding.chineseCounterpart(for: "ID") == "身份证"
+            && QueryUnderstanding.chineseCounterpart(for: "iD") == "身份证",
+               "裸词 id(不分大小写)→身份证:外国人缩写词,218 用户点名")
+        expect(QueryUnderstanding.chineseCounterpart(for: "identity") == "身份证"
+            && QueryUnderstanding.chineseCounterpart(for: "Identity Card") == "身份证"
+            && QueryUnderstanding.chineseCounterpart(for: "identity document") == "身份证"
+            && QueryUnderstanding.chineseCounterpart(for: "id card") == "身份证",
+               "identity 族四个变体→身份证(整短语键,拆词后单词只有 identity/id 命中)")
+        expect(QueryUnderstanding.chineseCounterpart(for: "passport") == "护照",
+               "passport→护照(文字变体追加 passport/签发国,原 %passport% 匹配不动)")
+        expect(QueryUnderstanding.chineseCounterpart(for: "Driver License") == "驾照"
+            && QueryUnderstanding.chineseCounterpart(for: "driving license") == "驾照"
+            && QueryUnderstanding.chineseCounterpart(for: "driver's license") == "驾照",
+               "驾驶照三拼写→驾照")
+        expect(QueryUnderstanding.chineseCounterpart(for: "licence") == nil
+            && QueryUnderstanding.chineseCounterpart(for: "license") == nil
+            && QueryUnderstanding.chineseCounterpart(for: "driving") == nil
+            && QueryUnderstanding.chineseCounterpart(for: "card") == nil,
+               "licence/license/driving/card 不在表内:218 实测 licence 语义与 driving license 逐词匹配已对,桥了反而窄化")
+        let idv = QueryUnderstanding.bridgedVariants(for: "identity")
+        expect(!idv.filter { ["身份证", "公民身份", "居民身份证", "签发机关", "身份證"].contains($0) }.isEmpty
+            && idv.count == 5,
+               "bridgedVariants(identity)=[身份证]+全部别名(含繁体身份證,港证中文侧)")
+        expect(QueryUnderstanding.bridgedVariants(for: "beach") == []
+            && QueryUnderstanding.bridgedVariants(for: "id card").count == 5,
+               "表外词返回空(原匹配零改动);表内短语同样拿到身份证别名")
+        expect(QueryUnderstanding.english(for: "护照") == "passport",
+               "护照词典对补齐:中文查询语义模板从裸多语言升级为 passport(第六十九批)")
+        expect((QueryUnderstanding.ocrAliases["驾照"] ?? []) == (QueryUnderstanding.ocrAliases["驾驶证"] ?? []),
+               "驾照与驾驶证别名同表:此前只有驾驶证有,输驾照漏别名(兄弟缺口)")
+
         // —— 第五十五批:性别对比串=文献标准形式(CVPR 2025 口径,带冠词小写) ——
         if let pair = QueryUnderstanding.genderContrast(of: "女人") {
             expect(pair.fwd == "a photo of a woman" && pair.opp == "a photo of a man",
@@ -245,7 +278,7 @@ enum QueryUnderstandingTest {
         expect(passCn == zhToEns.count,
                "全量 \(zhToEns.count) 个中文词反查全部命中标签通道")
 
-        // 断言数口径:全文 expect 调用 70 项(另含 1 行函数定义)
-        print("PASS: 查询理解 70 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词穷尽)")
+        // 断言数口径:全文 expect 调用 79 项(另含 1 行函数定义)
+        print("PASS: 查询理解 79 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词穷尽)")
     }
 }

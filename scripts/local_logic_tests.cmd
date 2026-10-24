@@ -1,5 +1,5 @@
 @echo off
-rem Local logic assertions (Windows): 64 query-understanding checks + Python mirror.
+rem Local logic assertions (Windows): 79 query-understanding checks + Python mirror.
 rem Runs in seconds before pushing - no macOS CI queue (created 2026-10-23 after
 rem repeated capacity rejections on macOS runners during US peak hours).
 rem One-time deps:

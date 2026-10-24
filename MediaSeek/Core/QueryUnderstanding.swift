@@ -283,14 +283,44 @@ enum QueryUnderstanding {
     }
 
     /// 证件类 OCR 别名:人像面不印证件名(身份证正面只有「公民身份号码」「姓名」等字段),
-    /// 只搜证件名会漏掉全部正面照——补字段级别名供文字通道并集保召回
+    /// 只搜证件名会漏掉全部正面照——补字段级别名供文字通道并集保召回。
+    /// 「身份證」繁体变体:香港身份证印的是繁体+英文(HONG KONG IDENTITY CARD),
+    /// 简体「身份证」子串对不上,不补则中文查询漏掉全部港证(第六十九批)
     static let ocrAliases: [String: [String]] = [
-        "身份证": ["公民身份", "居民身份证", "签发机关"],
+        "身份证": ["公民身份", "居民身份证", "签发机关", "身份證"],
         "护照": ["passport", "签发国"],
         "驾驶证": ["准驾车型", "机动车驾驶证"],
+        "驾照": ["准驾车型", "机动车驾驶证"],
         "港澳通行证": ["往来港澳"],
         "户口": ["户号", "户主"],
     ]
+
+    /// 第六十九批:英文→中文证件桥(纯加法,不做查询级改写)。外国用户输英文
+    /// 找中国大陆证件时两路皆断:文字通道缺别名(大陆证件只印中文,OCR 里没有
+    /// 英文),语义缺证件类第三档豁免(证件照 SigLIP 只有 0.10-0.12,过不了
+    /// 上两档)。桥到中文对应词后,ocrAliases 并集与 floorTierPermitted 豁免
+    /// 都接上。⚠️ 不改写查询的原因:香港身份证靠 OCR 文本里的英文 "identity"
+    /// 命中(218 用户实测 identity card/identity/passport 文字通道全对),换成
+    /// 简体中文词会把这些已验收命中改丢——所以只在通道层「追加减式」。
+    /// licence/license 这类自己能走通的英文词故意不在表里:桥成驾照会把
+    /// 「各种证件」的语义召回窄化成驾驶照(218 用户实测 licence 语义全对)
+    static let chineseCounterparts: [String: String] = [
+        "id": "身份证", "identity": "身份证",
+        "id card": "身份证", "identity card": "身份证", "identity document": "身份证",
+        "passport": "护照",
+        "driver license": "驾照", "driving license": "驾照", "driver's license": "驾照",
+    ]
+
+    /// 英文词的中文对应证件词(大小写/首尾空白不敏感);非表内词返回 nil 走原路
+    static func chineseCounterpart(for term: String) -> String? {
+        chineseCounterparts[term.lowercased().trimmingCharacters(in: .whitespaces)]
+    }
+
+    /// 桥接追加的文字变体 = [中文对应词] + 其 OCR 别名;表外词返回空(原匹配零改动)
+    static func bridgedVariants(for term: String) -> [String] {
+        guard let zh = chineseCounterpart(for: term) else { return [] }
+        return [zh] + (ocrAliases[zh] ?? [])
+    }
 
     /// 英文同义扩展:标签是 woman、查询是 girl 时精确匹配会漏,必须互相打通。
     /// 下划线标签(blue_sky/printed_page 等)是独立 token,与近义标签互相桥接
@@ -397,6 +427,9 @@ enum QueryUnderstanding {
         // 证件/文书(同时带上 document 词,便于命中文档类标签)
         ("证件", "id card"), ("证件照", "id portrait"),
         ("身份证", "id card"), ("驾照", "driver license document"),
+        // 第六十九批:护照此前无词典对,中文查询走裸多语言嵌入——补 passport
+        // 模板(与 ocrAliases 的护照条目、英文桥三处同族)
+        ("护照", "passport"),
         ("文件", "document"), ("文字", "text document"), ("pdf", "document"),
         ("网页", "website screenshot"), ("聊天记录", "chat messages screenshot"),
         ("聊天", "chat conversation messages"), ("对话", "chat conversation messages"),

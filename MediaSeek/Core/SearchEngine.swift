@@ -497,7 +497,10 @@ final class SearchEngine {
                     let probeTerms = terms.isEmpty ? [query] : terms
                     if Self.floorTierPermitted(
                         among: among, semanticOnly: semanticOnly, upperTierEmpty: hits.isEmpty,
-                        aliasExempt: probeTerms.contains { QueryUnderstanding.ocrAliases[$0] != nil },
+                        aliasExempt: probeTerms.contains {
+                            QueryUnderstanding.ocrAliases[$0] != nil
+                                || QueryUnderstanding.chineseCounterpart(for: $0) != nil
+                        },
                         textCovered: !semanticOnly && probeTerms.contains {
                             !((try? store.searchOCR(query: $0)) ?? []).isEmpty }) {
                         hits = Self.dedupByRef(try store.search(
@@ -659,7 +662,10 @@ final class SearchEngine {
             for t in ocrTerms where !t.isEmpty {
                 // 证件类 OCR 别名:人像面不印证件名(身份证正面只有「公民身份号码」等字段),
                 // 只搜证件名会漏掉全部正面照——补字段级别名并集保召回
+                // 第六十九批英文证件桥(纯加法):表内英文词追加中文对应词+别名,
+                // 原词匹配不动——大陆证件只印中文,不追加则英文查询漏全部大陆证件
                 let variants = [t] + (QueryUnderstanding.ocrAliases[t] ?? [])
+                    + QueryUnderstanding.bridgedVariants(for: t)
                 for term in variants {
                 let rows = (try? store.searchOCR(query: term)) ?? []
                 let kinds = classifier.classify(rows.map(\.refKey))
@@ -881,7 +887,9 @@ final class SearchEngine {
         -> [(kind: ItemKind, refKey: String, text: String)] {
         var out: [(kind: ItemKind, refKey: String, text: String)] = []
         var seen = Set<String>()
-        for term in [t] + (QueryUnderstanding.ocrAliases[t] ?? []) {
+        // 第六十九批:英文证件桥同规(主管线 OCR 通道注释)——纯加法
+        for term in [t] + (QueryUnderstanding.ocrAliases[t] ?? [])
+            + QueryUnderstanding.bridgedVariants(for: t) {
             let rows: [(String, String)]
             if let among = within {
                 rows = ((try? store.searchOCR(query: term, among: Array(among))) ?? [])
@@ -939,6 +947,13 @@ final class SearchEngine {
     /// 现有门槛按单模板分布标定——要上必须先在设备上 A/B 单独验证
     private static func siglipQuery(_ concept: String) -> String {
         if let en = QueryUnderstanding.english(for: concept) {
+            return "This is a photo of \(en)."
+        }
+        // 第六十九批英文证件桥:表内词(id/identity→身份证 族)套对应词的
+        // 词典英文——身份证族统一 "id card" 模板,比裸 "identity"/"id" 的
+        // 弱嵌入强(218 实测裸 id 语义 15 条全是噪声)
+        if let zh = QueryUnderstanding.chineseCounterpart(for: concept),
+           let en = QueryUnderstanding.english(for: zh) {
             return "This is a photo of \(en)."
         }
         // 第四十四批:裸英文单词/短语(词典没收的,如直接打 woman/man/beach)
@@ -1050,10 +1065,12 @@ final class SearchEngine {
         if hits.count < Self.tierMinResults,
            // 第六十八批:改反空兜底(与主流程照片第三档同规,判据见
            // floorTierPermitted);and:/or: 每词必并 OCR 命中(第十六批),
-           // 文字覆盖探测与该通道同源
+           // 文字覆盖探测与该通道同源。第六十九批:表内英文证件词经桥
+           // 享有与中文证件类同等的第三档豁免
            Self.floorTierPermitted(
                among: nil, semanticOnly: false, upperTierEmpty: hits.isEmpty,
-               aliasExempt: QueryUnderstanding.ocrAliases[term] != nil,
+               aliasExempt: QueryUnderstanding.ocrAliases[term] != nil
+                   || QueryUnderstanding.chineseCounterpart(for: term) != nil,
                textCovered: !((try? store.searchOCR(query: term)) ?? []).isEmpty) {
             // 真尺度地板 0.08(与主流程照片第三档同规)
             hits = Self.dedupByRef((try? store.search(
