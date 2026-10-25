@@ -344,6 +344,20 @@ struct SettingsView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
+            // 第七十批:索引速度——精准(默认,OCR 2048px,远景小字优先) /
+            // 极速(1280px,像素量约降 2.5 倍,截图证件大字几乎无损)。
+            // 对已索引内容需「全量重建索引」才按新分辨率重做
+            Toggle(isOn: Binding(
+                get: { !app.indexing.ocrFastMode },
+                set: { app.indexing.ocrFastMode = !$0 })) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("精准 OCR(文字识别优先)")
+                    Text(app.indexing.ocrFastMode
+                         ? "极速:1280px,大字几乎无损,远景小字可能漏"
+                         : "默认:2048px,拍屏角度/小字也尽量认出")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
             Toggle(isOn: Binding(
                 get: { UserDefaults.standard.bool(forKey: "speechEnabled") },
                 set: { UserDefaults.standard.set($0, forKey: "speechEnabled") })) {

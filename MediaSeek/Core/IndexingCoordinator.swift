@@ -12,7 +12,7 @@ import UniformTypeIdentifiers
 @MainActor
 final class IndexingCoordinator: ObservableObject {
     enum Phase: Equatable {
-        case idle, waitingModel, photos, videos, faces, files, speech, done, failed(String)
+        case idle, waitingModel, fastScan, photos, videos, faces, files, speech, done, failed(String)
     }
 
     @Published private(set) var phase: Phase = .idle
@@ -22,6 +22,12 @@ final class IndexingCoordinator: ObservableObject {
     @Published private(set) var errorCount = 0
     @Published private(set) var firstErrorMessage: String?
     @Published private(set) var lastSyncAt: Date?
+    /// 第七十批:快扫进度独立计数——同一批照片快扫+富集各过一遍,共用
+    /// processed/total 会让进度翻倍;快扫自己的 n/N 进相位文案展示
+    @Published private(set) var fastScanDone = 0
+    @Published private(set) var fastScanTotal = 0
+    /// 第七十批:照片富集分段计时摘要(每 50 张刷新,装机验证提速用)
+    @Published private(set) var stageNote = ""
 
     /// 跨并发记录第一个处理错误(线程安全)
     final class FirstErrorBox: @unchecked Sendable {
@@ -38,9 +44,40 @@ final class IndexingCoordinator: ObservableObject {
         }
     }
 
+    /// 第七十批:分段计时盒(取图/OCR/嵌入/标签/人脸 各段毫秒累计,线程安全)。
+    /// 索引 3 小时的账要装机可对——瓶颈定位从「猜」变「读」
+    final class StageTiming: @unchecked Sendable {
+        private let lock = NSLock()
+        private var ms: [String: Double] = [:]
+        private var n = 0
+        func add(_ key: String, _ seconds: Double) {
+            lock.lock(); ms[key, default: 0] += seconds * 1000; lock.unlock()
+        }
+        func tick() -> (n: Int, summary: String) {
+            lock.lock(); defer { lock.unlock() }
+            n += 1
+            func avg(_ k: String) -> String {
+                ms[k].map { String(format: "%.0f", $0 / Double(max(n, 1))) } ?? "0"
+            }
+            return (n, "取图\(avg("fetch"))ms·OCR\(avg("ocr"))ms·嵌入\(avg("embed"))ms·标签\(avg("labels"))ms·人脸\(avg("faces"))ms/张")
+        }
+    }
+
     var videoFramesPerVideo: Int {
         get { UserDefaults.standard.object(forKey: "videoFrames") as? Int ?? 3 }
         set { UserDefaults.standard.set(newValue, forKey: "videoFrames") }
+    }
+
+    /// 第七十批:索引速度。「精准」(默认)=OCR/抽帧 2048px,远景小字召回优先;
+    /// 「极速」=1280px,OCR 像素量降约 2.5 倍,截图/证件大字几乎无损。
+    /// 用户拍板默认精准(2026-10-25);切换后对已索引内容要「全量重建索引」生效
+    var ocrFastMode: Bool {
+        get { UserDefaults.standard.object(forKey: "ocrFastMode") as? Bool ?? false }
+        set { UserDefaults.standard.set(newValue, forKey: "ocrFastMode") }
+    }
+    /// OCR/抽帧分辨率(照片取图与视频抽帧共用;嵌入仍固定 320 降采样)
+    nonisolated static var ocrMaxPixel: CGFloat {
+        (UserDefaults.standard.object(forKey: "ocrFastMode") as? Bool ?? false) ? 1280 : 2048
     }
 
     /// 中文语义标签(Vision+Gemma):增强中文物体查询,但每张照片多两次推理,慢 2-3 倍
@@ -79,7 +116,9 @@ final class IndexingCoordinator: ObservableObject {
         switch phase {
         case .idle: return "未开始"
         case .waitingModel: return "等待模型加载…"
-        case .photos: return "正在索引照片"
+        case .fastScan:
+            return "快扫语义索引 \(fastScanDone)/\(fastScanTotal)(已可搜)"
+        case .photos: return "正在索引照片" + (stageNote.isEmpty ? "" : " · \(stageNote)")
         case .videos: return "正在索引视频"
         case .faces: return "正在补人脸数据"
         case .files: return "正在索引文件"
@@ -122,6 +161,9 @@ final class IndexingCoordinator: ObservableObject {
         total = 0
         errorCount = 0
         firstErrorMessage = nil
+        fastScanDone = 0
+        fastScanTotal = 0
+        stageNote = ""
         phase = models.bothReady ? .photos : .waitingModel
         // 重建期间禁止自动锁屏:保持前台+插电即可连续索引(iOS 后台会冻结 App)
         UIApplication.shared.isIdleTimerDisabled = true
@@ -290,13 +332,70 @@ final class IndexingCoordinator: ObservableObject {
         try store.removeRefs(kinds: [.photo, .photoLabel, .userTag, .videoFrame, .videoFrameLabel, .face], notIn: libIDs)
 
         total += newPhotos.count + newVideos.count + faceBackfill.count
-        // 视频量级小先处理:几分钟后即可被「视频」范围搜到,不必等全部照片
-        phase = .videos
-        for asset in newVideos {
+        // 第七十批·两阶段索引:先全库快扫(640px 取图 + SigLIP 嵌入 + 颜色),
+        // 单张 <0.1s、并发 4 路——1 万张约十来分钟,全部「语义可搜」;
+        // OCR/标签/人脸由随后的富集(原全量管线)补齐,中途停止也不丢:
+        // 快扫不写 OCR 行,「缺 OCR 自愈」下一轮自动接力(中断可续)。
+        // 取图 640px 而非 2048:解码像素量降约 10 倍,嵌入只需 320——快扫的
+        // 唯一职责是让向量先落库,精度活全部留给富集阶段
+        if !newPhotos.isEmpty, let clip = models.siglip {
+            phase = .fastScan
+            fastScanDone = 0
+            fastScanTotal = newPhotos.count
+            let fstore = self.store
+            let fphoto = self.photo
+            var fastAbort: String? = nil
+            await withTaskGroup(of: Int.self) { group in
+                var index = 0
+                let maxConcurrent = 4
+                while index < min(maxConcurrent, newPhotos.count) {
+                    let asset = newPhotos[index]; index += 1
+                    group.addTask { await Self.fastScanWork(
+                        asset: asset, photo: fphoto, store: fstore, clip: clip, errors: errors) }
+                }
+                while !group.isEmpty {
+                    let fails = await group.next() ?? 0
+                    errorCount += fails
+                    fastScanDone += 1
+                    if fails > 0, firstErrorMessage == nil {
+                        firstErrorMessage = errors.get()
+                    }
+                    if errorCount >= 20, let msg = errors.get() {
+                        fastAbort = "快扫连续失败已停止:\(msg)"
+                        break
+                    }
+                    if Task.isCancelled { break }
+                    if index < newPhotos.count {
+                        let asset = newPhotos[index]; index += 1
+                        group.addTask { await Self.fastScanWork(
+                            asset: asset, photo: fphoto, store: fstore, clip: clip, errors: errors) }
+                    }
+                }
+            }
+            if let fastAbort { throw MSError(fastAbort) }
             try Task.checkCancellation()
-            await embedVideo(asset, errors: errors)
-            processedLocal += 1
-            processed = processedLocal
+        }
+        // 视频量级小先处理:几分钟后即可被「视频」范围搜到,不必等全部照片。
+        // 第七十批:串行→2 路并发——抽帧/解码(CPU)与嵌入/OCR(ANE/Vision)
+        // 错峰重叠,视频段约快一倍
+        phase = .videos
+        await withTaskGroup(of: Int.self) { group in
+            var index = 0
+            let maxConcurrent = 2
+            while index < min(maxConcurrent, newVideos.count) {
+                let asset = newVideos[index]; index += 1
+                group.addTask { await self.embedVideo(asset, errors: errors); return 0 }
+            }
+            while !group.isEmpty {
+                _ = await group.next()
+                processedLocal += 1
+                processed = processedLocal
+                if Task.isCancelled { break }
+                if index < newVideos.count {
+                    let asset = newVideos[index]; index += 1
+                    group.addTask { await self.embedVideo(asset, errors: errors); return 0 }
+                }
+            }
         }
         // 人脸补全先于新照片:人物归组数据尽早可用,且与照片全量嵌入互不阻塞
         if !faceBackfill.isEmpty, let faceEmbedder {
@@ -335,28 +434,34 @@ final class IndexingCoordinator: ObservableObject {
             if let faceAbort { throw MSError(faceAbort) }
         }
         phase = .photos
-        // 双路并发:解码/下载与 ANE 推理流水线重叠
+        // 第七十批:并发 2→4(OCR/Vision 吃 CPU+GPU,嵌入走 ANE,错峰重叠),
+        // 并挂分段计时——每 50 张把「取图/OCR/嵌入/标签/人脸 毫秒均摊」
+        // 刷进相位文案,装机实测提速有账可对
         let useLabels = chineseLabels
         let clip = models.siglip
         let gemma = models.gemma
         let face = models.face
         let store = self.store
         let photo = self.photo
+        let timing = StageTiming()
         var abortReason: String? = nil
         await withTaskGroup(of: Int.self) { group in
             var index = 0
-            let maxConcurrent = 2
+            let maxConcurrent = 4
             while index < min(maxConcurrent, newPhotos.count) {
                 let asset = newPhotos[index]; index += 1
                 group.addTask { await Self.embedPhotoWork(
                     asset: asset, photo: photo, store: store,
-                    clip: clip, gemma: gemma, face: face, useLabels: useLabels, errors: errors) }
+                    clip: clip, gemma: gemma, face: face, useLabels: useLabels,
+                    errors: errors, timing: timing) }
             }
             while !group.isEmpty {
                 let fails = await group.next() ?? 0
                 errorCount += fails
                 processedLocal += 1
                 if processedLocal % 5 == 0 { processed = processedLocal }
+                let (n, sum) = timing.tick()
+                if n % 50 == 0 { stageNote = sum }
                 if fails > 0, firstErrorMessage == nil {
                     firstErrorMessage = errors.get()
                 }
@@ -370,7 +475,8 @@ final class IndexingCoordinator: ObservableObject {
                     let asset = newPhotos[index]; index += 1
                     group.addTask { await Self.embedPhotoWork(
                         asset: asset, photo: photo, store: store,
-                        clip: clip, gemma: gemma, face: face, useLabels: useLabels, errors: errors) }
+                        clip: clip, gemma: gemma, face: face, useLabels: useLabels,
+                        errors: errors, timing: timing) }
                 }
             }
         }
@@ -517,47 +623,82 @@ final class IndexingCoordinator: ObservableObject {
     nonisolated private static func embedPhotoWork(
         asset: PHAsset, photo: PhotoLibraryService, store: VectorStore,
         clip: SigLIPEmbedder?, gemma: GemmaTextEmbedder?, face: FaceEmbedder?,
-        useLabels: Bool, errors: FirstErrorBox) async -> Int {
+        useLabels: Bool, errors: FirstErrorBox, timing: StageTiming? = nil) async -> Int {
         guard let clip, let gemma else { return 0 }
         do {
-            // 2048px 用于 OCR 文字识别(拍屏角度/小字也尽量认出);320px 用于嵌入向量
-            guard let full = try await photo.image(for: asset, maxPixel: 2048) else {
+            // 取图分辨率挂「索引速度」设置:精准 2048(默认)/极速 1280(第七十批);
+            // 320px 用于嵌入向量,OCR 用原图
+            let t0 = CFAbsoluteTimeGetCurrent()
+            guard let full = try await photo.image(for: asset, maxPixel: Self.ocrMaxPixel) else {
                 errors.set("取图失败(可能 iCloud 未下载或存储空间不足):\(asset.localIdentifier)")
                 return 1
             }
+            timing?.add("fetch", CFAbsoluteTimeGetCurrent() - t0)
             try Task.checkCancellation()   // 取消:取图后立即中断
+            let t1 = CFAbsoluteTimeGetCurrent()
             guard let small = Self.downscaled(full, to: 320) else {
                 errors.set("图像降采样失败:\(asset.localIdentifier)")
                 return 1
             }
             let colorBucket = PhotoColor.bucket(of: small)
             let vec = try clip.embedImage(small)
+            timing?.add("embed", CFAbsoluteTimeGetCurrent() - t1) // 嵌入段含降采样,量级可忽略
             try store.upsert(kind: .photo, refKey: asset.localIdentifier, space: clip.space,
                              vector: vec, title: nil, date: asset.creationDate, color: colorBucket)
 
             // OCR 文字层:屏幕文字/证件名/编号可被精确检索
             // 无文字也写 "" 占位行:增量同步靠「缺 OCR 行」识别待补照片,
             // 没有占位的话风景照等无字照片会被每轮反复重处理
+            let t2 = CFAbsoluteTimeGetCurrent()
             let ocr = Self.recognizeText(in: full)
+            timing?.add("ocr", CFAbsoluteTimeGetCurrent() - t2)
             try store.saveOCR(refKey: asset.localIdentifier, text: ocr ?? "")
 
             // 人脸层:检测+对齐+身份向量(人物归组数据源);模型未装则跳过且不记账。
             // 截图(聊天记录/转账/菜单)不做人脸索引——截图里的头像/小脸是「打印脸」
             // 巨簇的污染源(154 用户实测鱼龙混杂组的主体),iOS 原生 photoScreenshot
             // 标记直接排除;截图走 OCR 文字检索,不需要人脸身份
+            let t3 = CFAbsoluteTimeGetCurrent()
             try Self.embedFaces(full: full, assetID: asset.localIdentifier,
                                 date: asset.creationDate, face: face, store: store,
                                 screenshot: asset.mediaSubtypes.contains(.photoScreenshot))
+            timing?.add("faces", CFAbsoluteTimeGetCurrent() - t3)
 
+            let t4 = CFAbsoluteTimeGetCurrent()
             guard useLabels, let labels = Self.visionLabels(cg: small), !labels.isEmpty else { return 0 }
             try Task.checkCancellation()
             let lvec = try gemma.embedDocument("photo tags: \(labels)")
             try store.upsert(kind: .photoLabel, refKey: asset.localIdentifier, space: gemma.space,
                              vector: lvec, title: labels, date: asset.creationDate)
+            timing?.add("labels", CFAbsoluteTimeGetCurrent() - t4)
             return 0
         } catch {
             if Task.isCancelled { return 0 }   // 用户停止不算错误
             errors.set("照片处理失败:\(error)")
+            return 1
+        }
+    }
+
+    /// 第七十批·快扫管线:全库「先可搜」——640px 取图 + 320 嵌入 + 颜色,
+    /// 不做 OCR/标签/人脸(富集阶段补;快扫不写 OCR 行,缺 OCR 自愈自动接力)。
+    /// 取图失败计 1 张错误(与富集同口径),照片无拉黑机制
+    nonisolated private static func fastScanWork(
+        asset: PHAsset, photo: PhotoLibraryService, store: VectorStore,
+        clip: SigLIPEmbedder, errors: FirstErrorBox) async -> Int {
+        do {
+            guard let img = try await photo.image(for: asset, maxPixel: 640) else {
+                errors.set("快扫取图失败(可能 iCloud 未下载):\(asset.localIdentifier)")
+                return 1
+            }
+            guard let small = Self.downscaled(img, to: 320) else { return 0 }
+            let vec = try clip.embedImage(small)
+            try store.upsert(kind: .photo, refKey: asset.localIdentifier, space: clip.space,
+                             vector: vec, title: nil, date: asset.creationDate,
+                             color: PhotoColor.bucket(of: small))
+            return 0
+        } catch {
+            if Task.isCancelled { return 0 }
+            errors.set("快扫失败:\(error)")
             return 1
         }
     }
@@ -627,8 +768,9 @@ final class IndexingCoordinator: ObservableObject {
                 try await Task.detached(priority: .utility) { () -> (Int, Int) in
                 // 先清旧帧再采新帧:重索引(如抽帧数变更)后不残留旧帧行
                 try? store.removeFrames(refKey: asset.localIdentifier)
-                // 2048px 抽帧(帧 OCR 需要照片同级的分辨率),嵌入/标签/颜色用 320 降采样
-                let frames = try await FrameSampler.sample(asset: avAsset, count: frameCount, maxPixel: 2048)
+                // 抽帧分辨率挂「索引速度」设置(帧 OCR 需要照片同级分辨率,第七十批)
+                let frames = try await FrameSampler.sample(asset: avAsset, count: frameCount,
+                                                           maxPixel: Self.ocrMaxPixel)
                 var rows = 0
                 var labelRows = 0
                 var ocrParts: [String] = []
