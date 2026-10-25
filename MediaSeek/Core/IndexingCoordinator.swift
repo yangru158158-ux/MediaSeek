@@ -135,7 +135,7 @@ final class IndexingCoordinator: ObservableObject {
             return "快扫语义索引 \(fastScanDone)/\(fastScanTotal)(已可搜)" + (stageNote.isEmpty ? "" : " · \(stageNote)")
         case .photos: return "正在索引照片" + (stageNote.isEmpty ? "" : " · \(stageNote)")
         case .videos: return "正在索引视频" + (stageNote.isEmpty ? "" : " · \(stageNote)")
-        case .faces: return "正在补人脸数据"
+        case .faces: return "正在补人脸数据" + (stageNote.isEmpty ? "" : " · \(stageNote)")
         case .files: return "正在索引文件"
         case .speech: return "正在转写视频语音"
         case .done: return "索引完成"
@@ -408,8 +408,11 @@ final class IndexingCoordinator: ObservableObject {
                 }
             }
             // 快扫阈值触顶不整轮抛错:同一批照片富集会重试并按自己的阈值判停,
-            // 视频相位也不被照片取图失败连坐(验收 medium:坏照片不该挡住视频索引)
-            if let fastAbort { firstErrorMessage = firstErrorMessage ?? fastAbort }
+            // 视频相位也不被照片取图失败连坐。无条件覆写 firstErrorMessage:
+            // fastAbort 内嵌的就是 errors.get() 的首个错误(FirstErrorBox 只存
+            // 首错),「?? 兜底」是死代码——首个失败早已把 firstErrorMessage 占住,
+            // 停止文案永远浮不出来(复验收 low 实锤)
+            if let fastAbort { firstErrorMessage = fastAbort }
             try Task.checkCancellation()
         }
         // 视频量级小先处理:几分钟后即可被「视频」范围搜到,不必等全部照片。
@@ -422,12 +425,16 @@ final class IndexingCoordinator: ObservableObject {
             let base = 2
             // 阶段启动已 critical:先等降温(同快扫,防整段静默跳过)
             var limit = Self.thermalLimit(base: base)
-            while limit == 0, !Task.isCancelled {
-                stageNote = "过热暂停,冷却后继续"
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
-                limit = Self.thermalLimit(base: base)
+            // 空清单不等待:无事可做的增量同步不该在 critical 时空等数分钟
+            // (快扫/人脸两处在各自非空 if 内,天然有护栏;复验收 low)
+            if !newVideos.isEmpty {
+                while limit == 0, !Task.isCancelled {
+                    stageNote = "过热暂停,冷却后继续"
+                    try? await Task.sleep(nanoseconds: 5_000_000_000)
+                    limit = Self.thermalLimit(base: base)
+                }
+                stageNote = ""
             }
-            stageNote = ""
             while inFlight < limit, index < newVideos.count, !Task.isCancelled {
                 let asset = newVideos[index]; index += 1; inFlight += 1
                 group.addTask { await self.embedVideo(asset, errors: errors); return 0 }
@@ -526,12 +533,15 @@ final class IndexingCoordinator: ObservableObject {
             let base = 4
             // 阶段启动已 critical:先等降温(同快扫,防整段静默跳过)
             var limit = Self.thermalLimit(base: base)
-            while limit == 0, !Task.isCancelled {
-                stageNote = "过热暂停,冷却后继续"
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
-                limit = Self.thermalLimit(base: base)
+            // 空清单不等待(同视频组,复验收 low)
+            if !newPhotos.isEmpty {
+                while limit == 0, !Task.isCancelled {
+                    stageNote = "过热暂停,冷却后继续"
+                    try? await Task.sleep(nanoseconds: 5_000_000_000)
+                    limit = Self.thermalLimit(base: base)
+                }
+                stageNote = ""
             }
-            stageNote = ""
             while inFlight < limit, index < newPhotos.count, !Task.isCancelled {
                 let asset = newPhotos[index]; index += 1; inFlight += 1
                 group.addTask { await Self.embedPhotoWork(
@@ -557,11 +567,15 @@ final class IndexingCoordinator: ObservableObject {
                     break
                 }
                 if Task.isCancelled { break }
+                // 只在真暂停过才清:无条件清会把同一迭代上面 n%50 刚写的计时
+                // 摘要立即抹掉(复验收 medium,分段计时从此不可见)
+                var overheated = false
                 while Self.thermalLimit(base: base) == 0, !Task.isCancelled {
                     stageNote = "过热暂停,冷却后继续"
+                    overheated = true
                     try? await Task.sleep(nanoseconds: 5_000_000_000)
                 }
-                stageNote = ""   // 恢复即清提示(计时摘要下个 50 张会重写)
+                if overheated { stageNote = "" }
                 limit = Self.thermalLimit(base: base)
                 while inFlight < limit, index < newPhotos.count, !Task.isCancelled {
                     let asset = newPhotos[index]; index += 1; inFlight += 1
