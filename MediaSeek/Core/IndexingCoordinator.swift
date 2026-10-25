@@ -49,15 +49,23 @@ final class IndexingCoordinator: ObservableObject {
     final class StageTiming: @unchecked Sendable {
         private let lock = NSLock()
         private var ms: [String: Double] = [:]
+        private var cnt: [String: Int] = [:]
         private var n = 0
         func add(_ key: String, _ seconds: Double) {
-            lock.lock(); ms[key, default: 0] += seconds * 1000; lock.unlock()
+            lock.lock()
+            ms[key, default: 0] += seconds * 1000
+            cnt[key, default: 0] += 1
+            lock.unlock()
         }
         func tick() -> (n: Int, summary: String) {
             lock.lock(); defer { lock.unlock() }
             n += 1
+            // 各段按「实际执行该段的照片数」均摊:labels 只在开标签且检出时
+            // 累计、faces 只在人脸模型在位时累计——分母用全量 n 会系统性偏低
+            // (四验 low)。n 仍按完成数走(50 张刷新一次摘要)
             func avg(_ k: String) -> String {
-                ms[k].map { String(format: "%.0f", $0 / Double(max(n, 1))) } ?? "0"
+                guard let t = ms[k], let c = cnt[k], c > 0 else { return "0" }
+                return String(format: "%.0f", t / Double(c))
             }
             return (n, "取图\(avg("fetch"))ms·OCR\(avg("ocr"))ms·嵌入\(avg("embed"))ms·标签\(avg("labels"))ms·人脸\(avg("faces"))ms/张")
         }
@@ -568,8 +576,8 @@ final class IndexingCoordinator: ObservableObject {
                 photoFails += fails
                 processedLocal += 1
                 if processedLocal % 5 == 0 { processed = processedLocal }
-                // 只按成功张计均摊:失败张提前 return 没累计任何段耗时,
-                // 计入分母只会把均摊稀释得偏乐观(三验 low)
+                // 只按成功张计均摊:失败张已累计的部分段耗时(如取图)随失败
+                // 张一起丢弃,显示略偏保守而非失真(四验 low 修正注释前提)
                 if fails == 0 {
                     let (n, sum) = timing.tick()
                     if n % 50 == 0 { stageNote = sum }
@@ -836,7 +844,10 @@ final class IndexingCoordinator: ObservableObject {
         asset: PHAsset, photo: PhotoLibraryService, store: VectorStore,
         face: FaceEmbedder, errors: FirstErrorBox) async -> Int {
         do {
-            guard let full = try await photo.image(for: asset, maxPixel: 2048) else {
+            // 与富集管线同源(第七十批四修后统一):速度设置管全部索引分辨率
+            // ——极速时补全管线也 1280,消除「同一批照片走哪条管线人脸分辨率
+            // 不同」的归组质量差异(四验 medium:一致性优先于补全管线保 2048)
+            guard let full = try await photo.image(for: asset, maxPixel: Self.ocrMaxPixel) else {
                 errors.set("取图失败(可能 iCloud 未下载):\(asset.localIdentifier)")
                 return 1
             }

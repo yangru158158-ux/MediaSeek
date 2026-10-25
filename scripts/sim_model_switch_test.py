@@ -187,7 +187,7 @@ class ModelManager:
 # --------------------------------------- IndexingCoordinator(同步开始段)
 
 def sync_start(mgr: ModelManager, store: Store, photos=500):
-    """IndexingCoordinator:200-206 维度比对 → 清空;known 只认 clip 行"""
+    """IndexingCoordinator 维度比对段(clipModelDim 检测)→ 清空;known 只认 clip 行"""
     want = mgr.defaults.obj("clipModelDim")
     if want is not None and store.clip_vector_dim() > 0 and store.clip_vector_dim() != want:
         store.wipe_clip_vectors()
