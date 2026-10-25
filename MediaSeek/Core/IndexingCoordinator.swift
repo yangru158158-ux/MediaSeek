@@ -360,12 +360,22 @@ final class IndexingCoordinator: ObservableObject {
             let fstore = self.store
             let fphoto = self.photo
             var fastAbort: String? = nil
+            // 快扫失败独立计数:与富集共用会把同一张取图失败记两次,20 阈值减半
+            var fastFails = 0
             await withTaskGroup(of: Int.self) { group in
                 var index = 0
                 var inFlight = 0
                 let base = 4
+                // 阶段启动时已 critical:先等降温再开喂,否则 limit=0 → inFlight=0
+                // → 主循环不进入,整个阶段被静默跳过(验收 medium 实锤)
                 var limit = Self.thermalLimit(base: base)
-                while inFlight < limit, index < newPhotos.count {
+                while limit == 0, !Task.isCancelled {
+                    stageNote = "过热暂停,冷却后继续"
+                    try? await Task.sleep(nanoseconds: 5_000_000_000)
+                    limit = Self.thermalLimit(base: base)
+                }
+                stageNote = ""
+                while inFlight < limit, index < newPhotos.count, !Task.isCancelled {
                     let asset = newPhotos[index]; index += 1; inFlight += 1
                     group.addTask { await Self.fastScanWork(
                         asset: asset, photo: fphoto, store: fstore, clip: clip, errors: errors) }
@@ -374,11 +384,12 @@ final class IndexingCoordinator: ObservableObject {
                     let fails = await group.next() ?? 0
                     inFlight -= 1
                     errorCount += fails
+                    fastFails += fails
                     fastScanDone += 1
                     if fails > 0, firstErrorMessage == nil {
                         firstErrorMessage = errors.get()
                     }
-                    if errorCount >= 20, let msg = errors.get() {
+                    if fastFails >= 20, let msg = errors.get() {
                         fastAbort = "快扫连续失败已停止:\(msg)"
                         break
                     }
@@ -389,14 +400,16 @@ final class IndexingCoordinator: ObservableObject {
                     }
                     stageNote = ""   // 恢复即清提示,不留过期文案
                     limit = Self.thermalLimit(base: base)
-                    while inFlight < limit, index < newPhotos.count {
+                    while inFlight < limit, index < newPhotos.count, !Task.isCancelled {
                         let asset = newPhotos[index]; index += 1; inFlight += 1
                         group.addTask { await Self.fastScanWork(
                             asset: asset, photo: fphoto, store: fstore, clip: clip, errors: errors) }
                     }
                 }
             }
-            if let fastAbort { throw MSError(fastAbort) }
+            // 快扫阈值触顶不整轮抛错:同一批照片富集会重试并按自己的阈值判停,
+            // 视频相位也不被照片取图失败连坐(验收 medium:坏照片不该挡住视频索引)
+            if let fastAbort { firstErrorMessage = firstErrorMessage ?? fastAbort }
             try Task.checkCancellation()
         }
         // 视频量级小先处理:几分钟后即可被「视频」范围搜到,不必等全部照片。
@@ -407,8 +420,15 @@ final class IndexingCoordinator: ObservableObject {
             var index = 0
             var inFlight = 0
             let base = 2
+            // 阶段启动已 critical:先等降温(同快扫,防整段静默跳过)
             var limit = Self.thermalLimit(base: base)
-            while inFlight < limit, index < newVideos.count {
+            while limit == 0, !Task.isCancelled {
+                stageNote = "过热暂停,冷却后继续"
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                limit = Self.thermalLimit(base: base)
+            }
+            stageNote = ""
+            while inFlight < limit, index < newVideos.count, !Task.isCancelled {
                 let asset = newVideos[index]; index += 1; inFlight += 1
                 group.addTask { await self.embedVideo(asset, errors: errors); return 0 }
             }
@@ -422,42 +442,63 @@ final class IndexingCoordinator: ObservableObject {
                     stageNote = "过热暂停,冷却后继续"
                     try? await Task.sleep(nanoseconds: 5_000_000_000)
                 }
+                stageNote = ""   // 恢复即清提示
                 limit = Self.thermalLimit(base: base)
-                while inFlight < limit, index < newVideos.count {
+                while inFlight < limit, index < newVideos.count, !Task.isCancelled {
                     let asset = newVideos[index]; index += 1; inFlight += 1
                     group.addTask { await self.embedVideo(asset, errors: errors); return 0 }
                 }
             }
         }
+        try Task.checkCancellation()   // 取消后不再进人脸/照片相位(旧串行每部前的同款断点)
         // 人脸补全先于新照片:人物归组数据尽早可用,且与照片全量嵌入互不阻塞
         if !faceBackfill.isEmpty, let faceEmbedder {
             phase = .faces
             let fstore = self.store
             let fphoto = self.photo
             var faceAbort: String? = nil
+            // 人脸失败独立计数(与快扫/富集同规,阈值不被前面相位预支)
+            var faceFails = 0
             await withTaskGroup(of: Int.self) { group in
                 var index = 0
-                let maxConcurrent = 2
-                while index < min(maxConcurrent, faceBackfill.count) {
-                    let asset = faceBackfill[index]; index += 1
+                var inFlight = 0
+                let base = 2
+                // 热背压同规(验收:人脸相位独缺背压=策略自相矛盾)
+                var limit = Self.thermalLimit(base: base)
+                while limit == 0, !Task.isCancelled {
+                    stageNote = "过热暂停,冷却后继续"
+                    try? await Task.sleep(nanoseconds: 5_000_000_000)
+                    limit = Self.thermalLimit(base: base)
+                }
+                stageNote = ""
+                while inFlight < limit, index < faceBackfill.count, !Task.isCancelled {
+                    let asset = faceBackfill[index]; index += 1; inFlight += 1
                     group.addTask { await Self.faceOnlyWork(
                         asset: asset, photo: fphoto, store: fstore, face: faceEmbedder, errors: errors) }
                 }
-                while !group.isEmpty {
+                while inFlight > 0 {
                     let fails = await group.next() ?? 0
+                    inFlight -= 1
                     errorCount += fails
+                    faceFails += fails
                     processedLocal += 1
                     if processedLocal % 5 == 0 { processed = processedLocal }
                     if fails > 0, firstErrorMessage == nil {
                         firstErrorMessage = errors.get()
                     }
-                    if errorCount >= 20, let msg = errors.get() {
+                    if faceFails >= 20, let msg = errors.get() {
                         faceAbort = "人脸补全连续失败已停止:\(msg)"
                         break
                     }
                     if Task.isCancelled { break }
-                    if index < faceBackfill.count {
-                        let asset = faceBackfill[index]; index += 1
+                    while Self.thermalLimit(base: base) == 0, !Task.isCancelled {
+                        stageNote = "过热暂停,冷却后继续"
+                        try? await Task.sleep(nanoseconds: 5_000_000_000)
+                    }
+                    stageNote = ""
+                    limit = Self.thermalLimit(base: base)
+                    while inFlight < limit, index < faceBackfill.count, !Task.isCancelled {
+                        let asset = faceBackfill[index]; index += 1; inFlight += 1
                         group.addTask { await Self.faceOnlyWork(
                             asset: asset, photo: fphoto, store: fstore, face: faceEmbedder, errors: errors) }
                     }
@@ -477,12 +518,21 @@ final class IndexingCoordinator: ObservableObject {
         let photo = self.photo
         let timing = StageTiming()
         var abortReason: String? = nil
+        // 富集失败独立计数:与快扫共用会把同一张取图失败记两次,20 阈值减半
+        var photoFails = 0
         await withTaskGroup(of: Int.self) { group in
             var index = 0
             var inFlight = 0
             let base = 4
+            // 阶段启动已 critical:先等降温(同快扫,防整段静默跳过)
             var limit = Self.thermalLimit(base: base)
-            while inFlight < limit, index < newPhotos.count {
+            while limit == 0, !Task.isCancelled {
+                stageNote = "过热暂停,冷却后继续"
+                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                limit = Self.thermalLimit(base: base)
+            }
+            stageNote = ""
+            while inFlight < limit, index < newPhotos.count, !Task.isCancelled {
                 let asset = newPhotos[index]; index += 1; inFlight += 1
                 group.addTask { await Self.embedPhotoWork(
                     asset: asset, photo: photo, store: store,
@@ -493,6 +543,7 @@ final class IndexingCoordinator: ObservableObject {
                 let fails = await group.next() ?? 0
                 inFlight -= 1
                 errorCount += fails
+                photoFails += fails
                 processedLocal += 1
                 if processedLocal % 5 == 0 { processed = processedLocal }
                 let (n, sum) = timing.tick()
@@ -501,7 +552,7 @@ final class IndexingCoordinator: ObservableObject {
                     firstErrorMessage = errors.get()
                 }
                 // 连续失败 20 张 = 系统性故障,不再排新任务(在组外统一抛错停止)
-                if errorCount >= 20, let msg = errors.get() {
+                if photoFails >= 20, let msg = errors.get() {
                     abortReason = "连续处理失败已停止:\(msg)"
                     break
                 }
@@ -510,8 +561,9 @@ final class IndexingCoordinator: ObservableObject {
                     stageNote = "过热暂停,冷却后继续"
                     try? await Task.sleep(nanoseconds: 5_000_000_000)
                 }
+                stageNote = ""   // 恢复即清提示(计时摘要下个 50 张会重写)
                 limit = Self.thermalLimit(base: base)
-                while inFlight < limit, index < newPhotos.count {
+                while inFlight < limit, index < newPhotos.count, !Task.isCancelled {
                     let asset = newPhotos[index]; index += 1; inFlight += 1
                     group.addTask { await Self.embedPhotoWork(
                         asset: asset, photo: photo, store: store,
