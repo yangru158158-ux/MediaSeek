@@ -95,6 +95,13 @@ final class IndexingCoordinator: ObservableObject {
         }
     }
 
+    /// 视频记账互斥锁:视频 2 路并发后,两个 detached 任务对同一 UserDefaults
+    /// key 的「读→改→写」会互相覆盖(后写吃掉先写)——丢 vidFrameCfg 则改抽帧
+    /// 数后该视频不重建;丢 vidNoLabel/vidAllBlack 则回到「每轮同步反复重处理」
+    /// (155 用户实测过的根因,三验 medium 实锤)。markVideoAssetFail(MainActor)
+    /// 与 detached 成功清计数同用此锁互斥
+    nonisolated static let vidCfgLock = NSLock()
+
     /// 中文语义标签(Vision+Gemma):增强中文物体查询,但每张照片多两次推理,慢 2-3 倍
     /// 已索引照片数(空态提示用)
     var indexedPhotoCount: Int { store.countPhotos() }
@@ -354,9 +361,14 @@ final class IndexingCoordinator: ObservableObject {
         // 取图 640px 而非 2048:解码像素量降约 10 倍,嵌入只需 320——快扫的
         // 唯一职责是让向量先落库,精度活全部留给富集阶段
         if !newPhotos.isEmpty, let clip = models.siglip {
+            // 已有 clip 向量的照片跳过快扫:中断续跑时「缺 OCR 自愈」把这批
+            // 放回 newPhotos,但向量早已落库可搜——整批重嵌是纯重复劳动
+            // (upsert 幂等,白费 1 万张×0.1s;三验 low)
+            let scanned = (try? store.refKeysWithClipVectors()) ?? Set<String>()
+            let scanList = newPhotos.filter { !scanned.contains($0.localIdentifier) }
             phase = .fastScan
             fastScanDone = 0
-            fastScanTotal = newPhotos.count
+            fastScanTotal = scanList.count
             let fstore = self.store
             let fphoto = self.photo
             var fastAbort: String? = nil
@@ -375,8 +387,8 @@ final class IndexingCoordinator: ObservableObject {
                     limit = Self.thermalLimit(base: base)
                 }
                 stageNote = ""
-                while inFlight < limit, index < newPhotos.count, !Task.isCancelled {
-                    let asset = newPhotos[index]; index += 1; inFlight += 1
+                while inFlight < limit, index < scanList.count, !Task.isCancelled {
+                    let asset = scanList[index]; index += 1; inFlight += 1
                     group.addTask { await Self.fastScanWork(
                         asset: asset, photo: fphoto, store: fstore, clip: clip, errors: errors) }
                 }
@@ -400,8 +412,8 @@ final class IndexingCoordinator: ObservableObject {
                     }
                     stageNote = ""   // 恢复即清提示,不留过期文案
                     limit = Self.thermalLimit(base: base)
-                    while inFlight < limit, index < newPhotos.count, !Task.isCancelled {
-                        let asset = newPhotos[index]; index += 1; inFlight += 1
+                    while inFlight < limit, index < scanList.count, !Task.isCancelled {
+                        let asset = scanList[index]; index += 1; inFlight += 1
                         group.addTask { await Self.fastScanWork(
                             asset: asset, photo: fphoto, store: fstore, clip: clip, errors: errors) }
                     }
@@ -556,8 +568,12 @@ final class IndexingCoordinator: ObservableObject {
                 photoFails += fails
                 processedLocal += 1
                 if processedLocal % 5 == 0 { processed = processedLocal }
-                let (n, sum) = timing.tick()
-                if n % 50 == 0 { stageNote = sum }
+                // 只按成功张计均摊:失败张提前 return 没累计任何段耗时,
+                // 计入分母只会把均摊稀释得偏乐观(三验 low)
+                if fails == 0 {
+                    let (n, sum) = timing.tick()
+                    if n % 50 == 0 { stageNote = sum }
+                }
                 if fails > 0, firstErrorMessage == nil {
                     firstErrorMessage = errors.get()
                 }
@@ -733,7 +749,9 @@ final class IndexingCoordinator: ObservableObject {
         guard let clip, let gemma else { return 0 }
         do {
             // 取图分辨率挂「索引速度」设置:精准 2048(默认)/极速 1280(第七十批);
-            // 320px 用于嵌入向量,OCR 用原图
+            // 320px 用于嵌入向量,OCR 用原图。⚠️ 极速下人脸检测随取图同步降为
+            // 1280(一次取图 OCR/人脸共用,分开取图得不偿失);只有 faceOnlyWork
+            // 补全管线固定 2048(三验 medium:披露与认知对齐)
             let t0 = CFAbsoluteTimeGetCurrent()
             guard let full = try await photo.image(for: asset, maxPixel: Self.ocrMaxPixel) else {
                 errors.set("取图失败(可能 iCloud 未下载或存储空间不足):\(asset.localIdentifier)")
@@ -796,7 +814,10 @@ final class IndexingCoordinator: ObservableObject {
                 errors.set("快扫取图失败(可能 iCloud 未下载):\(asset.localIdentifier)")
                 return 1
             }
-            guard let small = Self.downscaled(img, to: 320) else { return 0 }
+            guard let small = Self.downscaled(img, to: 320) else {
+                errors.set("快扫降采样失败:\(asset.localIdentifier)")
+                return 1
+            }
             let vec = try clip.embedImage(small)
             try store.upsert(kind: .photo, refKey: asset.localIdentifier, space: clip.space,
                              vector: vec, title: nil, date: asset.creationDate,
@@ -914,6 +935,7 @@ final class IndexingCoordinator: ObservableObject {
                 // 直接比行数会因黑帧跳过而无限重跑);采到帧但全黑(0 行)拉黑名单,
                 // 同步直接跳过
                 if !frames.isEmpty, rows > 0 {
+                    Self.vidCfgLock.lock()
                     var cfg = (UserDefaults.standard.dictionary(forKey: "vidFrameCfg") as? [String: Int]) ?? [:]
                     cfg[asset.localIdentifier] = frameCount
                     UserDefaults.standard.set(cfg, forKey: "vidFrameCfg")
@@ -933,10 +955,13 @@ final class IndexingCoordinator: ObservableObject {
                         noLabel.remove(asset.localIdentifier)
                     }
                     UserDefaults.standard.set(Array(noLabel), forKey: "vidNoLabel")
+                    Self.vidCfgLock.unlock()
                 } else if !frames.isEmpty {
+                    Self.vidCfgLock.lock()
                     var set = Set(UserDefaults.standard.stringArray(forKey: "vidAllBlack") ?? [])
                     set.insert(asset.localIdentifier)
                     UserDefaults.standard.set(Array(set), forKey: "vidAllBlack")
+                    Self.vidCfgLock.unlock()
                 }
                 return (frames.count, rows)
             }.value
@@ -959,6 +984,7 @@ final class IndexingCoordinator: ObservableObject {
     /// 视频读取/处理失败计数:同一视频连续失败 3 次进黑名单 vidAssetFail,
     /// 增量同步不再重试(避免每轮空转);成功处理会在 embedVideo 落库时清零计数
     private func markVideoAssetFail(_ refKey: String) {
+        Self.vidCfgLock.lock()
         var cnt = (UserDefaults.standard.dictionary(forKey: "vidAssetFailCnt") as? [String: Int]) ?? [:]
         cnt[refKey, default: 0] += 1
         UserDefaults.standard.set(cnt, forKey: "vidAssetFailCnt")
@@ -967,6 +993,7 @@ final class IndexingCoordinator: ObservableObject {
             set.insert(refKey)
             UserDefaults.standard.set(Array(set), forKey: "vidAssetFail")
         }
+        Self.vidCfgLock.unlock()
     }
 
     /// Vision 内置 1300+ 类分类器,取高置信度标签(如 cat / dog / beach)

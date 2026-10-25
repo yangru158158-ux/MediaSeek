@@ -353,7 +353,7 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("精准 OCR(文字识别优先)")
                     Text(app.indexing.ocrFastMode
-                         ? "极速:1280px,大字几乎无损,远景小字可能漏。对新照片即时生效;已索引的要「全量重建索引」才重做"
+                         ? "极速:1280px,大字几乎无损,远景小字可能漏,人脸检测分辨率同步降低。对新照片即时生效;已索引的要「全量重建索引」才重做"
                          : "默认:2048px,拍屏角度/小字也尽量认出。对新照片即时生效;已索引的要「全量重建索引」才重做")
                         .font(.caption).foregroundStyle(.secondary)
                 }
