@@ -80,6 +80,21 @@ final class IndexingCoordinator: ObservableObject {
         (UserDefaults.standard.object(forKey: "ocrFastMode") as? Bool ?? false) ? 1280 : 2048
     }
 
+    /// 第七十批·热背压:按系统热状态(thermalState)折算并发上限。
+    /// 手机发烫是用户实测痛点——烧毁有 iOS 硬保护不会发生,但降频白忙+电池
+    /// 老化是真的;并发随温度自适应:凉时全速,温热减半,严重单路,危急暂停
+    /// (喂料循环每完成一张读一次当前状态,critical 时睡 5 秒冷却,自动续跑)。
+    /// 轮询而非通知:任务完成粒度(秒级)足够反应,免去跨线程观察者管理
+    nonisolated static func thermalLimit(base: Int) -> Int {
+        switch ProcessInfo.processInfo.thermalState {
+        case .nominal: return base
+        case .fair: return max(1, base / 2)
+        case .serious: return 1
+        case .critical: return 0
+        @unknown default: return base
+        }
+    }
+
     /// 中文语义标签(Vision+Gemma):增强中文物体查询,但每张照片多两次推理,慢 2-3 倍
     /// 已索引照片数(空态提示用)
     var indexedPhotoCount: Int { store.countPhotos() }
@@ -117,9 +132,9 @@ final class IndexingCoordinator: ObservableObject {
         case .idle: return "未开始"
         case .waitingModel: return "等待模型加载…"
         case .fastScan:
-            return "快扫语义索引 \(fastScanDone)/\(fastScanTotal)(已可搜)"
+            return "快扫语义索引 \(fastScanDone)/\(fastScanTotal)(已可搜)" + (stageNote.isEmpty ? "" : " · \(stageNote)")
         case .photos: return "正在索引照片" + (stageNote.isEmpty ? "" : " · \(stageNote)")
-        case .videos: return "正在索引视频"
+        case .videos: return "正在索引视频" + (stageNote.isEmpty ? "" : " · \(stageNote)")
         case .faces: return "正在补人脸数据"
         case .files: return "正在索引文件"
         case .speech: return "正在转写视频语音"
@@ -347,14 +362,17 @@ final class IndexingCoordinator: ObservableObject {
             var fastAbort: String? = nil
             await withTaskGroup(of: Int.self) { group in
                 var index = 0
-                let maxConcurrent = 4
-                while index < min(maxConcurrent, newPhotos.count) {
-                    let asset = newPhotos[index]; index += 1
+                var inFlight = 0
+                let base = 4
+                var limit = Self.thermalLimit(base: base)
+                while inFlight < limit, index < newPhotos.count {
+                    let asset = newPhotos[index]; index += 1; inFlight += 1
                     group.addTask { await Self.fastScanWork(
                         asset: asset, photo: fphoto, store: fstore, clip: clip, errors: errors) }
                 }
-                while !group.isEmpty {
+                while inFlight > 0 {
                     let fails = await group.next() ?? 0
+                    inFlight -= 1
                     errorCount += fails
                     fastScanDone += 1
                     if fails > 0, firstErrorMessage == nil {
@@ -365,8 +383,14 @@ final class IndexingCoordinator: ObservableObject {
                         break
                     }
                     if Task.isCancelled { break }
-                    if index < newPhotos.count {
-                        let asset = newPhotos[index]; index += 1
+                    while Self.thermalLimit(base: base) == 0, !Task.isCancelled {
+                        stageNote = "过热暂停,冷却后继续"
+                        try? await Task.sleep(nanoseconds: 5_000_000_000)
+                    }
+                    stageNote = ""   // 恢复即清提示,不留过期文案
+                    limit = Self.thermalLimit(base: base)
+                    while inFlight < limit, index < newPhotos.count {
+                        let asset = newPhotos[index]; index += 1; inFlight += 1
                         group.addTask { await Self.fastScanWork(
                             asset: asset, photo: fphoto, store: fstore, clip: clip, errors: errors) }
                     }
@@ -381,18 +405,26 @@ final class IndexingCoordinator: ObservableObject {
         phase = .videos
         await withTaskGroup(of: Int.self) { group in
             var index = 0
-            let maxConcurrent = 2
-            while index < min(maxConcurrent, newVideos.count) {
-                let asset = newVideos[index]; index += 1
+            var inFlight = 0
+            let base = 2
+            var limit = Self.thermalLimit(base: base)
+            while inFlight < limit, index < newVideos.count {
+                let asset = newVideos[index]; index += 1; inFlight += 1
                 group.addTask { await self.embedVideo(asset, errors: errors); return 0 }
             }
-            while !group.isEmpty {
+            while inFlight > 0 {
                 _ = await group.next()
+                inFlight -= 1
                 processedLocal += 1
                 processed = processedLocal
                 if Task.isCancelled { break }
-                if index < newVideos.count {
-                    let asset = newVideos[index]; index += 1
+                while Self.thermalLimit(base: base) == 0, !Task.isCancelled {
+                    stageNote = "过热暂停,冷却后继续"
+                    try? await Task.sleep(nanoseconds: 5_000_000_000)
+                }
+                limit = Self.thermalLimit(base: base)
+                while inFlight < limit, index < newVideos.count {
+                    let asset = newVideos[index]; index += 1; inFlight += 1
                     group.addTask { await self.embedVideo(asset, errors: errors); return 0 }
                 }
             }
@@ -447,16 +479,19 @@ final class IndexingCoordinator: ObservableObject {
         var abortReason: String? = nil
         await withTaskGroup(of: Int.self) { group in
             var index = 0
-            let maxConcurrent = 4
-            while index < min(maxConcurrent, newPhotos.count) {
-                let asset = newPhotos[index]; index += 1
+            var inFlight = 0
+            let base = 4
+            var limit = Self.thermalLimit(base: base)
+            while inFlight < limit, index < newPhotos.count {
+                let asset = newPhotos[index]; index += 1; inFlight += 1
                 group.addTask { await Self.embedPhotoWork(
                     asset: asset, photo: photo, store: store,
                     clip: clip, gemma: gemma, face: face, useLabels: useLabels,
                     errors: errors, timing: timing) }
             }
-            while !group.isEmpty {
+            while inFlight > 0 {
                 let fails = await group.next() ?? 0
+                inFlight -= 1
                 errorCount += fails
                 processedLocal += 1
                 if processedLocal % 5 == 0 { processed = processedLocal }
@@ -471,8 +506,13 @@ final class IndexingCoordinator: ObservableObject {
                     break
                 }
                 if Task.isCancelled { break }
-                if index < newPhotos.count {
-                    let asset = newPhotos[index]; index += 1
+                while Self.thermalLimit(base: base) == 0, !Task.isCancelled {
+                    stageNote = "过热暂停,冷却后继续"
+                    try? await Task.sleep(nanoseconds: 5_000_000_000)
+                }
+                limit = Self.thermalLimit(base: base)
+                while inFlight < limit, index < newPhotos.count {
+                    let asset = newPhotos[index]; index += 1; inFlight += 1
                     group.addTask { await Self.embedPhotoWork(
                         asset: asset, photo: photo, store: store,
                         clip: clip, gemma: gemma, face: face, useLabels: useLabels,
