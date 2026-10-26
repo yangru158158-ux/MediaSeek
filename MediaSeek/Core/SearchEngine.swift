@@ -685,9 +685,14 @@ final class SearchEngine {
                 // 第七十二批:追加繁→简转换词及其别名(原词优先,排序不变)——
                 // 「駕駛證」同时命中大陆简体驾驶证 OCR,「美團」原词照常命中繁体月结单
                 let conv = QueryUnderstanding.simplified(t)
-                let variants = [t] + (QueryUnderstanding.ocrAliases[t] ?? [])
+                // 拆步构造(不用三目嵌链式 +,类型推断会爆炸——CI 实测 688 行
+                // unable to type-check in reasonable time)
+                var variants: [String] = [t] + (QueryUnderstanding.ocrAliases[t] ?? [])
                     + QueryUnderstanding.bridgedVariants(for: t)
-                    + (conv != t ? [conv] + (QueryUnderstanding.ocrAliases[conv] ?? []) : [])
+                if conv != t {
+                    variants.append(conv)
+                    variants.append(contentsOf: QueryUnderstanding.ocrAliases[conv] ?? [])
+                }
                 for term in variants {
                 let rows = (try? store.searchOCR(query: term)) ?? []
                 let kinds = classifier.classify(rows.map(\.refKey))
@@ -917,11 +922,16 @@ final class SearchEngine {
         var out: [(kind: ItemKind, refKey: String, text: String)] = []
         var seen = Set<String>()
         // 第六十九批:英文证件桥同规(主管线 OCR 通道注释)——纯加法
-        // 第七十二批:繁→简转换词同规追加(与主管线一致,文字:/and:/or: 共用此处)
+        // 第七十二批:繁→简转换词同规追加(与主管线一致,文字:/and:/or: 共用此处);
+        // 拆步构造防类型推断爆炸(同主管线注释)
         let conv = QueryUnderstanding.simplified(t)
-        for term in [t] + (QueryUnderstanding.ocrAliases[t] ?? [])
+        var variantTerms: [String] = [t] + (QueryUnderstanding.ocrAliases[t] ?? [])
             + QueryUnderstanding.bridgedVariants(for: t)
-            + (conv != t ? [conv] + (QueryUnderstanding.ocrAliases[conv] ?? []) : []) {
+        if conv != t {
+            variantTerms.append(conv)
+            variantTerms.append(contentsOf: QueryUnderstanding.ocrAliases[conv] ?? [])
+        }
+        for term in variantTerms {
             let rows: [(String, String)]
             if let among = within {
                 rows = ((try? store.searchOCR(query: term, among: Array(among))) ?? [])
