@@ -212,11 +212,13 @@ enum QueryUnderstandingTest {
             && QueryUnderstanding.chineseCounterpart(for: "driving license") == "驾照"
             && QueryUnderstanding.chineseCounterpart(for: "driver's license") == "驾照",
                "驾驶照三拼写→驾照")
-        expect(QueryUnderstanding.chineseCounterpart(for: "licence") == nil
-            && QueryUnderstanding.chineseCounterpart(for: "license") == nil
+        expect(QueryUnderstanding.chineseCounterpart(for: "licence") == "驾照"
+            && QueryUnderstanding.chineseCounterpart(for: "Licence") == "驾照",
+               "licence→驾照(第七十一批翻案:218「语义全对」是 so400m 分布,标准版证件照够不着第二档且底网被文字命中挡住,入桥=模型无关修法)")
+        expect(QueryUnderstanding.chineseCounterpart(for: "license") == nil
             && QueryUnderstanding.chineseCounterpart(for: "driving") == nil
             && QueryUnderstanding.chineseCounterpart(for: "card") == nil,
-               "licence/license/driving/card 不在表内:218 实测 licence 语义与 driving license 逐词匹配已对,桥了反而窄化")
+               "license(美式拼写,待用户定)/driving/card 泛词不入表(桥了会把各种证件窄化成驾照)")
         let idv = QueryUnderstanding.bridgedVariants(for: "identity")
         expect(!idv.filter { ["身份证", "公民身份", "居民身份证", "签发机关", "身份證"].contains($0) }.isEmpty
             && idv.count == 5,
@@ -224,6 +226,9 @@ enum QueryUnderstandingTest {
         expect(QueryUnderstanding.bridgedVariants(for: "beach") == []
             && QueryUnderstanding.bridgedVariants(for: "id card").count == 5,
                "表外词返回空(原匹配零改动);表内短语同样拿到身份证别名")
+        expect(QueryUnderstanding.bridgedVariants(for: "licence")
+                    == ["驾照", "准驾车型", "机动车驾驶证"],
+               "licence 桥接变体=驾照+别名(第七十一批;原 %licence% 匹配不动,纯追加)")
         expect(QueryUnderstanding.english(for: "护照") == "passport",
                "护照词典对补齐:中文查询语义模板从裸多语言升级为 passport(第六十九批)")
         expect((QueryUnderstanding.ocrAliases["驾照"] ?? []) == (QueryUnderstanding.ocrAliases["驾驶证"] ?? []),
@@ -278,7 +283,7 @@ enum QueryUnderstandingTest {
         expect(passCn == zhToEns.count,
                "全量 \(zhToEns.count) 个中文词反查全部命中标签通道")
 
-        // 断言数口径:全文 expect 调用 79 项(另含 1 行函数定义)
-        print("PASS: 查询理解 79 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词穷尽)")
+        // 断言数口径:全文 expect 调用 81 项(另含 1 行函数定义)
+        print("PASS: 查询理解 81 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词穷尽)")
     }
 }
