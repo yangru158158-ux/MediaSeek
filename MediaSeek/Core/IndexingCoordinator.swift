@@ -907,8 +907,13 @@ final class IndexingCoordinator: ObservableObject {
         }
     }
 
-    /// 嵌入并发闸门(批78):全 App 共享一个,ANE 同时最多 2 路 SigLIP
-    nonisolated private static let aneGate = AsyncSemaphore(limit: 2)
+    /// 神经引擎统一闸门(批78 建,批79 扩全量):SigLIP 嵌入 + Vision OCR
+    /// + Vision 标签共享,同时最多 4 路。批78 只管 SigLIP 被装机证伪——
+    /// 228 崩溃时刻 7 个线程全卡在 recognizeText(Vision OCR 的 CoreML
+    /// 同样跑 ANE,dSYM 符号化实锤),OCR 占单张 51% 才是最大消费者。
+    /// 4=批70-72 全管线 4 路的经验稳定锚(该时代无看门狗);吞吐≈4张/秒,
+    /// 13k 富集约 55 分钟
+    nonisolated private static let aneGate = AsyncSemaphore(limit: 4)
 
     /// 批75:SigLIP 嵌入带一次 ANE 超时重试——8 路并发把神经引擎请求队列
     /// 挤爆的偶发超时(224 装机实测快扫 4/2753 报 E5RT: ANE inference
@@ -922,6 +927,7 @@ final class IndexingCoordinator: ObservableObject {
         _ clip: SigLIPEmbedder, _ cg: CGImage) async throws -> [Float] {
         await aneGate.wait()
         defer { aneGate.signal() }
+        if Task.isCancelled { throw CancellationError() }
         do {
             return try clip.embedImage(cg)
         } catch {
@@ -966,7 +972,7 @@ final class IndexingCoordinator: ObservableObject {
             // 无文字也写 "" 占位行:增量同步靠「缺 OCR 行」识别待补照片,
             // 没有占位的话风景照等无字照片会被每轮反复重处理
             let t2 = CFAbsoluteTimeGetCurrent()
-            let ocr = Self.recognizeText(in: full)
+            let ocr = await Self.recognizeTextGated(in: full)
             timing?.add("ocr", CFAbsoluteTimeGetCurrent() - t2)
             try store.saveOCR(refKey: asset.localIdentifier, text: ocr ?? "")
 
@@ -981,7 +987,9 @@ final class IndexingCoordinator: ObservableObject {
             timing?.add("faces", CFAbsoluteTimeGetCurrent() - t3)
 
             let t4 = CFAbsoluteTimeGetCurrent()
-            guard useLabels, let labels = Self.visionLabels(cg: small), !labels.isEmpty else { return 0 }
+            guard useLabels else { return 0 }
+            let labels = await Self.visionLabelsGated(cg: small)
+            guard !labels.isEmpty else { return 0 }
             try Task.checkCancellation()
             let lvec = try gemma.embedDocument("photo tags: \(labels)")
             try store.upsert(kind: .photoLabel, refKey: asset.localIdentifier, space: gemma.space,
@@ -1118,7 +1126,7 @@ final class IndexingCoordinator: ObservableObject {
                     // SigLIP 图文分数在本库区分度不足(马尔代夫 vs 抖音噪声分不开),
                     // 标签零幻觉:海滩/水上屋帧得 beach/island/water,抖音室内帧得
                     // people/clothing,词典词不命中即不灌入
-                    if let gemma, let labels = Self.visionLabels(cg: small) {
+                    if let gemma, let labels = await Self.visionLabelsGated(cg: small) {
                         let lvec = try gemma.embedDocument("photo tags: \(labels)")
                         try store.upsert(kind: .videoFrameLabel, refKey: asset.localIdentifier,
                                          frameIndex: i, space: gemma.space, vector: lvec,
@@ -1126,7 +1134,7 @@ final class IndexingCoordinator: ObservableObject {
                         labelRows += 1
                     }
                     // 帧OCR(与照片同管线):视频画面里的文字可被 文字: 命中
-                    if let t = Self.recognizeText(in: frame) {
+                    if let t = await Self.recognizeTextGated(in: frame) {
                         ocrParts.append("【帧\(i)】\(t)")
                     }
                 }
@@ -1199,6 +1207,23 @@ final class IndexingCoordinator: ObservableObject {
     }
 
     /// Vision 内置 1300+ 类分类器,取高置信度标签(如 cat / dog / beach)
+    /// 批79:OCR 过闸——Vision 的 performRequests 不可中断,挂死时与嵌入
+    /// 同死法;wait 后查取消,排队中的取消任务直接放弃(停止排空不等闸)
+    nonisolated private static func recognizeTextGated(in cg: CGImage) async -> String? {
+        await aneGate.wait()
+        defer { aneGate.signal() }
+        if Task.isCancelled { return nil }
+        return recognizeText(in: cg)
+    }
+
+    /// 批79:Vision 标签过闸(同 OCR,CoreML 吃 ANE)
+    nonisolated private static func visionLabelsGated(cg: CGImage) async -> String? {
+        await aneGate.wait()
+        defer { aneGate.signal() }
+        if Task.isCancelled { return nil }
+        return visionLabels(cg: cg)
+    }
+
     nonisolated private static func visionLabels(cg: CGImage) -> String? {
         let request = VNClassifyImageRequest()
         let handler = VNImageRequestHandler(cgImage: cg, options: [:])
