@@ -785,7 +785,7 @@ struct PeoplePanel: View {
     /// 人名按当前标签重推——重命名/清标签无需重扫
     private func hydrateIfNeeded() {
         guard m.groups.isEmpty, !m.scanning else { return }
-        // 算法盐 a21:归组/补认逻辑变更必须升盐——旧快照与补认缓存不能复活旧裁决。
+        // 算法盐 a22(批76 由 a21 升):归组/补认逻辑变更必须升盐——旧快照与补认缓存不能复活旧裁决。
         // (人脸行/排除/模型)不含算法版本,163 的旧判决经快照水化+缓存命中在
         // 164 原样复活,用户看到的就是"修了没变化"。第十四批:J 破平局(同框
         // 先验裁决二义脸)改变了 U→J 的转正集合,旧快照/缓存必须作废重判;
@@ -868,7 +868,7 @@ struct PeoplePanel: View {
         let faceModel = app.models.face
         let model = app.people   // 结果写共享模型:面板关了再开不丢(160 教训)
         // 指纹:人脸数据/排除集合/模型任一变化,快照与补认缓存自动作废;
-        // a21=算法盐,归组逻辑变更必须升盐(与 hydrateIfNeeded 同串;
+        // a22=算法盐(批76 由 a21 升),归组逻辑变更必须升盐(与 hydrateIfNeeded 同串;
         // a20→a21=第四十九批掩码修复激活 SigLIP 兜底层,见上)
         let ver = store.peopleFingerprint(
             extra: "a22-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
