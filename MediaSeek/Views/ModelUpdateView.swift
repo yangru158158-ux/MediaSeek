@@ -47,6 +47,10 @@ final class ModelUpdateLoader: NSObject, ObservableObject, URLSessionDataDelegat
 
     private var continuation: CheckedContinuation<URL, Error>?
     private var dataTask: URLSessionDataTask?
+    /// 批76三修:写失败主动取消网络任务的意图标记——cancel 触发的
+    /// didCompleteWithError(取消)要吞掉(continuation 已由失败路径恢复,
+    /// 不吞会误伤下一轮的 continuation)
+    private var cancelIntent = false
     private var fileHandle: FileHandle?
     private var partPath: String = ""
     private var existingBytes: Int64 = 0
@@ -112,6 +116,7 @@ final class ModelUpdateLoader: NSObject, ObservableObject, URLSessionDataDelegat
         received = 0
         totalBytes = file.size
         partIsValid = false
+        cancelIntent = false
         resuming = existing > 0
         progress = existing > 0 ? Double(existing) / Double(file.size) : 0
         return try await withCheckedThrowingContinuation { c in
@@ -205,14 +210,24 @@ final class ModelUpdateLoader: NSObject, ObservableObject, URLSessionDataDelegat
                     self.progress = Double(self.existingBytes + self.received) / Double(self.totalBytes)
                 }
             } catch {
-                self.finishTask(.failure(MSError("写入失败(磁盘满?):\(error.localizedDescription)")))
+                // 批76三修(复验收 medium):先取消再收尾——finishTask 会置
+                // dataTask=nil,后取消=对 nil 无操作,网络任务最长按 7200s
+                // 资源超时空转耗流量;cancelIntent 让取消回调被吞掉
+                self.cancelIntent = true
                 self.dataTask?.cancel()
+                self.finishTask(.failure(MSError("写入失败(磁盘满?):\(error.localizedDescription)")))
             }
         }
     }
 
     nonisolated func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         Task { @MainActor in
+            // 写失败主动取消的回声:continuation 已在失败路径恢复,吞掉
+            // (不吞会误伤下一轮已占用的 continuation——复验收 medium)
+            if self.cancelIntent, error != nil {
+                self.cancelIntent = false
+                return
+            }
             guard let error else {
                 // 成功:校验以磁盘上的 .part 实际大小为准(唯一真相;回调
                 // Task 乱序时计数可能滞后,按盘上字节判不完整→保留续传自愈)
