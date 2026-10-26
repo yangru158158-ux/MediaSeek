@@ -239,6 +239,26 @@ expect(bridged_variants("beach") == [], "表外词零追加")
 expect(OCR_ALIASES.get("驾照") == OCR_ALIASES.get("驾驶证"),
        "驾照/驾驶证别名同表(兄弟缺口已补)")
 expect(dict(DICTIONARY).get("护照") == "passport", "护照词典对已补(语义模板)")
+
+# ---- 第七十二批:繁→简归一对拍(表从源码解析,结构不变量守恒) ----
+t2s_block = QU.split("static let t2sChars: [Character: Character] = [", 1)[1]
+t2s_block = t2s_block.split("\n    ]", 1)[0]
+T2S = dict(re.findall(r'"([^"]+)":\s*"([^"]+)"', t2s_block))
+def to_simplified(s):
+    return "".join(T2S.get(ch, ch) for ch in s)
+expect(len(T2S) > 150 and all(k != v for k, v in T2S.items()),
+       f"字表规模 {len(T2S)} 条,无键值同对的空转换")
+expect(not (set(T2S.keys()) & set(T2S.values())),
+       "无键同时是另一键的值(单遍无链式,幂等由构造保证)")
+expect(to_simplified("駕駛證") == "驾驶证" and to_simplified("證件") == "证件"
+    and to_simplified("護照") == "护照" and to_simplified("美團") == "美团",
+       "繁→简:证件家族+股票名全链路走通")
+expect(to_simplified("动物") == "动物" and to_simplified("美團 存款") == "美团 存款",
+       "简体/同形透传,空格保留")
+expect(OCR_ALIASES.get("证件") == ["身份证", "护照", "驾驶证"],
+       "证件入别名表(与 licence 同权,221 装机实测 证件 语义0)")
+expect(dict(DICTIONARY).get("驾驶证") == "driver license document",
+       "驾驶证词典对补齐(与驾照同款模板)")
 print(f"证件桥: 表 {len(COUNTERPARTS)} 键 / 别名 {len(OCR_ALIASES)} 组 对拍一致")
 
 print("PASS: 镜像全绿(词典", len(DICTIONARY), "条/标签", len(ZH), "词/泛化", len(GENERIC), "个)")

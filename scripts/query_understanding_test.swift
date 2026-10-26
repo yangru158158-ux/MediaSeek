@@ -229,6 +229,25 @@ enum QueryUnderstandingTest {
         expect(QueryUnderstanding.bridgedVariants(for: "licence")
                     == ["驾照", "准驾车型", "机动车驾驶证"],
                "licence 桥接变体=驾照+别名(第七十一批;原 %licence% 匹配不动,纯追加)")
+
+        // —— 第七十二批:繁→简归一 + 证件与 licence 同权 ——
+        expect(QueryUnderstanding.simplified("駕駛證") == "驾驶证"
+            && QueryUnderstanding.simplified("證件") == "证件"
+            && QueryUnderstanding.simplified("護照") == "护照"
+            && QueryUnderstanding.simplified("美團") == "美团",
+               "繁→简字表:证件家族+股票名(駕駛證/證件/護照/美團)")
+        expect(QueryUnderstanding.simplified("动物") == "动物"
+            && QueryUnderstanding.simplified("美團 存款") == "美团 存款"
+            && QueryUnderstanding.simplified(QueryUnderstanding.simplified("駕駛證 護照"))
+                   == QueryUnderstanding.simplified("駕駛證 護照"),
+               "简体/同形字透传,空格保留,幂等(单遍无链式)")
+        expect(QueryUnderstanding.scriptVariants(of: "駕駛證") == ["駕駛證", "驾驶证"]
+            && QueryUnderstanding.scriptVariants(of: "动物") == ["动物"],
+               "scriptVariants:繁体词=原词+转换词(原词在前保排序),简体词单元素")
+        expect((QueryUnderstanding.ocrAliases["证件"] ?? []) == ["身份证", "护照", "驾驶证"],
+               "证件入别名表:文字追加+底网豁免与 licence 同权(221 实测搜「证件」文字 98/语义 0)")
+        expect(QueryUnderstanding.english(for: "驾驶证") == "driver license document",
+               "驾驶证词典对补齐:繁体归一到驾驶证后不再退回裸多语言嵌入")
         expect(QueryUnderstanding.english(for: "护照") == "passport",
                "护照词典对补齐:中文查询语义模板从裸多语言升级为 passport(第六十九批)")
         expect((QueryUnderstanding.ocrAliases["驾照"] ?? []) == (QueryUnderstanding.ocrAliases["驾驶证"] ?? []),
@@ -283,7 +302,7 @@ enum QueryUnderstandingTest {
         expect(passCn == zhToEns.count,
                "全量 \(zhToEns.count) 个中文词反查全部命中标签通道")
 
-        // 断言数口径:全文 expect 调用 81 项(另含 1 行函数定义)
-        print("PASS: 查询理解 81 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词穷尽)")
+        // 断言数口径:全文 expect 调用 86 项(另含 1 行函数定义)
+        print("PASS: 查询理解 86 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词穷尽)")
     }
 }

@@ -362,7 +362,12 @@ final class SearchEngine {
         // 只会命中文字;中文词 视觉/标签/OCR 三路都试),「或」语义:照片
         // 满足任一条件(像/含字)即显示(第二十一批恢复逐词,见 OCR 层注释)
         let terms = Self.splitTerms(query)
-        let visualTerms = terms.filter { !Self.containsDigit($0) }
+        // 第七十二批:语义/标签侧全按简体键运转(词典英文模板/专名闸/证件豁免/
+        // 标签 token),繁体词原样进会绕过整套校准——「駕駛證」裸嵌入捞 254 个
+        // 文档噪声(221 装机实测)。视觉词与 concept 统一繁→简归一;文字通道
+        // 保留原词,转换词以追加变体并入(scriptVariants,原词+转换词双向无损)
+        let simTerms = terms.map { QueryUnderstanding.simplified($0) }
+        let visualTerms = simTerms.filter { !Self.containsDigit($0) }
         let concept = visualTerms.isEmpty ? query : visualTerms.joined(separator: " ")
         // 第六十二批:专名词(华研机器人——连续生字符≥2,判据见
         // QueryUnderstanding.isProperNoun)整词只走文字通道。第六十批管住了
@@ -396,7 +401,7 @@ final class SearchEngine {
         // 交给对比边距(≥0.010)裁决。低分段可行性已双模型实测(run 39898534426
         // dist:远景女照 margin +0.019~+0.030/男照 -0.006~-0.030/合影 +0.005~+0.006
         // 被 0.010 挡住;中性物体历史标定 ±0.004 同样过不了线)
-        let genderDive = terms.contains { QueryUnderstanding.genderOpposite(of: $0) != nil }
+        let genderDive = simTerms.contains { QueryUnderstanding.genderOpposite(of: $0) != nil }
 
         let imageKinds: [ItemKind] = scope == .all ? [.photo, .videoFrame]
             : (scope == .photo ? [.photo] : (scope == .video ? [.videoFrame] : []))
@@ -496,7 +501,10 @@ final class SearchEngine {
                     // 第六十八批:全局模式改反空兜底——文字通道已有命中或上两档
                     // 已有命中时不再换底网(判据与三案实测见 floorTierPermitted)
                     let floor: Float = (among != nil ? 0.03 : 0.08) * gate
-                    let probeTerms = terms.isEmpty ? [query] : terms
+                    // 第七十二批:探测与文字通道同口径(原词+繁→简转换词)——
+                    // 文字通道命中过任一变体即算 covered,否则繁体词探测简体库恒空
+                    let probeTerms = (terms.isEmpty ? [query] : terms)
+                        .flatMap { QueryUnderstanding.scriptVariants(of: $0) }
                     if Self.floorTierPermitted(
                         among: among, semanticOnly: semanticOnly, upperTierEmpty: hits.isEmpty,
                         aliasExempt: probeTerms.contains {
@@ -578,7 +586,9 @@ final class SearchEngine {
             // 第二十一批:多词按「或」逐词命中标签——整串「杨如 男」永远匹配
             // 不到标签「杨如」,他本人的照片在裸搜多词下一张出不来
             var tagRefs = Set<String>()
-            for t in (terms.isEmpty ? [concept] : terms) {
+            // 第七十二批:标签按繁→简变体并查(归组命名是用户手敲简体)
+            for t in (terms.isEmpty ? [concept] : terms)
+                .flatMap({ QueryUnderstanding.scriptVariants(of: $0) }) {
                 for r in ((try? store.searchUserTags(query: t)) ?? [])
                 where among?.contains(r) ?? true { tagRefs.insert(r) }
             }
@@ -672,8 +682,12 @@ final class SearchEngine {
                 // 只搜证件名会漏掉全部正面照——补字段级别名并集保召回
                 // 第六十九批英文证件桥(纯加法):表内英文词追加中文对应词+别名,
                 // 原词匹配不动——大陆证件只印中文,不追加则英文查询漏全部大陆证件
+                // 第七十二批:追加繁→简转换词及其别名(原词优先,排序不变)——
+                // 「駕駛證」同时命中大陆简体驾驶证 OCR,「美團」原词照常命中繁体月结单
+                let conv = QueryUnderstanding.simplified(t)
                 let variants = [t] + (QueryUnderstanding.ocrAliases[t] ?? [])
                     + QueryUnderstanding.bridgedVariants(for: t)
+                    + (conv != t ? [conv] + (QueryUnderstanding.ocrAliases[conv] ?? []) : [])
                 for term in variants {
                 let rows = (try? store.searchOCR(query: term)) ?? []
                 let kinds = classifier.classify(rows.map(\.refKey))
@@ -744,7 +758,8 @@ final class SearchEngine {
                 // 第三十九批修:按范围过滤 OCR 命中——验收 medium 发现,视频
                 // 范围下照片 OCR 泄漏进结果(ocrKind 只归类不过滤)
                 // 第四十批:改用 scopeAllowedKinds 统一映射,消除并行维护的
-                // 内联 switch(其 .file 分支因上方 guard 永不可达)
+                // 内联 switch(其 .file 分支在批 39-70 间因顶部 file 守卫永不可达;
+                // 第七十一批守卫删除后 .file 分支可达,此处为路径史实记录)
                 let rows = ocrUnionHits(t, scope: scope, within: within, topK: topK, classifier: classifier)
                     .filter { Self.scopeAllowedKinds(scope).contains($0.kind) }
                 let connectorIsAnd = (spec.connector == .and)
@@ -836,12 +851,15 @@ final class SearchEngine {
                 // and:杨如 男 只能出文字截图,他本人的照片一张进不了交集
                 // 第三十九批:人名标签是照片侧数据,视频范围下不再并入
                 if allowed.contains(.photo) {
-                    for r in ((try? store.searchUserTags(query: t)) ?? [])
-                        .filter({ within?.contains($0) ?? true }) where !seen.contains(r) {
-                        seen.insert(r)
-                        hits.append(SearchHit(kind: .photo, refKey: r, frameIndex: 0,
-                                              space: "userTag", title: nil, date: nil,
-                                              score: 0.9, color: nil))
+                    // 第七十二批:标签繁→简变体并查(与主管线用户标签通道同规)
+                    for vt in QueryUnderstanding.scriptVariants(of: t) {
+                        for r in ((try? store.searchUserTags(query: vt)) ?? [])
+                            .filter({ within?.contains($0) ?? true }) where !seen.contains(r) {
+                            seen.insert(r)
+                            hits.append(SearchHit(kind: .photo, refKey: r, frameIndex: 0,
+                                                  space: "userTag", title: nil, date: nil,
+                                                  score: 0.9, color: nil))
+                        }
                     }
                 }
                 perTerm.append(hits)
@@ -899,8 +917,11 @@ final class SearchEngine {
         var out: [(kind: ItemKind, refKey: String, text: String)] = []
         var seen = Set<String>()
         // 第六十九批:英文证件桥同规(主管线 OCR 通道注释)——纯加法
+        // 第七十二批:繁→简转换词同规追加(与主管线一致,文字:/and:/or: 共用此处)
+        let conv = QueryUnderstanding.simplified(t)
         for term in [t] + (QueryUnderstanding.ocrAliases[t] ?? [])
-            + QueryUnderstanding.bridgedVariants(for: t) {
+            + QueryUnderstanding.bridgedVariants(for: t)
+            + (conv != t ? [conv] + (QueryUnderstanding.ocrAliases[conv] ?? []) : []) {
             let rows: [(String, String)]
             if let among = within {
                 rows = ((try? store.searchOCR(query: term, among: Array(among))) ?? [])
@@ -981,11 +1002,15 @@ final class SearchEngine {
 
     /// 单词语义命中(SigLIP 视觉,门槛 0.14 + 0.08 弱信号兜底 + 相对尾部截断)。
     /// gateScale=激活模型的门槛缩放系数(so400m 0.87,第六十一批校准)
-    private func semanticHits(_ term: String, siglip: SigLIPEmbedder?, topK: Int,
+    private func semanticHits(_ rawTerm: String, siglip: SigLIPEmbedder?, topK: Int,
                               within: Set<String>? = nil,
                               scope: SearchScope = .all,
                               gateScale: Float = 1.0) -> [SearchHit] {
         guard let siglip else { return [] }
+        // 第七十二批:繁→简归一(在通道入口自守,调用方无须预处理)——内部
+        // 专名闸/词典模板/证件豁免/性别逻辑全按简体键运转,繁体原串会绕过
+        // 校准裸嵌入(駕駛證 254 文档噪声实测);幂等,简体词零变化
+        let term = QueryUnderstanding.simplified(rawTerm)
         // 第七十一批:文件范围早退(与 searchScoped 守卫收窄配套)——文件
         // 只有 Gemma 空间向量,SigLIP 通道无文件数据;此前靠 searchScoped
         // 顶部守卫兜着,守卫删后这里必须自守(顺带免去空 kinds 的 SQL IN())
