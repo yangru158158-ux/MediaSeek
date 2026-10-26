@@ -594,7 +594,13 @@ final class VectorStore {
     /// 某照片的整图 SigLIP 向量(合影计数兜底用;与检索/查重同源)。
     /// blob 字节数与 dim 不一致(截断/坏行)返回 nil,不越界读。
     func clipVector(ref: String) -> [Float]? { try serialized {
-        guard let db, let stmt = try? prepare("SELECT vec, dim FROM items WHERE kind = 'photo' AND ref_key = ? AND frame_index = 0 LIMIT 1") else { return nil }
+        // 第七十五批二修:不再限定 frame_index=0——全量重建开跑会把全部照片
+        // 行打成 -1 标记(markAllPhotosForEnrichment),旧查询在整个重建窗口
+        // (可达数小时)对全部照片取不到向量,PeopleView 合影计数兜底全库降级
+        // (验收 low)。该查询只喂锚点对比用,快扫向量与富集向量同源同维,
+        // 取任意一行即可;双行残留态(批74 upsertPhotoEnriched 的 upsert 与
+        // DELETE 非同事务,DELETE 失败可留双行)LIMIT 1 也能取到
+        guard let db, let stmt = try? prepare("SELECT vec, dim FROM items WHERE kind = 'photo' AND ref_key = ? LIMIT 1") else { return nil }
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, ref, -1, Self.transient)
         guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
@@ -926,10 +932,18 @@ final class VectorStore {
     /// 全量重建开跑前给全部照片向量行打 -1 标记(第七十五批):重建中断后
     /// 增量要能看见剩余照片——此前全量重建时快扫对已有向量的照片整段跳过,
     /// 标记从未打下,中断后剩余照片「有向量+有旧行」对增量隐身(224 装机
-    /// 死结:中断→重开→「索引完成」但重建只做了一半)。一条 UPDATE,幂等;
+    /// 死结:中断→重开→「索引完成」但重建只做了一半)。
+    /// 第七十五批二修(验收 high):先 DELETE 已有 -1 行再 UPDATE——直接
+    /// UPDATE 在「同照片 0 行与 -1 行并存」的库态(批74 upsertPhotoEnriched
+    /// 的 upsert 与 DELETE 非同一事务,DELETE 失败可残留双行;中断重建过的
+    /// 224 设备正是高危群体)会撞 UNIQUE(kind,ref_key,frame_index) 整条
+    /// 原子失败抛错,全量重建在入口即 .failed(python sqlite3 同构复现实锤)。
+    /// 先删 -1 残留再改标记,两步都不可能撞约束;若 DELETE 后 UPDATE 前
+    /// 崩溃,被删照片等同无向量,快扫路径自会补 -1 行,无死角。
     /// 标记随富集的 upsertPhotoEnriched 逐张清除
     func markAllPhotosForEnrichment() throws { try serialized {
         guard let db else { throw MSError("数据库未打开") }
+        try exec("DELETE FROM items WHERE kind = 'photo' AND space = 'clip' AND frame_index = -1")
         try exec("UPDATE items SET frame_index = -1 WHERE kind = 'photo' AND space = 'clip'")
     } }
 

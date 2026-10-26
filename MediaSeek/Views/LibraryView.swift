@@ -152,12 +152,14 @@ struct LibraryView: View {
                     HStack {
                         Text(app.indexing.phaseText).font(.footnote)
                         Spacer()
-                        Text("\(app.indexing.processed) / \(app.indexing.total)")
+                        // 批75:快扫相位跟随快扫 x/y(此前只认照片/视频相位计数,
+                        // 快扫全程 0/13555 纹丝不动)
+                        Text("\(app.indexing.progressDone) / \(app.indexing.progressTotal)")
                             .font(.footnote.monospacedDigit())
                             .foregroundStyle(.secondary)
                     }
-                    ProgressView(value: app.indexing.total > 0
-                                 ? Double(app.indexing.processed) / Double(app.indexing.total) : 0)
+                    ProgressView(value: app.indexing.progressTotal > 0
+                                 ? Double(app.indexing.progressDone) / Double(app.indexing.progressTotal) : 0)
                     if app.indexing.errorCount > 0 {
                         Text("\(app.indexing.errorCount) 项处理失败(已跳过)\(app.indexing.firstErrorMessage.map { ":\($0)" } ?? "")")
                             .font(.caption2).foregroundStyle(.orange)

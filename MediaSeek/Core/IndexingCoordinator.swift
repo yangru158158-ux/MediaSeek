@@ -182,10 +182,14 @@ final class IndexingCoordinator: ObservableObject {
         }
     }
 
+    /// 批75:进度条统一视图——快扫相位用自己的 x/y 计数。此前进度条只认
+    /// 照片/视频相位的 processed/total,快扫 20+ 分钟里条纹丝不动(装机点名)
+    var progressDone: Int { phase == .fastScan ? fastScanDone : processed }
+    var progressTotal: Int { phase == .fastScan ? fastScanTotal : total }
+
     var phaseText: String {
         switch phase {
-        case .idle: return backgroundPaused ? "后台已暂停,回到前台自动继续" : "未开始"
-        case .waitingModel: return "等待模型加载…"
+        case .idle: return backgroundPaused ? "后台已暂停,回到前台自动继续" : "未开始"        case .waitingModel: return "等待模型加载…"
         case .fastScan:
             return "快扫语义索引 \(fastScanDone)/\(fastScanTotal)(已可搜)" + (stageNote.isEmpty ? "" : " · \(stageNote)")
         case .photos: return "正在索引照片" + (stageNote.isEmpty ? "" : " · \(stageNote)")
@@ -805,6 +809,21 @@ final class IndexingCoordinator: ObservableObject {
         return ids
     }
 
+    /// 批75:SigLIP 嵌入带一次 ANE 超时重试——8 路并发把神经引擎请求队列
+    /// 挤爆的偶发超时(224 装机实测快扫 4/2753 报 E5RT: ANE inference
+    /// operation failed/timed out),等 0.8s 让队列排空再试一次;再失败按
+    /// 原路抛出(各相位既有记账/自愈照走)。只重试一次:真坏图/坏模型
+    /// 不该空转两轮以上
+    nonisolated private static func embedWithANERetry(
+        _ clip: SigLIPEmbedder, _ cg: CGImage) async throws -> [Float] {
+        do {
+            return try clip.embedImage(cg)
+        } catch {
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            return try clip.embedImage(cg)
+        }
+    }
+
     nonisolated private static func embedPhotoWork(
         asset: PHAsset, photo: PhotoLibraryService, store: VectorStore,
         clip: SigLIPEmbedder?, gemma: GemmaTextEmbedder?, face: FaceEmbedder?,
@@ -828,7 +847,7 @@ final class IndexingCoordinator: ObservableObject {
                 return 1
             }
             let colorBucket = PhotoColor.bucket(of: small)
-            let vec = try clip.embedImage(small)
+            let vec = try await Self.embedWithANERetry(clip, small)
             timing?.add("embed", CFAbsoluteTimeGetCurrent() - t1) // 嵌入段含降采样,量级可忽略
             // 第七十四批二修:换 upsertPhotoEnriched(写 0 行+删快扫 -1 标记行,
             // 同一序列化块)——UNIQUE 键含 frame_index,普通 upsert 的 0 行与快扫
@@ -884,14 +903,13 @@ final class IndexingCoordinator: ObservableObject {
                 errors.set("快扫降采样失败:\(asset.localIdentifier)")
                 return 1
             }
-            let vec = try clip.embedImage(small)
+            let vec = try await Self.embedWithANERetry(clip, small)
             // 第七十四批:frame_index=-1 = 快扫标记,富集侧用
             // upsertPhotoEnriched(写 0+删-1)清除。续跑判据从「缺 OCR 行」
             // 扩成「有标记或缺行」——存量库重建(模型切换只清向量,OCR 行
             // 保留)中断后,剩余照片 OCR 行都在,旧判据判定无事可做,富集
-            // 静默断流(223 装机实锤)。已知窗口代价:快扫后未富集的照片只有
-            // -1 行,clipVector(ref:) 按 frame_index=0 取向量(PeopleView
-            // 合影计数兜底)在该窗口取不到、静默降级,富集完成即恢复
+            // 静默断流(223 装机实锤)。clipVector(ref:) 已不限 frame_index
+            // (批75二修),-1 行同样可供 PeopleView 锚点对比,无窗口降级
             try store.upsert(kind: .photo, refKey: asset.localIdentifier, frameIndex: -1,
                              space: clip.space,
                              vector: vec, title: nil, date: asset.creationDate,
@@ -984,7 +1002,7 @@ final class IndexingCoordinator: ObservableObject {
                     // 混入"只有声音"黑视频)
                     if PhotoColor.isTooDark(frame) { continue }
                     guard let small = Self.downscaled(frame, to: 320) else { continue }
-                    let vec = try clip.embedImage(small)
+                    let vec = try await Self.embedWithANERetry(clip, small)
                     try store.upsert(kind: .videoFrame, refKey: asset.localIdentifier, frameIndex: i,
                                      space: clip.space, vector: vec, title: nil, date: asset.creationDate,
                                      color: PhotoColor.bucket(of: small))
