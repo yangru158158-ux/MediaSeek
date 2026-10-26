@@ -120,7 +120,7 @@ enum TimeQueryParser {
         if let r = attempt("(?<![0-9])((?:19|20)\\d{2})(?![0-9])", { c in
             guard let y = Int(c[0]), (1900...2100).contains(y) else { return nil }
             return yearRange(y, "\(y)年")
-        }), !r.remaining.isEmpty {
+        }), !r.1.trimmingCharacters(in: .whitespaces).isEmpty {
             return r
         }
         return (nil, text)
