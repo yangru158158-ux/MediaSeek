@@ -866,16 +866,66 @@ final class IndexingCoordinator: ObservableObject {
         return ids
     }
 
+    /// 批78:异步计数信号量——限制同时进入 ANE 的 SigLIP 嵌入数(≤2)。
+    /// 8 路 Worker 的取图/OCR(CPU/GPU)照旧并行,只有嵌入推理过闸:
+    /// 嵌入仅占单张耗时 26%(278/1077ms),2 路并发吞吐(≈7 张/秒)恰等于
+    /// 管线天花板,速度不降而 ANE 队列永不满——根治「E5RT 超时→半死→
+    /// 取消打不进挂死的 CoreML 调用→看门狗」链(224/226/227 三次同签名
+    /// 崩溃,227 的 willResignActive 前置取消也拦不住,UUID 对验实锤)。
+    /// 锁协议:wait 持锁检查/入队后闭包内解锁(同步执行);signal 持锁
+    /// 出队,名额直接转让给唤醒者;单锁无嵌套无死锁面
+    final class AsyncSemaphore: @unchecked Sendable {
+        private let lock = NSLock()
+        private var available: Int
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+
+        init(limit: Int) { available = limit }
+
+        func wait() async {
+            lock.lock()
+            if available > 0 {
+                available -= 1
+                lock.unlock()
+                return
+            }
+            await withCheckedContinuation { c in
+                waiters.append(c)
+                lock.unlock()
+            }
+        }
+
+        func signal() {
+            lock.lock()
+            if !waiters.isEmpty {
+                let c = waiters.removeFirst()
+                lock.unlock()
+                c.resume()   // 名额转让,available 不变
+                return
+            }
+            available += 1
+            lock.unlock()
+        }
+    }
+
+    /// 嵌入并发闸门(批78):全 App 共享一个,ANE 同时最多 2 路 SigLIP
+    nonisolated private static let aneGate = AsyncSemaphore(limit: 2)
+
     /// 批75:SigLIP 嵌入带一次 ANE 超时重试——8 路并发把神经引擎请求队列
     /// 挤爆的偶发超时(224 装机实测快扫 4/2753 报 E5RT: ANE inference
     /// operation failed/timed out),等 0.8s 让队列排空再试一次;再失败按
     /// 原路抛出(各相位既有记账/自愈照走)。只重试一次:真坏图/坏模型
-    /// 不该空转两轮以上
+    /// 不该空转两轮以上。
+    /// 批78:①过闸(aneGate ≤2 路,闸外不算 ANE 压力,defer 保证释放);
+    /// ②重试前查取消——正在挂死的调用救不了,但「重试再挂 10 秒」直接
+    /// 跳过,停止后最多 10 秒内排空(227 装机「反复按停止无效」实锤)
     nonisolated private static func embedWithANERetry(
         _ clip: SigLIPEmbedder, _ cg: CGImage) async throws -> [Float] {
+        await aneGate.wait()
+        defer { aneGate.signal() }
         do {
             return try clip.embedImage(cg)
         } catch {
+            if Task.isCancelled { throw error }
             try? await Task.sleep(nanoseconds: 800_000_000)
             return try clip.embedImage(cg)
         }
