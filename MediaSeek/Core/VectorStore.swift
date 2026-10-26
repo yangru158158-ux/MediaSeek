@@ -923,6 +923,16 @@ final class VectorStore {
         guard sqlite3_step(stmt) == SQLITE_DONE else { throw MSError("快扫标记清除失败") }
     } }
 
+    /// 全量重建开跑前给全部照片向量行打 -1 标记(第七十五批):重建中断后
+    /// 增量要能看见剩余照片——此前全量重建时快扫对已有向量的照片整段跳过,
+    /// 标记从未打下,中断后剩余照片「有向量+有旧行」对增量隐身(224 装机
+    /// 死结:中断→重开→「索引完成」但重建只做了一半)。一条 UPDATE,幂等;
+    /// 标记随富集的 upsertPhotoEnriched 逐张清除
+    func markAllPhotosForEnrichment() throws { try serialized {
+        guard let db else { throw MSError("数据库未打开") }
+        try exec("UPDATE items SET frame_index = -1 WHERE kind = 'photo' AND space = 'clip'")
+    } }
+
     /// 需要富集的照片(第七十四批):快扫标记位(frame_index=-1)或缺 OCR 行
     /// 二者其一。旧判据(photoRefKeysMissingOCR)只认「缺 OCR 行」——全新
     /// 安装场景成立(快扫不写 OCR),但存量库重建(模型切换只清向量,

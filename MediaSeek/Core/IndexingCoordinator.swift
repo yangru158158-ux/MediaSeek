@@ -19,6 +19,8 @@ final class IndexingCoordinator: ObservableObject {
     @Published private(set) var processed = 0
     @Published private(set) var total = 0
     @Published private(set) var isRunning = false
+    /// 批75:因退后台而暂停(区别于用户手动停止;回前台自动续跑)
+    @Published private(set) var backgroundPaused = false
     @Published private(set) var errorCount = 0
     @Published private(set) var firstErrorMessage: String?
     @Published private(set) var lastSyncAt: Date?
@@ -155,11 +157,34 @@ final class IndexingCoordinator: ObservableObject {
         self.models = models
         self.photo = photo
         self.imports = imports
+        // 第七十五批:退后台=协作暂停,回前台自动续跑。8 路 CPU 洪流会把
+        // didEnterBackground 的系统框架观察者饿死(主线程 NSOperation
+        // waitUntilFinished >10s → 0x8BADF00D 场景看门狗杀,224 装机崩溃
+        // 实锤:栈帧 _applicationDidEnterBackground→waitUntilFinished)。
+        // 暂停走协作取消:每张照片事务落盘 + -1 标记保进度,回前台增量续
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.isRunning else { return }
+                self.task?.cancel()
+                self.backgroundPaused = true
+            }
+        }
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.backgroundPaused else { return }
+                self.backgroundPaused = false
+                self.startRun(full: false)   // 增量:剩余照片靠 -1 标记可见
+            }
+        }
     }
 
     var phaseText: String {
         switch phase {
-        case .idle: return "未开始"
+        case .idle: return backgroundPaused ? "后台已暂停,回到前台自动继续" : "未开始"
         case .waitingModel: return "等待模型加载…"
         case .fastScan:
             return "快扫语义索引 \(fastScanDone)/\(fastScanTotal)(已可搜)" + (stageNote.isEmpty ? "" : " · \(stageNote)")
@@ -218,8 +243,10 @@ final class IndexingCoordinator: ObservableObject {
             self.isRunning = false
             self.task = nil
             UIApplication.shared.isIdleTimerDisabled = false
-            // 跑完后若期间有新导入排队,立刻补跑一轮(文件秒级变「已索引」)
-            if self.rerunPending {
+            // 跑完后若期间有新导入排队,立刻补跑一轮(文件秒级变「已索引」)。
+            // 批75:后台暂停触发的取消不补跑——后台重启索引=再送看门狗,
+            // 留给回前台的 willEnterForeground 续跑
+            if self.rerunPending, !self.backgroundPaused {
                 self.rerunPending = false
                 self.startRun(full: false)
             }
@@ -282,6 +309,10 @@ final class IndexingCoordinator: ObservableObject {
             // 全量重建把几小时转写重跑一遍纯属浪费)
             UserDefaults.standard.removeObject(forKey: "speechFail")
             UserDefaults.standard.removeObject(forKey: "speechFailCnt")
+            // 第七十五批:开跑前给全部照片打 -1 标记——重建被任何原因打断
+            // (后台暂停/崩溃/手动停止),增量靠标记看见剩余照片接着跑;
+            // 此前快扫对已有向量整段跳过不打标记,中断=死结(224 装机实锤)
+            try store.markAllPhotosForEnrichment()
         }
         // 图像模型更换检测(so400m 等在线升级):模型加载时记下当前维度
         // (ModelManager 写 clipModelDim),与库内向量维度不一致 = 换过嵌入模型,
