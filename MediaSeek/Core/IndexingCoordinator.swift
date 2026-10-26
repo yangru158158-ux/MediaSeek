@@ -189,7 +189,8 @@ final class IndexingCoordinator: ObservableObject {
 
     var phaseText: String {
         switch phase {
-        case .idle: return backgroundPaused ? "后台已暂停,回到前台自动继续" : "未开始"        case .waitingModel: return "等待模型加载…"
+        case .idle: return backgroundPaused ? "后台已暂停,回到前台自动继续" : "未开始"
+        case .waitingModel: return "等待模型加载…"
         case .fastScan:
             return "快扫语义索引 \(fastScanDone)/\(fastScanTotal)(已可搜)" + (stageNote.isEmpty ? "" : " · \(stageNote)")
         case .photos: return "正在索引照片" + (stageNote.isEmpty ? "" : " · \(stageNote)")

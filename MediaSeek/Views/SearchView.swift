@@ -339,7 +339,9 @@ struct SearchView: View {
             .padding(.horizontal)
             .padding(.vertical, 6)
             if app.indexing.isRunning {
-                Text("⚠️ 索引重建中 \(app.indexing.processed)/\(app.indexing.total) · 当前结果暂不完整")
+                // 批75一修补:重建横幅同绑相位感知进度(快扫相位喂快扫 x/y,
+                // 否则快扫全程 0/N 冻结——验收 medium,与 LibraryView 同型)
+                Text("⚠️ 索引重建中 \(app.indexing.progressDone)/\(app.indexing.progressTotal) · 当前结果暂不完整")
                     .font(.caption2)
                     .foregroundStyle(.orange)
                     .padding(.horizontal)
