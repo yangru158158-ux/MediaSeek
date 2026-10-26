@@ -17,25 +17,41 @@ struct ModelManifest: Codable {
     let files: [ModelPkgFile]
 }
 
-// MARK: - 下载器(带进度)
+// MARK: - 下载器(断点续传)
 
 /// 在线模型更新:读 Release 上的 manifest.json,下载 zip 后走 importModelZip。
-/// 下载用 delegate 拿进度(模型包几百 MB,没有进度无法用);
-/// didFinish 与 didCompleteWithError 互斥恢复 continuation,不会双 resume。
+/// 第七十六批:下载改为「Range 断点续传 + .part 落盘」——旧实现是前台
+/// 一次性 downloadTask,切后台/锁屏/断网即取消且已下数据全丢,2.1GB 的
+/// so400m 包重下一次就是一次赌运气(装机实测点名)。现在:
+/// - 分片写入 Application Support/MediaSeek/Downloads/pkg_{key}.part
+/// - 再点下载带 Range: bytes=已下- 续传(GitHub Release 存储支持 206)
+/// - 服务器返回 200(Range 被忽略/无 .part)自动从零;包已更新(.part 比
+///   清单大)丢弃重下;下完核对总字节数与清单一致才进导入
+/// - 进度从「已下部分/总大小」起步,界面标「续传中」
+/// @MainActor 收状态;字节计数与文件句柄只被会话的串行代理队列触碰
 @MainActor
-final class ModelUpdateLoader: NSObject, ObservableObject, URLSessionDownloadDelegate {
+final class ModelUpdateLoader: NSObject, ObservableObject, URLSessionDataDelegate {
     @Published var checking = false
     @Published var manifest: ModelManifest?
     @Published var errorText: String?
     @Published var downloadingKey: String?
     @Published var progress: Double = 0
     @Published var importing = false
+    /// 本次是否为续传(进度从已下部分起步)
+    @Published var resuming = false
 
     /// 仓库公开 Release,固定 tag=models;App 严禁公开发布,此地址仅本人设备使用
     static let manifestURL =
         "https://github.com/yangru158158-ux/MediaSeek/releases/download/models/manifest.json"
 
     private var continuation: CheckedContinuation<URL, Error>?
+    private var dataTask: URLSessionDataTask?
+    private var fileHandle: FileHandle?
+    private var partPath: String = ""
+    private var existingBytes: Int64 = 0
+    private var received: Int64 = 0
+    private var totalBytes: Int64 = 0
+    private var partIsValid = false
 
     func check() async {
         checking = true
@@ -57,13 +73,37 @@ final class ModelUpdateLoader: NSObject, ObservableObject, URLSessionDownloadDel
     func download(_ file: ModelPkgFile) async throws -> URL {
         downloadingKey = file.key
         progress = 0
+        resuming = false
+        let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("MediaSeek/Downloads", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let part = dir.appendingPathComponent("pkg_\(file.key).part")
+        var existing = Int64((try? FileManager.default.attributesOfItem(atPath: part.path))?[.size] as? Int64 ?? 0)
+        // 服务器包已更新:.part 比清单标称还大 = 旧包残片,丢弃重下
+        if existing > file.size {
+            try? FileManager.default.removeItem(at: part)
+            existing = 0
+        }
+        var req = URLRequest(url: URL(string: file.url)!)
+        req.timeoutInterval = 60
+        req.timeoutIntervalForResource = 7200
+        if existing > 0 {
+            req.setValue("bytes=\(existing)-", forHTTPHeaderField: "Range")
+        }
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForResource = 7200   // 大包慢网也要能下完
         let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
         defer { session.finishTasksAndInvalidate() }
+        partPath = part.path
+        existingBytes = existing
+        received = 0
+        totalBytes = file.size
+        partIsValid = false
+        resuming = existing > 0
+        progress = existing > 0 ? Double(existing) / Double(file.size) : 0
         return try await withCheckedThrowingContinuation { c in
             self.continuation = c
-            session.downloadTask(with: URL(string: file.url)!).resume()
+            self.dataTask = session.dataTask(with: req)
+            self.dataTask?.resume()
         }
     }
 
@@ -72,51 +112,108 @@ final class ModelUpdateLoader: NSObject, ObservableObject, URLSessionDownloadDel
         UserDefaults.standard.set(version, forKey: "pkg_\(key)")
         downloadingKey = nil
         progress = 0
+        resuming = false
     }
 
     func abortWith(error: Error) {
         downloadingKey = nil
         errorText = "下载/导入失败:\(error.localizedDescription)"
+        resuming = false
     }
 
-    // MARK: URLSessionDownloadDelegate
-
-    nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
-                                didWriteData bytesWritten: Int64, totalBytesWritten: Int64,
-                                totalBytesExpectedToWrite: Int64) {
-        let p = totalBytesExpectedToWrite > 0
-            ? Double(totalBytesWritten) / Double(totalBytesExpectedToWrite) : 0
-        Task { @MainActor in progress = p }
+    private func finishTask(_ result: Result<URL, Error>) {
+        fileHandle?.closeFile()
+        fileHandle = nil
+        dataTask = nil
+        guard let c = continuation else { return }
+        continuation = nil
+        switch result {
+        case .success(let url): c.resume(returning: url)
+        case .failure(let e): c.resume(throwing: e)
+        }
     }
 
-    nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
-                                didFinishDownloadingTo location: URL) {
-        let dest = FileManager.default.temporaryDirectory
-            .appendingPathComponent("model-pkg-\(UUID().uuidString).zip")
-        try? FileManager.default.removeItem(at: dest)
-        do {
-            try FileManager.default.moveItem(at: location, to: dest)
-            Task { @MainActor in
-                guard let c = self.continuation else { return }
-                self.continuation = nil
-                c.resume(returning: dest)
-            }
-        } catch {
-            Task { @MainActor in
-                guard let c = self.continuation else { return }
-                self.continuation = nil
-                c.resume(throwing: error)
+    // MARK: URLSessionDataDelegate
+
+    nonisolated func urlSession(_ session: URLSession, dataTask: URLSessionDataTask,
+                                didReceive response: URLResponse,
+                                completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+        Task { @MainActor in
+            let fm = FileManager.default
+            if status == 206, self.existingBytes > 0 {
+                // 续传:追加写(.part 必在——existingBytes>0 即以其存在为前提)
+                if !fm.fileExists(atPath: self.partPath) {
+                    fm.createFile(atPath: self.partPath, contents: nil)
+                    self.existingBytes = 0
+                }
+                do {
+                    self.fileHandle = try FileHandle(forWritingTo: URL(fileURLWithPath: self.partPath))
+                    try self.fileHandle?.seekToEnd()
+                    self.partIsValid = true
+                    completionHandler(.allow)
+                } catch {
+                    self.finishTask(.failure(MSError("打开续传文件失败:\(error.localizedDescription)")))
+                    completionHandler(.cancel)
+                }
+            } else if status == 200 {
+                // Range 被忽略或全新下载:整包从零(丢弃已有 .part)
+                try? fm.removeItem(atPath: self.partPath)
+                fm.createFile(atPath: self.partPath, contents: nil)
+                do {
+                    self.fileHandle = try FileHandle(forWritingTo: URL(fileURLWithPath: self.partPath))
+                    self.existingBytes = 0
+                    self.resuming = false
+                    self.progress = 0
+                    self.partIsValid = true
+                    completionHandler(.allow)
+                } catch {
+                    self.finishTask(.failure(MSError("创建下载文件失败:\(error.localizedDescription)")))
+                    completionHandler(.cancel)
+                }
+            } else {
+                self.finishTask(.failure(MSError("服务器返回 \(status),稍后重试")))
+                completionHandler(.cancel)
             }
         }
     }
 
-    nonisolated func urlSession(_ session: URLSession, task: URLSessionTask,
-                                didCompleteWithError error: Error?) {
-        guard let error else { return }   // 正常结束时 didFinish 已恢复
+    nonisolated func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        // 代理队列串行:句柄写入不并发;MainActor 计数由 Task 异步刷新
+        let chunk = data
         Task { @MainActor in
-            guard let c = self.continuation else { return }
-            self.continuation = nil
-            c.resume(throwing: error)
+            guard self.fileHandle != nil, self.partIsValid else { return }
+            self.fileHandle?.write(chunk)
+            self.received += Int64(chunk.count)
+            if self.totalBytes > 0 {
+                self.progress = Double(self.existingBytes + self.received) / Double(self.totalBytes)
+            }
+        }
+    }
+
+    nonisolated func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        Task { @MainActor in
+            guard let error else {
+                // 成功:校验总字节数与清单一致才交货
+                let got = self.existingBytes + self.received
+                guard self.partIsValid, self.totalBytes > 0, got == self.totalBytes else {
+                    // 不完整:保留 .part 供续传,报错让用户重点
+                    self.finishTask(.failure(MSError("下载不完整(\(got)/\(self.totalBytes) 字节),再点一次从断点续传")))
+                    return
+                }
+                let dest = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("model-pkg-\(UUID().uuidString).zip")
+                do {
+                    try? FileManager.default.removeItem(at: dest)
+                    try FileManager.default.moveItem(atPath: self.partPath, toPath: dest.path)
+                    self.finishTask(.success(dest))
+                } catch {
+                    self.finishTask(.failure(error))
+                }
+                return
+            }
+            // 失败/取消:保留 .part(断点资产),下次续传
+            self.finishTask(.failure(error))
         }
     }
 }
@@ -186,7 +283,9 @@ struct ModelUpdateSection: View {
             }
             if isDownloading {
                 ProgressView(value: loader.progress)
-                Text("下载 \(Int(loader.progress * 100))% — 请保持 App 在前台")
+                Text(loader.resuming
+                     ? "续传中 \(Int(loader.progress * 100))%(已从断点继续)— 中断不怕,再点从断点续"
+                     : "下载 \(Int(loader.progress * 100))% — 中断不怕,已下部分自动保留续传")
                     .font(.caption2).foregroundStyle(.secondary)
             }
             if loader.importing, isDownloading {

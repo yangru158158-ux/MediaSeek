@@ -32,6 +32,7 @@ struct LibraryView: View {
     var body: some View {
         NavigationStack {
             List {
+                setupSection
                 permissionSection
                 statsSection
                 indexingSection
@@ -89,6 +90,68 @@ struct LibraryView: View {
     }
 
     // MARK: - 权限
+
+    /// 首次使用三步引导(第七十六批):有强制顺序(授权→模型→索引)就得
+    /// 每步检测前置并指路——此前顺序只存在于用户踩坑里,装完不会走第一步
+    /// 是装机实测点名。三步全完成后整卡消失;未完成步骤的按钮不可用时
+    /// 明示「上一步是什么」
+    @ViewBuilder
+    private var setupSection: some View {
+        let authorized = app.photoLib.isAuthorized
+        let modelsReady = app.models.bothReady
+        let indexed = app.indexing.indexedPhotoCount > 0
+        if !(authorized && modelsReady && indexed) {
+            Section("首次使用(按顺序三步)") {
+                // ① 授权
+                setupRow(no: "①", title: "授权照片库",
+                         detail: "搜索/索引/人物归组的全部原料",
+                         done: authorized, blockedBy: nil,
+                         actionTitle: "去授权") {
+                    Task { await app.photoLib.requestAccess() }
+                }
+                // ② 模型
+                setupRow(no: "②", title: "下载模型",
+                         detail: modelsReady
+                            ? "模型已就绪"
+                            : "到「设置」页 → 模型在线更新:先装①标准完整包;想用 so400m 增强再装③,装完再开索引(先索引后切换会全部重嵌一遍)",
+                         done: modelsReady, blockedBy: authorized ? nil : "①授权照片库",
+                         actionTitle: nil, action: nil)
+                // ③ 索引
+                setupRow(no: "③", title: "开始索引",
+                         detail: indexed ? "已有索引,后续增量自动" : "快扫先行(可搜),富集后台补齐",
+                         done: indexed,
+                         blockedBy: authorized ? (modelsReady ? nil : "②下载模型") : "①授权照片库",
+                         actionTitle: "开始索引") {
+                    app.indexing.runIncremental()
+                }
+            }
+        }
+    }
+
+    private func setupRow(no: String, title: String, detail: String, done: Bool,
+                          blockedBy: String?, actionTitle: String?,
+                          action: (() -> Void)?) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: done ? "checkmark.circle.fill" : "\(no).circle")
+                .foregroundStyle(done ? .green : .secondary)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title).font(.subheadline)
+                Text(detail).font(.caption2).foregroundStyle(.secondary)
+                if let blockedBy {
+                    Text("先完成上一步:\(blockedBy)")
+                        .font(.caption2).foregroundStyle(.orange)
+                }
+            }
+            Spacer()
+            if !done, let actionTitle, let action, blockedBy == nil {
+                Button(actionTitle, action: action)
+                    .font(.subheadline)
+            } else if !done, actionTitle != nil, blockedBy != nil {
+                Text("待上一步").font(.caption2).foregroundStyle(.tertiary)
+            }
+        }
+        .padding(.vertical, 2)
+    }
 
     @ViewBuilder
     private var permissionSection: some View {

@@ -794,8 +794,11 @@ struct PeoplePanel: View {
         // a20→a21(第四十九批):SigLIP 掩码语义修复激活了 companionSuspectedBySigLIP
         // 兜底层(阈值 0.10 按健康余弦尺度标定,掩码 bug 期间该层分数全在噪声带
         // 从不下判,修复后命中带真正生效=裁决集合改变),旧快照必须作废重判
+        // 批76:a21→a22——批75放开 clipVector 的 frame_index 过滤后,兜底层
+        // 在 -1 标记态(重建中断设备)从「不下判」变为生效,属裁决集合改变,
+        // 依教训③升盐作废旧快照(验收 low)
         let ver = app.store.peopleFingerprint(
-            extra: "a21-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
+            extra: "a22-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
         guard let json = app.store.loadPeopleResults(ver: ver),
               let data = json.data(using: .utf8),
               let snap = try? JSONDecoder().decode(PeopleSnapshot.self, from: data) else {
@@ -868,7 +871,7 @@ struct PeoplePanel: View {
         // a21=算法盐,归组逻辑变更必须升盐(与 hydrateIfNeeded 同串;
         // a20→a21=第四十九批掩码修复激活 SigLIP 兜底层,见上)
         let ver = store.peopleFingerprint(
-            extra: "a21-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
+            extra: "a22-m\(UserDefaults.standard.integer(forKey: "faceModelSize"))")
         // 「扫描中」记账 + 屏幕常亮:退后台被系统结束进程后,重开面板能明确
         // 告知「上次未完成」;常亮防前台锁屏挂起
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "peopleScanRunning")

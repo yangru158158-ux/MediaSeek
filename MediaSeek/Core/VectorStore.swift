@@ -933,7 +933,7 @@ final class VectorStore {
     /// 增量要能看见剩余照片——此前全量重建时快扫对已有向量的照片整段跳过,
     /// 标记从未打下,中断后剩余照片「有向量+有旧行」对增量隐身(224 装机
     /// 死结:中断→重开→「索引完成」但重建只做了一半)。
-    /// 第七十五批二修(验收 high):先 DELETE 已有 -1 行再 UPDATE——直接
+    /// 批75一修(42b9f93,首版 cddfd4a 的单条 UPDATE 被验收拦下):先 DELETE 已有 -1 行再 UPDATE——直接
     /// UPDATE 在「同照片 0 行与 -1 行并存」的库态(批74 upsertPhotoEnriched
     /// 的 upsert 与 DELETE 非同一事务,DELETE 失败可残留双行;中断重建过的
     /// 224 设备正是高危群体)会撞 UNIQUE(kind,ref_key,frame_index) 整条

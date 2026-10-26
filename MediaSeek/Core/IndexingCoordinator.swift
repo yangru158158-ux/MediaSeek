@@ -177,6 +177,9 @@ final class IndexingCoordinator: ObservableObject {
             Task { @MainActor in
                 guard let self, self.backgroundPaused else { return }
                 self.backgroundPaused = false
+                // 批76:续跑轮本身就含文件/增量同步,顺带消费暂停期间积压的
+                // 补跑标记,免得续跑结束再来一轮冗余增量(验收 low)
+                self.rerunPending = false
                 self.startRun(full: false)   // 增量:剩余照片靠 -1 标记可见
             }
         }
@@ -230,6 +233,11 @@ final class IndexingCoordinator: ObservableObject {
             rerunPending = true
             return
         }
+        // 批76:全量重建的 -1 标记提前到任务启动瞬间(原在照片同步开头)——
+        // 关掉「启动~markAll 之间被后台暂停,回前台降级增量丢重建意图」的
+        // 窗口(waitingModel 最长 120 秒,验收 medium);标记幂等,失败时
+        // 同步内 forceAll 路径仍以 known=∅ 全量兜底
+        if full { try? store.markAllPhotosForEnrichment() }
         isRunning = true
         processed = 0
         processedLocal = 0
@@ -262,7 +270,13 @@ final class IndexingCoordinator: ObservableObject {
         do {
             let ready = await models.waitReady()
             guard ready else {
-                phase = .failed("模型未就绪,请先在「设置」中导入模型包")
+                // 批76:后台暂停触发的取消不误报「模型未就绪」(waitReady 在
+                // 取消时返回 false,验收 medium);文案同时改成指路第②步
+                if Task.isCancelled {
+                    phase = .idle
+                } else {
+                    phase = .failed("先完成「首次使用」第②步:设置 → 模型在线更新,下载①标准完整包")
+                }
                 return
             }
             // 全量重建不再先清空旧索引:全量覆盖更新,搜索全程不断档
@@ -314,10 +328,8 @@ final class IndexingCoordinator: ObservableObject {
             // 全量重建把几小时转写重跑一遍纯属浪费)
             UserDefaults.standard.removeObject(forKey: "speechFail")
             UserDefaults.standard.removeObject(forKey: "speechFailCnt")
-            // 第七十五批:开跑前给全部照片打 -1 标记——重建被任何原因打断
-            // (后台暂停/崩溃/手动停止),增量靠标记看见剩余照片接着跑;
-            // 此前快扫对已有向量整段跳过不打标记,中断=死结(224 装机实锤)
-            try store.markAllPhotosForEnrichment()
+            // (-1 全库标记已在 startRun(full:) 启动瞬间打过,批76上移;
+            // 此处不再重复——幂等但多余)
         }
         // 图像模型更换检测(so400m 等在线升级):模型加载时记下当前维度
         // (ModelManager 写 clipModelDim),与库内向量维度不一致 = 换过嵌入模型,
@@ -910,7 +922,7 @@ final class IndexingCoordinator: ObservableObject {
             // 扩成「有标记或缺行」——存量库重建(模型切换只清向量,OCR 行
             // 保留)中断后,剩余照片 OCR 行都在,旧判据判定无事可做,富集
             // 静默断流(223 装机实锤)。clipVector(ref:) 已不限 frame_index
-            // (批75二修),-1 行同样可供 PeopleView 锚点对比,无窗口降级
+            // (批75一修 42b9f93),-1 行同样可供 PeopleView 锚点对比,无窗口降级
             try store.upsert(kind: .photo, refKey: asset.localIdentifier, frameIndex: -1,
                              space: clip.space,
                              vector: vec, title: nil, date: asset.creationDate,
