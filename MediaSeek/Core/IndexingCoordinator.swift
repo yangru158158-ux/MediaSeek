@@ -799,8 +799,11 @@ final class IndexingCoordinator: ObservableObject {
             let colorBucket = PhotoColor.bucket(of: small)
             let vec = try clip.embedImage(small)
             timing?.add("embed", CFAbsoluteTimeGetCurrent() - t1) // 嵌入段含降采样,量级可忽略
-            try store.upsert(kind: .photo, refKey: asset.localIdentifier, space: clip.space,
-                             vector: vec, title: nil, date: asset.creationDate, color: colorBucket)
+            // 第七十四批二修:换 upsertPhotoEnriched(写 0 行+删快扫 -1 标记行,
+            // 同一序列化块)——UNIQUE 键含 frame_index,普通 upsert 的 0 行与快扫
+            // -1 行互不冲突会并排留双行,标记永不清除(验收 high)
+            try store.upsertPhotoEnriched(refKey: asset.localIdentifier, space: clip.space,
+                                          vector: vec, date: asset.creationDate, color: colorBucket)
 
             // OCR 文字层:屏幕文字/证件名/编号可被精确检索
             // 无文字也写 "" 占位行:增量同步靠「缺 OCR 行」识别待补照片,
@@ -851,11 +854,13 @@ final class IndexingCoordinator: ObservableObject {
                 return 1
             }
             let vec = try clip.embedImage(small)
-            // 第七十四批:frame_index=-1 = 快扫标记(富集完成改写 0)。续跑
-            // 判据从「缺 OCR 行」扩成「有标记或缺行」——存量库重建(模型切换
-            // 只清向量,OCR 行保留)中断后,剩余照片 OCR 行都在,旧判据判定
-            // 无事可做,富集静默断流(223 装机实锤:中断 3910/13548 后同步
-            // 直接「完成」)。frameIndex 对 photo 无他用(视频帧才有帧号)
+            // 第七十四批:frame_index=-1 = 快扫标记,富集侧用
+            // upsertPhotoEnriched(写 0+删-1)清除。续跑判据从「缺 OCR 行」
+            // 扩成「有标记或缺行」——存量库重建(模型切换只清向量,OCR 行
+            // 保留)中断后,剩余照片 OCR 行都在,旧判据判定无事可做,富集
+            // 静默断流(223 装机实锤)。已知窗口代价:快扫后未富集的照片只有
+            // -1 行,clipVector(ref:) 按 frame_index=0 取向量(PeopleView
+            // 合影计数兜底)在该窗口取不到、静默降级,富集完成即恢复
             try store.upsert(kind: .photo, refKey: asset.localIdentifier, frameIndex: -1,
                              space: clip.space,
                              vector: vec, title: nil, date: asset.creationDate,

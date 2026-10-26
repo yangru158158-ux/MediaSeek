@@ -907,6 +907,22 @@ final class VectorStore {
         return out
     } }
 
+    /// 富集完成的照片向量写入(第七十四批二修):写 frame_index=0 行并同事务
+    /// 删除快扫标记行(-1)。不能只靠 upsert——UNIQUE(kind,ref_key,frame_index)
+    /// 把 frame_index 算进冲突键,0 行与 -1 行互不冲突,只 upsert 会并排留两行:
+    /// 标记永不清除 → 每轮增量同步全库重跑富集(验收 high 实锤)。本方法同一
+    /// serialized 块内先删 -1 再 upsert 0,窗口期(快扫后未富集)同 refKey 双行
+    /// 由搜索侧 dedupByRef 兜底,富集完成即闭合为单行
+    func upsertPhotoEnriched(refKey: String, space: String, vector: [Float],
+                             date: Date?, color: String?) throws { try serialized {
+        try upsertRow(kind: .photo, refKey: refKey, frameIndex: 0, space: space,
+                      vector: vector, title: nil, date: date, color: color)
+        let stmt = try prepare("DELETE FROM items WHERE kind = 'photo' AND ref_key = ? AND frame_index = -1")
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, refKey, -1, Self.transient)
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw MSError("快扫标记清除失败") }
+    } }
+
     /// 需要富集的照片(第七十四批):快扫标记位(frame_index=-1)或缺 OCR 行
     /// 二者其一。旧判据(photoRefKeysMissingOCR)只认「缺 OCR 行」——全新
     /// 安装场景成立(快扫不写 OCR),但存量库重建(模型切换只清向量,
