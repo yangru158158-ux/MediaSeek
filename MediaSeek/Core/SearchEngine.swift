@@ -1117,11 +1117,15 @@ final class SearchEngine {
            // floorTierPermitted);and:/or: 每词必并 OCR 命中(第十六批),
            // 文字覆盖探测与该通道同源。第六十九批:表内英文证件词经桥
            // 享有与中文证件类同等的第三档豁免
+           // 第七十二批二修(验收 medium):探测与 ocrUnionHits 同口径扩为
+           // 原词+繁→简转换词——繁体词只有原词命中 OCR 时(月结单印繁体),
+           // 只探测归一后的简体词会误判未覆盖,批68 要挡的底网噪声被放进
            Self.floorTierPermitted(
                among: nil, semanticOnly: false, upperTierEmpty: hits.isEmpty,
                aliasExempt: QueryUnderstanding.ocrAliases[term] != nil
                    || QueryUnderstanding.chineseCounterpart(for: term) != nil,
-               textCovered: !((try? store.searchOCR(query: term)) ?? []).isEmpty) {
+               textCovered: !QueryUnderstanding.scriptVariants(of: rawTerm).allSatisfy {
+                   ((try? store.searchOCR(query: $0)) ?? []).isEmpty }) {
             // 真尺度地板 0.08(与主流程照片第三档同规)
             hits = Self.dedupByRef((try? store.search(
                 space: siglip.space, kinds: searchKinds, query: q, limit: topK,

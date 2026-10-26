@@ -122,7 +122,18 @@ def expanded(tokens):
     return out
 
 
+# 第七十二批:繁→简字表解析(定义必须先于 label_tokens 的首次调用)
+t2s_block = QU.split("static let t2sChars: [Character: Character] = [", 1)[1]
+t2s_block = t2s_block.split("\n    ]", 1)[0]
+T2S = dict(re.findall(r'"([^"]+)":\s*"([^"]+)"', t2s_block))
+def to_simplified(s):
+    return "".join(T2S.get(ch, ch) for ch in s)
+
+
 def label_tokens(query):
+    # 第七十二批二修(验收 low):与 Swift labelTokens 入口同规繁→简归一——
+    # 镜像对繁体查询恢复保真,Swift 侧归一行为漂移时此处能拦
+    query = to_simplified(query)
     raw = {w for w in re.split(r"\s+", query.lower()) if w}
     tokens = set(raw)
     dict_tokens = set()
@@ -240,12 +251,7 @@ expect(OCR_ALIASES.get("驾照") == OCR_ALIASES.get("驾驶证"),
        "驾照/驾驶证别名同表(兄弟缺口已补)")
 expect(dict(DICTIONARY).get("护照") == "passport", "护照词典对已补(语义模板)")
 
-# ---- 第七十二批:繁→简归一对拍(表从源码解析,结构不变量守恒) ----
-t2s_block = QU.split("static let t2sChars: [Character: Character] = [", 1)[1]
-t2s_block = t2s_block.split("\n    ]", 1)[0]
-T2S = dict(re.findall(r'"([^"]+)":\s*"([^"]+)"', t2s_block))
-def to_simplified(s):
-    return "".join(T2S.get(ch, ch) for ch in s)
+# ---- 第七十二批:繁→简归一对拍(表定义已前置,此处结构不变量守恒) ----
 expect(len(T2S) > 150 and all(k != v for k, v in T2S.items()),
        f"字表规模 {len(T2S)} 条,无键值同对的空转换")
 expect(not (set(T2S.keys()) & set(T2S.values())),
