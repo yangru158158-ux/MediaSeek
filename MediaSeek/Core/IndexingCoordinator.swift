@@ -103,6 +103,20 @@ final class IndexingCoordinator: ObservableObject {
         }
     }
 
+    /// 第七十三批·快扫专用热背压:用户授权(2026-10-26)「轻微发热无妨」——
+    /// 快扫实测 4 路 76% 跑了约 40 分钟,瓶颈在每路内取图+嵌入串行,4 路吃
+    /// 不满。fair(温热)不再减半(保住 8 路全速),serious 压到 2 路,
+    /// critical 仍暂停——「温热可忍、过热必停」的授权口径。其余相位
+    /// (富集/视频/人脸)沿用 thermalLimit(温热减半)不变
+    nonisolated static func thermalLimitFastScan(base: Int) -> Int {
+        switch ProcessInfo.processInfo.thermalState {
+        case .nominal, .fair: return base
+        case .serious: return min(2, base)
+        case .critical: return 0
+        @unknown default: return base
+        }
+    }
+
     /// 视频记账互斥锁:视频 2 路并发后,两个 detached 任务对同一 UserDefaults
     /// key 的「读→改→写」会互相覆盖(后写吃掉先写)——丢 vidFrameCfg 则改抽帧
     /// 数后该视频不重建;丢 vidNoLabel/vidAllBlack 则回到「每轮同步反复重处理」
@@ -385,14 +399,17 @@ final class IndexingCoordinator: ObservableObject {
             await withTaskGroup(of: Int.self) { group in
                 var index = 0
                 var inFlight = 0
-                let base = 4
+                // 第七十三批:4→8 路(实测 4 路 76%/约 40 分钟;用户授权轻微
+                // 发热可接受)。热背压用快扫专用档:fair 不减半保全速,
+                // serious→2,critical 暂停照旧
+                let base = 8
                 // 阶段启动时已 critical:先等降温再开喂,否则 limit=0 → inFlight=0
                 // → 主循环不进入,整个阶段被静默跳过(验收 medium 实锤)
-                var limit = Self.thermalLimit(base: base)
+                var limit = Self.thermalLimitFastScan(base: base)
                 while limit == 0, !Task.isCancelled {
                     stageNote = "过热暂停,冷却后继续"
                     try? await Task.sleep(nanoseconds: 5_000_000_000)
-                    limit = Self.thermalLimit(base: base)
+                    limit = Self.thermalLimitFastScan(base: base)
                 }
                 stageNote = ""
                 while inFlight < limit, index < scanList.count, !Task.isCancelled {
@@ -414,12 +431,12 @@ final class IndexingCoordinator: ObservableObject {
                         break
                     }
                     if Task.isCancelled { break }
-                    while Self.thermalLimit(base: base) == 0, !Task.isCancelled {
+                    while Self.thermalLimitFastScan(base: base) == 0, !Task.isCancelled {
                         stageNote = "过热暂停,冷却后继续"
                         try? await Task.sleep(nanoseconds: 5_000_000_000)
                     }
                     stageNote = ""   // 恢复即清提示,不留过期文案
-                    limit = Self.thermalLimit(base: base)
+                    limit = Self.thermalLimitFastScan(base: base)
                     while inFlight < limit, index < scanList.count, !Task.isCancelled {
                         let asset = scanList[index]; index += 1; inFlight += 1
                         group.addTask { await Self.fastScanWork(
