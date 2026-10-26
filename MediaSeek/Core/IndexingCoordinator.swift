@@ -908,12 +908,12 @@ final class IndexingCoordinator: ObservableObject {
     }
 
     /// 神经引擎统一闸门(批78 建,批79 扩全量):SigLIP 嵌入 + Vision OCR
-    /// + Vision 标签共享,同时最多 4 路。批78 只管 SigLIP 被装机证伪——
-    /// 228 崩溃时刻 7 个线程全卡在 recognizeText(Vision OCR 的 CoreML
-    /// 同样跑 ANE,dSYM 符号化实锤),OCR 占单张 51% 才是最大消费者。
-    /// 4=批70-72 全管线 4 路的经验稳定锚(该时代无看门狗);吞吐≈4张/秒,
-    /// 13k 富集约 55 分钟
-    nonisolated private static let aneGate = AsyncSemaphore(limit: 4)
+    /// + Vision 标签共享。批78 只管 SigLIP 被装机证伪——228 崩溃时刻
+    /// 7 个线程全卡在 recognizeText(Vision OCR 的 CoreML 同样跑 ANE,
+    /// dSYM 符号化实锤),OCR 占单张 51% 才是最大消费者。
+    /// 上限 5=用户定调循序渐进(批70-72 四路稳定锚→先试五路,稳了再上探;
+    /// 8 路一步到位是四次看门狗的教训);吞吐≈5张/秒,13k 富集约 44 分钟
+    nonisolated private static let aneGate = AsyncSemaphore(limit: 5)
 
     /// 批75:SigLIP 嵌入带一次 ANE 超时重试——8 路并发把神经引擎请求队列
     /// 挤爆的偶发超时(224 装机实测快扫 4/2753 报 E5RT: ANE inference
