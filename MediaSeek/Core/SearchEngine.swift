@@ -237,12 +237,12 @@ final class SearchEngine {
                                  timeLabel: dateRange?.label, placeLabel: placeLabel)
         }
 
-        // 第四十一批:此分支只接管裸搜(或任何 spec 的文件范围)——前缀查询
-        // (and:/or:/文字:)在结果内也要落到下方 searchScoped 保持 AND/排他
-        // 语义,与全库搜索一致;此前被拦进主管线,文字: 在结果内多词退化成
-        // 并集。文件范围例外:searchScoped 有 scope 守卫拦截,保持主管线
+        // 第四十一批:此分支只接管裸搜——前缀查询(and:/or:/文字:)在结果内
+        // 也要落到下方 searchScoped 保持 AND/排他语义,与全库搜索一致;此前
+        // 被拦进主管线,文字: 在结果内多词退化成并集。第七十一批:文件范围
+        // 的整批接管撤销(searchScoped 守卫已删,文件页签结果内与全库同规)
         if let within, !within.isEmpty,
-           scope == .file || (spec.channel == .any && spec.connector == .none) {
+           spec.channel == .any && spec.connector == .none {
             // 结果内纯时间词(如「2025年」):基数集合本身按拍摄/创建时间筛+倒序,
             // 与第一次搜索的纯时间浏览同构,只是范围缩进当前结果集
             if query.isEmpty, let dateRange {
@@ -296,8 +296,10 @@ final class SearchEngine {
     /// 此前裸搜多词逐词取并集(第二十一批「或」语义),「宝宝 老公」190 个
     /// 结果几乎全是只含「宝宝」的;用户定规(2026-10-21):有分隔符=同时
     /// 完全匹配。AND 复用 searchScoped 的 and: 路径(每词 OCR∪语义∪标签
-    /// 命中再交集,已验收实现,不另造一套防漂移);单词与文件范围(file 被
-    /// searchScoped 守卫拦截)保持原主管线;or: 前缀仍可显式取并集。
+    /// 命中再交集,已验收实现,不另造一套防漂移);单词保持原主管线;or: 前缀
+    /// 仍可显式取并集。第七十一批:文件范围的多词豁免随 searchScoped 守卫
+    /// 删除而撤销——文件页签多词同样走逐词 AND(文字命中交集),单词/文件
+    /// 范围照旧主管线(OCR 通道已放行)。
     /// 已知收窄(有意):全部范围多词改道后不跑 Gemma 文件语义通道——旧裸搜
     /// 对文件是整句模糊匹配,与逐词 AND 精确语义不兼容,文件改靠 OCR 原文
     /// (PDF/CSV/XLSX/TXT 内容均已入库 ocr_text)双词精确命中。
@@ -310,7 +312,7 @@ final class SearchEngine {
         // 只对裸搜(channel == .any)生效:语义: 前缀必须保持排他(只要语义
         // 命中),不得被改道 and: 并入 OCR——验收 medium 实锤(此前只看
         // scope 和词数,语义:多词被误改道且未在提交说明声明)
-        if spec.channel == .any, scope != .file, Self.splitTerms(query).count >= 2 {
+        if spec.channel == .any, Self.splitTerms(query).count >= 2 {
             let andSpec = QuerySpec(connector: .and, channel: .any, body: query)
             let scoped = try await searchScoped(spec: andSpec, scope: scope, topK: topK,
                                                 siglip: siglip, within: among,
@@ -649,7 +651,13 @@ final class SearchEngine {
         // 都能命中,唯独裸搜单词不通(2026-10-21 用户实测 老公:视频范围 0,
         // 老公 宝宝/文字:老公 均正常);且照片范围不过滤命中身份,视频的
         // OCR 命中会泄漏进照片结果
-        if !semanticOnly, scope != .file {
+        // 第七十一批:文件范围放行(与批 43 视频范围同病漏修)。文件内容
+        // (PDF/CSV/XLSX/TXT)早已入库 ocr_text,全部范围下本通道一直能精确
+        // 命中文件,唯独文件页签被排除在外——精确文字命中被 Gemma 模糊语义
+        // 单通道顶替,两字词(美團)埋在长文里相似度过不了离群闸 → 恒 0
+        // (220 用户实测:全部范围搜得到月结单,文件范围 0)。放行后
+        // scopeAllowedKinds(.file)=[.file] 天然只出文件,照片/视频不会泄
+        if !semanticOnly {
             let allowedKinds = Self.scopeAllowedKinds(scope)
             let classifier = OCRRefClassifier(store: store)
             var seen = Set<String>()
@@ -715,7 +723,10 @@ final class SearchEngine {
     private func searchScoped(spec: QuerySpec, scope: SearchScope,
                               topK: Int, siglip: SigLIPEmbedder?, within: Set<String>? = nil,
                               dateRange: QueryDateRange? = nil) async throws -> (hits: [DisplayHit], textIDs: Set<String>) {
-        guard scope != .file else { return ([], []) }   // 文件范围无照片/视频(第三十九批:视频范围原被误拦)
+        // 第七十一批:删除「文件范围整体返回空」守卫(第三十九批为拦照片/视频
+        // 而设,把文字通道一并拦死——文件页签 文字:/and: 恒空,与裸搜同病)。
+        // 放行后各通道自筛:文字通道 scopeAllowedKinds 过滤只出文件;视觉通道
+        // 在 semanticHits 内对文件范围早退(文件无 SigLIP 向量)
         let terms = Self.splitTerms(spec.body)
         guard !terms.isEmpty else { return ([], []) }
         // so400m 校准(第六十一批):SigLIP 门槛按激活模型缩放,透传给 semanticHits
@@ -975,6 +986,10 @@ final class SearchEngine {
                               scope: SearchScope = .all,
                               gateScale: Float = 1.0) -> [SearchHit] {
         guard let siglip else { return [] }
+        // 第七十一批:文件范围早退(与 searchScoped 守卫收窄配套)——文件
+        // 只有 Gemma 空间向量,SigLIP 通道无文件数据;此前靠 searchScoped
+        // 顶部守卫兜着,守卫删后这里必须自守(顺带免去空 kinds 的 SQL IN())
+        if scope == .file { return [] }
         // 第六十二批:专名词整词跳过视觉(与主管线 semanticTerms 同规)——
         // 整词原文兜底=SigLIP 品类语义噪声带捞全库,只走文字通道
         if QueryUnderstanding.isProperNoun(term) { return [] }
