@@ -594,7 +594,7 @@ final class VectorStore {
     /// 某照片的整图 SigLIP 向量(合影计数兜底用;与检索/查重同源)。
     /// blob 字节数与 dim 不一致(截断/坏行)返回 nil,不越界读。
     func clipVector(ref: String) -> [Float]? { try serialized {
-        // 第七十五批二修:不再限定 frame_index=0——全量重建开跑会把全部照片
+        // 批75一修(42b9f93):不再限定 frame_index=0——全量重建开跑会把全部照片
         // 行打成 -1 标记(markAllPhotosForEnrichment),旧查询在整个重建窗口
         // (可达数小时)对全部照片取不到向量,PeopleView 合影计数兜底全库降级
         // (验收 low)。该查询只喂锚点对比用,快扫向量与富集向量同源同维,

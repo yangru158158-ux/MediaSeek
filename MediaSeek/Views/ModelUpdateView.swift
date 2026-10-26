@@ -28,7 +28,8 @@ struct ModelManifest: Codable {
 /// - 服务器返回 200(Range 被忽略/无 .part)自动从零;包已更新(.part 比
 ///   清单大)丢弃重下;下完核对总字节数与清单一致才进导入
 /// - 进度从「已下部分/总大小」起步,界面标「续传中」
-/// @MainActor 收状态;字节计数与文件句柄只被会话的串行代理队列触碰
+/// @MainActor 收状态;完成校验以磁盘上的 .part 实际大小为准(唯一真相,
+/// 回调 Task 乱序时按盘上字节数判不完整→保留续传,自愈——验收 low)
 @MainActor
 final class ModelUpdateLoader: NSObject, ObservableObject, URLSessionDataDelegate {
     @Published var checking = false
@@ -83,6 +84,19 @@ final class ModelUpdateLoader: NSObject, ObservableObject, URLSessionDataDelegat
         if existing > file.size {
             try? FileManager.default.removeItem(at: part)
             existing = 0
+        }
+        // .part 已与清单等大:上次已下完只是校验/搬移没跑完(末尾被杀等)
+        // ——直接消费交货。不能再发 Range(bytes=size- 不可满足,服务器回
+        // 416 落进通用报错,完整文件永远无人消费=该包永久卡死(验收 medium)
+        if existing == file.size, existing > 0 {
+            let dest = FileManager.default.temporaryDirectory
+                .appendingPathComponent("model-pkg-\(UUID().uuidString).zip")
+            try? FileManager.default.removeItem(at: dest)
+            try FileManager.default.moveItem(atPath: part.path, toPath: dest.path)
+            progress = 1
+            resuming = false
+            downloadingKey = nil
+            return dest
         }
         var req = URLRequest(url: URL(string: file.url)!)
         req.timeoutInterval = 60
@@ -179,14 +193,20 @@ final class ModelUpdateLoader: NSObject, ObservableObject, URLSessionDataDelegat
     }
 
     nonisolated func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        // 代理队列串行:句柄写入不并发;MainActor 计数由 Task 异步刷新
         let chunk = data
         Task { @MainActor in
-            guard self.fileHandle != nil, self.partIsValid else { return }
-            self.fileHandle?.write(chunk)
-            self.received += Int64(chunk.count)
-            if self.totalBytes > 0 {
-                self.progress = Double(self.existingBytes + self.received) / Double(self.totalBytes)
+            guard let handle = self.fileHandle, self.partIsValid else { return }
+            // throwing 写(批76二修):旧 write(_:) 非 throwing,磁盘满抛 ObjC
+            // 异常无法捕获直接崩进程(验收 high);失败走取消+报错,保留 .part
+            do {
+                try handle.write(contentsOf: chunk)
+                self.received += Int64(chunk.count)
+                if self.totalBytes > 0 {
+                    self.progress = Double(self.existingBytes + self.received) / Double(self.totalBytes)
+                }
+            } catch {
+                self.finishTask(.failure(MSError("写入失败(磁盘满?):\(error.localizedDescription)")))
+                self.dataTask?.cancel()
             }
         }
     }
@@ -194,11 +214,12 @@ final class ModelUpdateLoader: NSObject, ObservableObject, URLSessionDataDelegat
     nonisolated func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         Task { @MainActor in
             guard let error else {
-                // 成功:校验总字节数与清单一致才交货
-                let got = self.existingBytes + self.received
-                guard self.partIsValid, self.totalBytes > 0, got == self.totalBytes else {
+                // 成功:校验以磁盘上的 .part 实际大小为准(唯一真相;回调
+                // Task 乱序时计数可能滞后,按盘上字节判不完整→保留续传自愈)
+                let onDisk = Int64((try? FileManager.default.attributesOfItem(atPath: self.partPath))?[.size] as? Int64 ?? 0)
+                guard self.partIsValid, self.totalBytes > 0, onDisk == self.totalBytes else {
                     // 不完整:保留 .part 供续传,报错让用户重点
-                    self.finishTask(.failure(MSError("下载不完整(\(got)/\(self.totalBytes) 字节),再点一次从断点续传")))
+                    self.finishTask(.failure(MSError("下载不完整(\(onDisk)/\(self.totalBytes) 字节),再点一次从断点续传")))
                     return
                 }
                 let dest = FileManager.default.temporaryDirectory
