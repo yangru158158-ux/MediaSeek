@@ -21,6 +21,9 @@ final class IndexingCoordinator: ObservableObject {
     @Published private(set) var isRunning = false
     /// 批75:因退后台而暂停(区别于用户手动停止;回前台自动续跑)
     @Published private(set) var backgroundPaused = false
+    /// 批77:当前是否真在后台(区分短暂失活与真后台,决定 didBecomeActive
+    /// 是否即时续跑)
+    private var inBackground = false
     @Published private(set) var errorCount = 0
     @Published private(set) var firstErrorMessage: String?
     @Published private(set) var lastSyncAt: Date?
@@ -159,28 +162,60 @@ final class IndexingCoordinator: ObservableObject {
         self.imports = imports
         // 第七十五批:退后台=协作暂停,回前台自动续跑。8 路 CPU 洪流会把
         // didEnterBackground 的系统框架观察者饿死(主线程 NSOperation
-        // waitUntilFinished >10s → 0x8BADF00D 场景看门狗杀,224 装机崩溃
-        // 实锤:栈帧 _applicationDidEnterBackground→waitUntilFinished)。
-        // 暂停走协作取消:每张照片事务落盘 + -1 标记保进度,回前台增量续
+        // waitUntilFinished >10s → 0x8BADF00D 场景看门狗杀)。
+        // 第七十七批(根治):didEnterBackground 再取消输在观察者排队顺序上
+        // ——通知按注册顺序同步投递,系统观察者排前面,主线程在它内部就堵死,
+        // 我们的取消排后面永远轮不到(225/226 装机 19:54 同签名崩溃实锤)。
+        // 触发提前到 willResignActive(离开前台的瞬间,主线程还健康、看门狗
+        // 窗口未开):立即取消,Worker 秒级排空,真正进后台时 CPU 已闲。
+        // 代价:下拉通知中心等短暂失活也会暂停→恢复一次(断点精确续,损失秒级)
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.willResignActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.isRunning, !self.backgroundPaused else { return }
+                self.task?.cancel()
+                self.backgroundPaused = true
+            }
+        }
         NotificationCenter.default.addObserver(
             forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
-                guard let self, self.isRunning else { return }
-                self.task?.cancel()
-                self.backgroundPaused = true
+                guard let self else { return }
+                self.inBackground = true
+                // willResignActive 通常已取消过;兜底再打一次(幂等,防
+                // 直通后台路径漏触发)
+                if self.isRunning {
+                    self.task?.cancel()
+                    self.backgroundPaused = true
+                }
             }
         }
         NotificationCenter.default.addObserver(
             forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main
         ) { [weak self] _ in
             Task { @MainActor in
-                guard let self, self.backgroundPaused else { return }
+                guard let self else { return }
+                self.inBackground = false
+                guard self.backgroundPaused else { return }
                 self.backgroundPaused = false
                 // 批76:续跑轮本身就含文件/增量同步,顺带消费暂停期间积压的
                 // 补跑标记,免得续跑结束再来一轮冗余增量(验收 low)
                 self.rerunPending = false
                 self.startRun(full: false)   // 增量:剩余照片靠 -1 标记可见
+            }
+        }
+        // 短暂失活(未真正进后台)的即时恢复:下拉通知中心/控制中心收起后
+        // 立刻续跑,不等 willEnterForeground(那条只在真后台返回时触发)
+        NotificationCenter.default.addObserver(
+            forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, !self.inBackground, self.backgroundPaused else { return }
+                self.backgroundPaused = false
+                self.rerunPending = false
+                self.startRun(full: false)
             }
         }
     }
@@ -210,6 +245,13 @@ final class IndexingCoordinator: ObservableObject {
 
     func startAutoSyncIfAuthorized() {
         guard photo.isAuthorized else { return }
+        // 批77:首索引用户门控——第一次全库索引开始前,一切自动同步静默
+        // (App 启动/模型变更通知都不开跑),唯一入口=资料库三步卡的
+        // 「开始索引」。否则装完①就自动用标准向量开跑,用户想先装③
+        // so400m 的窗口被吞,切换=全部重嵌(装机点名)。已有索引的设备
+        // (升级用户)不受影响,自动增量照旧
+        let firstStarted = UserDefaults.standard.bool(forKey: "firstIndexStarted")
+        guard firstStarted || store.countPhotos() > 0 else { return }
         runIncremental()
     }
 
@@ -238,6 +280,8 @@ final class IndexingCoordinator: ObservableObject {
         // 窗口(waitingModel 最长 120 秒,验收 medium);标记幂等,失败时
         // 同步内 forceAll 路径仍以 known=∅ 全量兜底
         if full { try? store.markAllPhotosForEnrichment() }
+        // 批77:任何一轮任务启动即记「首索引已开始」,自动同步从此放行
+        UserDefaults.standard.set(true, forKey: "firstIndexStarted")
         isRunning = true
         processed = 0
         processedLocal = 0

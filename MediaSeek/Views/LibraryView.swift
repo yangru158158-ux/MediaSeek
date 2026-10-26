@@ -464,7 +464,9 @@ struct LibraryView: View {
                     }
                     // IndexingCoordinator 是 @MainActor:detached 上下文里必须显式跳回主线程,
                     // 否则 startRun 在后台线程执行(@Published 跨线程写、Task 丢失 actor 上下文)
-                    if n > 0 { await MainActor.run { app.indexing.runIncremental() } }
+                    // 批77:改走 startAutoSyncIfAuthorized——首索引门控不能被导入旁路
+                    // 绕过(首索引唯一入口=三步卡按钮)
+                    if n > 0 { await MainActor.run { app.indexing.startAutoSyncIfAuthorized() } }
                 } catch {
                     await MainActor.run { app.fail(error) }
                 }
