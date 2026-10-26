@@ -313,13 +313,15 @@ enum QueryUnderstanding {
     /// 「licence 语义全对」——但那是 so400m 的分数分布,标准版下证件照够不着
     /// 第二档、第三档又被「文字已有命中」规则挡住,licence 语义恒 0(220 用户
     /// 实测)。门槛不可跨模型迁移,排除的前提随模型消失;入桥=模型无关修法。
-    /// license(美式拼写)仍留表外待用户定;driving/card 泛词不入(会窄化成驾照)
+    /// license(美式拼写)第七十四批入表(用户批准):与 licence 同词异拼,
+    /// 对称面原则——只桥英式不桥美式,美式用户撞同一个洞。
+    /// driving/card 泛词不入(会窄化成驾照)
     static let chineseCounterparts: [String: String] = [
         "id": "身份证", "identity": "身份证",
         "id card": "身份证", "identity card": "身份证", "identity document": "身份证",
         "passport": "护照",
         "driver license": "驾照", "driving license": "驾照", "driver's license": "驾照",
-        "licence": "驾照",
+        "licence": "驾照", "license": "驾照",
     ]
 
     /// 英文词的中文对应证件词(大小写/首尾空白不敏感);非表内词返回 nil 走原路

@@ -110,6 +110,19 @@ enum TimeQueryParser {
                   let e = cal.date(from: DateComponents(year: y2 + 1, month: 1, day: 1)) else { return nil }
             return QueryDateRange(start: s, end: e, label: "\(y1)年到\(y2)年")
         }) { return r }
+        // 第七十四批:裸四位数年(「2026 杨如」/「语义:2026 杨如」)——用户惯性
+        // 输年常不带「年」字;此前不解析,裸搜下 2026 退化为文字词(只出含
+        // "2026"字样的截图),语义: 前缀下干脆无通道消费(装机实测 498 结果
+        // 全是人名标签照片,与直接搜人名无异)。零宽边界防误吃:前后贴数字
+        // (编号/金额/更长日期)不匹配;整条查询只剩年份时不解析——保留
+        // 「2026」作内容词的字面搜索(找编号含 2026 的文档),年份只在与
+        // 其他词共存时才升格为时间过滤
+        if let r = attempt("(?<![0-9])((?:19|20)\\d{2})(?![0-9])", { c in
+            guard let y = Int(c[0]), (1900...2100).contains(y) else { return nil }
+            return yearRange(y, "\(y)年")
+        }), !r.remaining.isEmpty {
+            return r
+        }
         return (nil, text)
     }
 }

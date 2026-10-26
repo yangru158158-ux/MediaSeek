@@ -907,14 +907,21 @@ final class VectorStore {
         return out
     } }
 
-    /// 已有向量但缺 OCR 原文的照片(增量自动补全用;
-    /// 无字照片有 "" 占位行,不会落在缺失集合里反复重处理)
-    func photoRefKeysMissingOCR() throws -> Set<String> { try serialized {
+    /// 需要富集的照片(第七十四批):快扫标记位(frame_index=-1)或缺 OCR 行
+    /// 二者其一。旧判据(photoRefKeysMissingOCR)只认「缺 OCR 行」——全新
+    /// 安装场景成立(快扫不写 OCR),但存量库重建(模型切换只清向量,
+    /// OCR/标签/人脸保留)中断后剩余照片 OCR 行都在,判据失灵,富集静默
+    /// 断流(223 装机实锤)。快扫写入即打 -1,富集的 upsert 默认 0,中断
+    /// 恢复不再依赖「碰巧缺行」。标记只挂 photo 空间行——视频帧的
+    /// frame_index 是真实帧号,查询已按 kind='photo' 隔离,不受影响;
+    /// 无字照片有 "" 占位行,不会因缺行反复重处理
+    func photoRefKeysNeedingEnrichment() throws -> Set<String> { try serialized {
         guard let db else { return [] }
         let stmt = try prepare("""
         SELECT ref_key FROM items
         WHERE kind = 'photo' AND space = 'clip'
-          AND ref_key NOT IN (SELECT ref_key FROM ocr_text)
+          AND (frame_index = -1
+               OR ref_key NOT IN (SELECT ref_key FROM ocr_text))
         """)
         defer { sqlite3_finalize(stmt) }
         var out = Set<String>()

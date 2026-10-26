@@ -143,19 +143,27 @@ final class SearchEngine {
         let siglip = await MainActor.run { models.siglip }
         lastSemanticTopScore = nil
 
-        // 自然语言时间/地点:普通查询与结果内都参与(组合语法/前缀语法不参与)。
-        // 时间词命中即剥离——结果内同样生效:从当前基数集里按拍摄/创建时间筛(与第一次搜索同构);
-        // 地点「在XX」仅普通查询(结果内挂地理编码徒增异步与误伤),失败原样保留。
+        // 自然语言时间/地点:普通查询与结果内都参与(第七十四批起 语义: 前缀
+        // 也参与时间解析;地点仍仅普通查询——语义: 若挂 GPS 过滤,无定位的
+        // 语义命中会被整批滤掉,裸搜侧靠「地点浏览并集」规避而该分支只对
+        // .any 开放)。时间词命中即剥离——结果内同样生效:从当前基数集里按
+        // 拍摄/创建时间筛(与第一次搜索同构);地点「在XX」失败原样保留。
         var dateRange: QueryDateRange?
         var placeRegion: CLCircularRegion?
         var placeLabel: String?
-        if spec.channel == .any, spec.connector == .none {
+        // 第七十四批:时间解析从「仅裸搜」扩到「裸搜 + 语义: 前缀」——
+        // 语义: 排他下数字/年份词没有任何通道能消费(数字不走视觉,OCR 被
+        // 排他),「语义:2026 杨如」实测与直接搜杨如无异(498 全标签照片)。
+        // 剥离成时间过滤器后剩余词继续语义排他管线,resolve 按拍摄时间过滤。
+        // 文字:/and:/or: 维持不解析:文字前缀的本义就是逐词精确匹配,
+        // and: 的契约是逐词命中交集——年份在这两处是合法的内容词
+        if spec.channel == .any || spec.channel == .semantic, spec.connector == .none {
             let t = TimeQueryParser.parse(query)
             if let r = t.range {
                 dateRange = r
                 query = t.remaining.trimmingCharacters(in: .whitespaces)
             }
-            if within == nil {
+            if spec.channel == .any, within == nil {
                 if !query.isEmpty, let cand = PlaceQueryParser.extract(query) {
                     if let region = await PlaceGeocoder.region(for: cand.name) {
                         placeRegion = region

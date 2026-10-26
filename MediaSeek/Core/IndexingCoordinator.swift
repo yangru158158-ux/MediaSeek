@@ -302,10 +302,11 @@ final class IndexingCoordinator: ObservableObject {
         // 「已索引」只认 clip 向量行本身——标签/人脸行不算数,否则换模型
         // 清空向量后照片仍被当成已索引,一张都不会重建
         var known = forceAll ? Set<String>() : try store.refKeysWithClipVectors()
-        // 增量自动补全:已有向量但缺 OCR 原文的照片视为待补(原位覆盖),
-        // 跑多少存多少、中断可续,无需全量重建(无字照片有 "" 占位行,不会反复补)
+        // 增量自动补全:有快扫标记(frame_index=-1)或缺 OCR 原文的照片视为
+        // 待补(原位覆盖),跑多少存多少、中断可续,无需全量重建(第七十四批
+        // 扩判据:无字照片有 "" 占位行,不会反复补;标记行覆盖后自动消除)
         if !forceAll {
-            for key in try store.photoRefKeysMissingOCR() { known.remove(key) }
+            for key in try store.photoRefKeysNeedingEnrichment() { known.remove(key) }
             // 抽帧数变更:视频记录了「处理时用的抽帧数」,设置真变了才重处理。
             // 不能直接比帧行数——部分帧黑(114 起跳过)后行数天然小于设置值,
             // 直接比会无限重跑(2026-10-11 用户实测 25 部视频反复索引)
@@ -850,7 +851,13 @@ final class IndexingCoordinator: ObservableObject {
                 return 1
             }
             let vec = try clip.embedImage(small)
-            try store.upsert(kind: .photo, refKey: asset.localIdentifier, space: clip.space,
+            // 第七十四批:frame_index=-1 = 快扫标记(富集完成改写 0)。续跑
+            // 判据从「缺 OCR 行」扩成「有标记或缺行」——存量库重建(模型切换
+            // 只清向量,OCR 行保留)中断后,剩余照片 OCR 行都在,旧判据判定
+            // 无事可做,富集静默断流(223 装机实锤:中断 3910/13548 后同步
+            // 直接「完成」)。frameIndex 对 photo 无他用(视频帧才有帧号)
+            try store.upsert(kind: .photo, refKey: asset.localIdentifier, frameIndex: -1,
+                             space: clip.space,
                              vector: vec, title: nil, date: asset.creationDate,
                              color: PhotoColor.bucket(of: small))
             return 0

@@ -234,11 +234,10 @@ expect(COUNTERPARTS.get("identity card") == "身份证"
     and COUNTERPARTS.get("identity document") == "身份证",
        "identity 族短语键在表")
 expect(COUNTERPARTS.get("passport") == "护照", "passport→护照")
-expect(COUNTERPARTS.get("licence") == "驾照",
-       "licence→驾照(第七十一批翻案:218「不桥」前提是 so400m 分布,标准版恒 0)")
-expect("license" not in COUNTERPARTS
-    and "driving" not in COUNTERPARTS and "card" not in COUNTERPARTS,
-       "license(美式,待用户定)/driving/card 泛词不入表")
+expect(COUNTERPARTS.get("licence") == "驾照" and COUNTERPARTS.get("license") == "驾照",
+       "licence/license→驾照(71 批翻案+74 批美式对称面,用户批准)")
+expect("driving" not in COUNTERPARTS and "card" not in COUNTERPARTS,
+       "driving/card 泛词不入表")
 def bridged_variants(term):
     zh = COUNTERPARTS.get(term.lower().strip())
     return [zh] + OCR_ALIASES.get(zh, []) if zh else []
