@@ -86,11 +86,11 @@ final class ModelUpdateLoader: NSObject, ObservableObject, URLSessionDataDelegat
         }
         var req = URLRequest(url: URL(string: file.url)!)
         req.timeoutInterval = 60
-        req.timeoutIntervalForResource = 7200
         if existing > 0 {
             req.setValue("bytes=\(existing)-", forHTTPHeaderField: "Range")
         }
         let config = URLSessionConfiguration.default
+        config.timeoutIntervalForResource = 7200   // 大包慢网也要能下完
         let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
         defer { session.finishTasksAndInvalidate() }
         partPath = part.path
