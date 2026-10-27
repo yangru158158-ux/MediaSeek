@@ -527,16 +527,16 @@ final class IndexingCoordinator: ObservableObject {
             await withTaskGroup(of: Int.self) { group in
                 var index = 0
                 var inFlight = 0
-                // 批80二修:并发数改设置驱动(2~8 默认 4);热背压用快扫专用档:
-                // fair 不减半保全速,serious→2,critical 暂停照旧
+                // 批81:热切换——喂料循环每次补位实时读设置(批80 的相位启动
+                // 锁定值改为仅作初值);热背压快扫专用档照旧
                 let base = indexConcurrency
                 // 阶段启动时已 critical:先等降温再开喂,否则 limit=0 → inFlight=0
                 // → 主循环不进入,整个阶段被静默跳过(验收 medium 实锤)
-                var limit = Self.thermalLimitBoosted(base: base)
+                var limit = Self.thermalLimitBoosted(base: indexConcurrency)
                 while limit == 0, !Task.isCancelled {
                     stageNote = "过热暂停,冷却后继续"
                     try? await Task.sleep(nanoseconds: 5_000_000_000)
-                    limit = Self.thermalLimitBoosted(base: base)
+                    limit = Self.thermalLimitBoosted(base: indexConcurrency)
                 }
                 stageNote = ""
                 while inFlight < limit, index < scanList.count, !Task.isCancelled {
@@ -558,12 +558,12 @@ final class IndexingCoordinator: ObservableObject {
                         break
                     }
                     if Task.isCancelled { break }
-                    while Self.thermalLimitBoosted(base: base) == 0, !Task.isCancelled {
+                    while Self.thermalLimitBoosted(base: indexConcurrency) == 0, !Task.isCancelled {
                         stageNote = "过热暂停,冷却后继续"
                         try? await Task.sleep(nanoseconds: 5_000_000_000)
                     }
                     stageNote = ""   // 恢复即清提示,不留过期文案
-                    limit = Self.thermalLimitBoosted(base: base)
+                    limit = Self.thermalLimitBoosted(base: indexConcurrency)
                     while inFlight < limit, index < scanList.count, !Task.isCancelled {
                         let asset = scanList[index]; index += 1; inFlight += 1
                         group.addTask { await Self.fastScanWork(
@@ -588,14 +588,14 @@ final class IndexingCoordinator: ObservableObject {
             var inFlight = 0
             let base = 2
             // 阶段启动已 critical:先等降温(同快扫,防整段静默跳过)
-            var limit = Self.thermalLimit(base: base)
+            var limit = Self.thermalLimit(base: indexConcurrency)
             // 空清单不等待:无事可做的增量同步不该在 critical 时空等数分钟
             // (快扫/人脸两处在各自非空 if 内,天然有护栏;复验收 low)
             if !newVideos.isEmpty {
                 while limit == 0, !Task.isCancelled {
                     stageNote = "过热暂停,冷却后继续"
                     try? await Task.sleep(nanoseconds: 5_000_000_000)
-                    limit = Self.thermalLimit(base: base)
+                    limit = Self.thermalLimit(base: indexConcurrency)
                 }
                 stageNote = ""
             }
@@ -609,12 +609,12 @@ final class IndexingCoordinator: ObservableObject {
                 processedLocal += 1
                 processed = processedLocal
                 if Task.isCancelled { break }
-                while Self.thermalLimit(base: base) == 0, !Task.isCancelled {
+                while Self.thermalLimit(base: indexConcurrency) == 0, !Task.isCancelled {
                     stageNote = "过热暂停,冷却后继续"
                     try? await Task.sleep(nanoseconds: 5_000_000_000)
                 }
                 stageNote = ""   // 恢复即清提示
-                limit = Self.thermalLimit(base: base)
+                limit = Self.thermalLimit(base: indexConcurrency)
                 while inFlight < limit, index < newVideos.count, !Task.isCancelled {
                     let asset = newVideos[index]; index += 1; inFlight += 1
                     group.addTask { await self.embedVideo(asset, errors: errors); return 0 }
@@ -635,11 +635,11 @@ final class IndexingCoordinator: ObservableObject {
                 var inFlight = 0
                 let base = 2
                 // 热背压同规(验收:人脸相位独缺背压=策略自相矛盾)
-                var limit = Self.thermalLimit(base: base)
+                var limit = Self.thermalLimit(base: indexConcurrency)
                 while limit == 0, !Task.isCancelled {
                     stageNote = "过热暂停,冷却后继续"
                     try? await Task.sleep(nanoseconds: 5_000_000_000)
-                    limit = Self.thermalLimit(base: base)
+                    limit = Self.thermalLimit(base: indexConcurrency)
                 }
                 stageNote = ""
                 while inFlight < limit, index < faceBackfill.count, !Task.isCancelled {
@@ -662,12 +662,12 @@ final class IndexingCoordinator: ObservableObject {
                         break
                     }
                     if Task.isCancelled { break }
-                    while Self.thermalLimit(base: base) == 0, !Task.isCancelled {
+                    while Self.thermalLimit(base: indexConcurrency) == 0, !Task.isCancelled {
                         stageNote = "过热暂停,冷却后继续"
                         try? await Task.sleep(nanoseconds: 5_000_000_000)
                     }
                     stageNote = ""
-                    limit = Self.thermalLimit(base: base)
+                    limit = Self.thermalLimit(base: indexConcurrency)
                     while inFlight < limit, index < faceBackfill.count, !Task.isCancelled {
                         let asset = faceBackfill[index]; index += 1; inFlight += 1
                         group.addTask { await Self.faceOnlyWork(
@@ -694,17 +694,17 @@ final class IndexingCoordinator: ObservableObject {
         await withTaskGroup(of: Int.self) { group in
             var index = 0
             var inFlight = 0
-            // 批80二修:并发数改设置驱动(2~8 默认 4;历次崩溃真根因是后台
-            // 服务冻结已由 beginBackgroundTask 修复,并发只影响速度与温度)
+            // 批81:热切换——补位循环实时读设置,改动立即生效;批80 的
+            // 「下一轮生效」限制取消
             let base = indexConcurrency
             // 阶段启动已 critical:先等降温(同快扫,防整段静默跳过)
-            var limit = Self.thermalLimitBoosted(base: base)
+            var limit = Self.thermalLimitBoosted(base: indexConcurrency)
             // 空清单不等待(同视频组,复验收 low)
             if !newPhotos.isEmpty {
                 while limit == 0, !Task.isCancelled {
                     stageNote = "过热暂停,冷却后继续"
                     try? await Task.sleep(nanoseconds: 5_000_000_000)
-                    limit = Self.thermalLimitBoosted(base: base)
+                    limit = Self.thermalLimitBoosted(base: indexConcurrency)
                 }
                 stageNote = ""
             }
@@ -740,13 +740,13 @@ final class IndexingCoordinator: ObservableObject {
                 // 只在真暂停过才清:无条件清会把同一迭代上面 n%50 刚写的计时
                 // 摘要立即抹掉(复验收 medium,分段计时从此不可见)
                 var overheated = false
-                while Self.thermalLimitBoosted(base: base) == 0, !Task.isCancelled {
+                while Self.thermalLimitBoosted(base: indexConcurrency) == 0, !Task.isCancelled {
                     stageNote = "过热暂停,冷却后继续"
                     overheated = true
                     try? await Task.sleep(nanoseconds: 5_000_000_000)
                 }
                 if overheated { stageNote = "" }
-                limit = Self.thermalLimitBoosted(base: base)
+                limit = Self.thermalLimitBoosted(base: indexConcurrency)
                 while inFlight < limit, index < newPhotos.count, !Task.isCancelled {
                     let asset = newPhotos[index]; index += 1; inFlight += 1
                     group.addTask { await Self.embedPhotoWork(
@@ -944,6 +944,13 @@ final class IndexingCoordinator: ObservableObject {
     /// 上限固定 8(批80二修:真根因=后台服务冻结而非并发,闸门降级为保险层
     /// 不再当瓶颈;实际并发由设置项 indexConcurrency 控制)
     nonisolated private static let aneGate = AsyncSemaphore(limit: 8)
+
+    /// 批81:OCR 专用窄闸(≤2)。五连崩符号化实锤:后台冻结的是在途 OCR
+    /// (4~7 个/次);系统观察者等 Vision 队列排空,数量越多越排不完。
+    /// 压到 2 赌「少量冻结系统可容忍排空」;吞吐不受损(OCR 占单张 51%,
+    /// 2 路并发 ≈ 3.6 张/秒 ≥ 四路 worker 的其余段合计速率,OCR 本来就是
+    /// 瓶颈段,窄闸=流水线化)
+    nonisolated private static let ocrGate = AsyncSemaphore(limit: 2)
 
     /// 索引并发数(批80二修,用户可调 2~8,默认 4):设置页「索引并发数」,
     /// 相位启动时读取——变更对下一次开始/续跑的索引生效
@@ -1250,8 +1257,8 @@ final class IndexingCoordinator: ObservableObject {
     /// 每次停止批量丢一批照片的 OCR 且不可自愈;改 throw 后 catch 里
     /// return 0 不写任何行,下轮自愈重做(与嵌入路径同规)
     nonisolated private static func recognizeTextGated(in cg: CGImage) async throws -> String? {
-        await aneGate.wait()
-        defer { aneGate.signal() }
+        await ocrGate.wait()
+        defer { ocrGate.signal() }
         if Task.isCancelled { throw CancellationError() }
         return recognizeText(in: cg)
     }
