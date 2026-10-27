@@ -5,36 +5,50 @@ jobs:
   query:
     runs-on: macOS-latest
     steps:
-      - name: Spaceship 查询
+      - name: JWT 直查
         env:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
         run: |
           echo "$ASC_API_KEY_P8" | base64 --decode > "$HOME/asc.pem"
-          echo "SIZE: $(wc -c < "$HOME/asc.pem")"
-          echo "MD5: $(md5 -q "$HOME/asc.pem")"
-          echo "EC-CHECK: $(openssl ec -in "$HOME/asc.pem" -noout 2>&1 | head -1)"
-          openssl asn1parse -in "$HOME/asc.pem" -i 2>&1 | head -6
-          ruby -e '
-            require "spaceship"
-            tok = Spaceship::ConnectAPI::Token.create(
-              key_id: ENV["ASC_KEY_ID"], issuer_id: ENV["ASC_ISSUER_ID"],
-              key: File.expand_path("~/asc.pem"))
-            Spaceship::ConnectAPI.token = tok
-            apps = Spaceship::ConnectAPI::App.all
-            apps.each { |a| puts "APP|#{a.bundle_id}|#{a.name}|#{a.id}" }
-            app = apps.find { |a| a.bundle_id.to_s.include?("medseek") }
-            abort "no medseek app" unless app
-            puts "==APP #{app.id}"
-            g = Spaceship::ConnectAPI.get("betaGroups?filter[app]=#{app.id}&limit=20")
-            puts "GROUPS|#{g.body}"
-            t = Spaceship::ConnectAPI.get("betaTesters?filter[email]=yangru158158@gmail.com&limit=5")
-            puts "GMAIL|#{t.body}"
-            b = Spaceship::ConnectAPI.get("builds?filter[app]=#{app.id}&limit=2&sort=-version")
-            b.body["data"].each do |bd|
-              bid = bd["id"]; ver = bd.dig("attributes","version")
-              d = Spaceship::ConnectAPI.get("builds/#{bid}/buildBetaDetail")
-              puts "BUILD|#{ver}|#{d.body.dig("data","attributes").to_json}"
-            end
-          '
+          echo "KEY_ID=$ASC_KEY_ID ISSUER=$ASC_ISSUER_ID"
+          KEYFILE="$HOME/asc.pem" python3 - <<'PY'
+          import os, json, time, subprocess, urllib.request, base64
+          ISSUER = os.environ["ASC_ISSUER_ID"]; KID = os.environ["ASC_KEY_ID"]
+          keyf = os.environ["KEYFILE"]
+          def b64u(b): return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+          def read_int(d, o):
+              l = d[o]; o += 1; v = d[o:o+l]; o += l
+              return v.lstrip(b"\0"), o
+          def d2r(der):
+              o = 2; r, o = read_int(der, o); s, o = read_int(der, o)
+              return r.rjust(32, b"\0") + s.rjust(32, b"\0")
+          hdr = b64u(json.dumps({"alg":"ES256","kid":KID,"typ":"JWT"}).encode())
+          pl = b64u(json.dumps({"iss":ISSUER,"iat":int(time.time())-30,"exp":int(time.time())+1100}).encode())
+          p = subprocess.run(["openssl","dgst","-sha256","-sign",keyf],
+                             input=(hdr+"."+pl).encode(), capture_output=True)
+          assert p.returncode == 0 and p.stdout, "sign fail: " + p.stderr.decode()[:200]
+          jwt = hdr+"."+pl+"."+b64u(d2r(p.stdout))
+          def asc(path):
+              req = urllib.request.Request("https://api.appstoreconnect.apple.com"+path,
+                                           headers={"Authorization":"Bearer "+jwt})
+              try:
+                  with urllib.request.urlopen(req) as r: return json.loads(r.read())
+              except urllib.error.HTTPError as e: return {"_err": e.code, "_b": e.read().decode()[:300]}
+          apps = asc("/v1/apps?limit=50")
+          if "_err" in apps: print("APPS-ERR:", apps); raise SystemExit
+          for a in apps["data"]:
+              print("APP|", a["attributes"].get("bundleId"), "|", a["attributes"].get("name"), "|", a["id"])
+              if "medseek" in (a["attributes"].get("bundleId") or ""):
+                  aid = a["id"]
+                  g = asc(f"/v1/apps/{aid}/betaGroups?limit=20")
+                  print("GROUPS|", json.dumps(g, ensure_ascii=False)[:3500])
+                  t = asc(f"/v1/betaTesters?filter[email]=yangru158158@gmail.com&limit=5")
+                  print("GMAIL|", json.dumps(t, ensure_ascii=False)[:1500])
+                  b = asc(f"/v1/builds?filter[app]={aid}&limit=2&sort=-version")
+                  for bd in b.get("data", []):
+                      bid, ver = bd["id"], bd["attributes"].get("version")
+                      d = asc(f"/v1/builds/{bid}/buildBetaDetail")
+                      print("BUILD|", ver, "|", json.dumps(d.get("data",{}).get("attributes",{}), ensure_ascii=False))
+          PY
