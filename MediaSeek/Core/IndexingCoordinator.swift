@@ -520,10 +520,9 @@ final class IndexingCoordinator: ObservableObject {
             await withTaskGroup(of: Int.self) { group in
                 var index = 0
                 var inFlight = 0
-                // 第七十三批:4→8 路(实测 4 路 76%/约 40 分钟;用户授权轻微
-                // 发热可接受)。热背压用快扫专用档:fair 不减半保全速,
-                // serious→2,critical 暂停照旧
-                let base = 8
+                // 批80二修:并发数改设置驱动(2~8 默认 4);热背压用快扫专用档:
+                // fair 不减半保全速,serious→2,critical 暂停照旧
+                let base = indexConcurrency
                 // 阶段启动时已 critical:先等降温再开喂,否则 limit=0 → inFlight=0
                 // → 主循环不进入,整个阶段被静默跳过(验收 medium 实锤)
                 var limit = Self.thermalLimitBoosted(base: base)
@@ -688,9 +687,9 @@ final class IndexingCoordinator: ObservableObject {
         await withTaskGroup(of: Int.self) { group in
             var index = 0
             var inFlight = 0
-            // 批80:8→4(229 五路闸门下富集 600 张再崩,用户定调降回批70-72
-            // 的四路稳定形态——取图/OCR/嵌入全链 4 路并行;快扫相从未出事保持 8)
-            let base = 4
+            // 批80二修:并发数改设置驱动(2~8 默认 4;历次崩溃真根因是后台
+            // 服务冻结已由 beginBackgroundTask 修复,并发只影响速度与温度)
+            let base = indexConcurrency
             // 阶段启动已 critical:先等降温(同快扫,防整段静默跳过)
             var limit = Self.thermalLimitBoosted(base: base)
             // 空清单不等待(同视频组,复验收 low)
@@ -935,9 +934,16 @@ final class IndexingCoordinator: ObservableObject {
     /// + Vision 标签共享。批78 只管 SigLIP 被装机证伪——228 崩溃时刻
     /// 7 个线程全卡在 recognizeText(Vision OCR 的 CoreML 同样跑 ANE,
     /// dSYM 符号化实锤),OCR 占单张 51% 才是最大消费者。
-    /// 上限 4(批80:229 五路装机实测富集 600 张再崩,用户定调降回四路——
-    /// 批70-72 全管线四路的原始稳定锚;吞吐≈4张/秒,13k 约 55 分钟)
-    nonisolated private static let aneGate = AsyncSemaphore(limit: 4)
+    /// 上限固定 8(批80二修:真根因=后台服务冻结而非并发,闸门降级为保险层
+    /// 不再当瓶颈;实际并发由设置项 indexConcurrency 控制)
+    nonisolated private static let aneGate = AsyncSemaphore(limit: 8)
+
+    /// 索引并发数(批80二修,用户可调 2~8,默认 4):设置页「索引并发数」,
+    /// 相位启动时读取——变更对下一次开始/续跑的索引生效
+    var indexConcurrency: Int {
+        let n = UserDefaults.standard.integer(forKey: "indexConcurrency")
+        return (2...8).contains(n) ? n : 4
+    }
 
     /// 批75:SigLIP 嵌入带一次 ANE 超时重试——8 路并发把神经引擎请求队列
     /// 挤爆的偶发超时(224 装机实测快扫 4/2753 报 E5RT: ANE inference

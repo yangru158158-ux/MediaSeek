@@ -358,6 +358,15 @@ struct SettingsView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
+            // 批80二修:索引并发数可调(用户找最佳值)。变更对下一次开始/
+            // 续跑的索引生效;进行中的一轮不变
+            Picker("索引并发数", selection: Binding(
+                get: { app.indexing.indexConcurrency },
+                set: { UserDefaults.standard.set($0, forKey: "indexConcurrency") })) {
+                ForEach(2...8, id: \.self) { Text("\($0) 路").tag($0) }
+            }
+            Text("同时处理的照片数:越大越快、越热。默认 4;切后台已受系统保护,并发只影响速度与发热——从这里逐级上探找最佳值")
+                .font(.caption).foregroundStyle(.secondary)
             Toggle(isOn: Binding(
                 get: { UserDefaults.standard.bool(forKey: "speechEnabled") },
                 set: { UserDefaults.standard.set($0, forKey: "speechEnabled") })) {
