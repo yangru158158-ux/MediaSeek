@@ -248,8 +248,12 @@ enum QueryUnderstandingTest {
                "scriptVariants:繁体词=原词+转换词(原词在前保排序),简体词单元素")
         expect((QueryUnderstanding.ocrAliases["证件"] ?? []) == ["身份证", "护照", "驾驶证"],
                "证件入别名表:文字追加+底网豁免与 licence 同权(221 实测搜「证件」文字 98/语义 0)")
-        expect(QueryUnderstanding.english(for: "驾驶证") == "driver license document",
-               "驾驶证词典对补齐:繁体归一到驾驶证后不再退回裸多语言嵌入")
+        // 第八十三批:document→card(232 装机搜「驾驶证」语义 4,023 杂音,
+        // "document" 泛词对文档密集图库打穿 tier-2);断言意图不变——
+        // 驾驶证必须有词典对,繁体归一后不退回裸多语言嵌入
+        expect(QueryUnderstanding.english(for: "驾驶证") == "driver license card"
+            && QueryUnderstanding.english(for: "驾照") == "driver license card",
+               "驾驶证词典对补齐+批83收窄:繁体归一到驾驶证后不再退回裸多语言嵌入,驾照同款")
         expect(QueryUnderstanding.english(for: "护照") == "passport",
                "护照词典对补齐:中文查询语义模板从裸多语言升级为 passport(第六十九批)")
         expect((QueryUnderstanding.ocrAliases["驾照"] ?? []) == (QueryUnderstanding.ocrAliases["驾驶证"] ?? []),
