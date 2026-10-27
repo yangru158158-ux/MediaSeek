@@ -11,7 +11,8 @@ jobs:
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
         run: |
-          python3 -c "import base64,os; open(os.path.expanduser('~/asc.pem'),'wb').write(base64.b64decode(os.environ['ASC_API_KEY_P8']))"
+          echo "$ASC_API_KEY_P8" | base64 --decode > "$HOME/asc.pem"
+          head -c 40 "$HOME/asc.pem"
           ruby -e '
             require "spaceship"
             tok = Spaceship::ConnectAPI::Token.create(
