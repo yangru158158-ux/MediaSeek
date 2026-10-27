@@ -354,7 +354,7 @@ struct ModelUpdateSection: View {
     private func install(_ f: ModelPkgFile, version: String) {
         Task {
             do {
-                let zipURL = try await loader.download(file: f, version: version)
+                let zipURL = try await loader.download(f, version: version)
                 loader.importing = true
                 // so400m 增强包落独立槽位 ImageEmbedderPro(第四十六批):
                 // 与随包标准模型并存,导入后自动切到 so400m,设置页可随时切回
