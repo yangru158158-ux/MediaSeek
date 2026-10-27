@@ -51,6 +51,48 @@ final class IndexingCoordinator: ObservableObject {
         }
     }
 
+
+    /// 批81:诊断账本——崩溃幸存(App Support 落盘,环形 300 条+文件 500KB 封顶)。
+    /// 六连看门狗的教训:崩溃时在途状态全靠 ips 反推;账本记生命周期/热态/
+    /// 相位/闸口与在途数,下次崩溃导出即定案
+    final class DiagLog: @unchecked Sendable {
+        static let shared = DiagLog()
+        private let lock = NSLock()
+        private var ring: [String] = []
+        private let df: DateFormatter = {
+            let f = DateFormatter(); f.dateFormat = "HH:mm:ss.SSS"; return f
+        }()
+        private var fileURL: URL? {
+            let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("MediaSeek", isDirectory: true)
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            return dir.appendingPathComponent("diag.log")
+        }
+        func event(_ msg: String) {
+            let line = df.string(from: Date()) + " " + msg
+            lock.lock()
+            ring.append(line)
+            if ring.count > 300 { ring.removeFirst(ring.count - 300) }
+            lock.unlock()
+            if let u = fileURL {
+                if let h = FileHandle(forWritingAtPath: u.path) {
+                    h.seekToEndOfFile()
+                    h.write((line + "\n").data(using: .utf8)!)
+                    h.closeFile()
+                } else {
+                    try? (line + "\n").data(using: .utf8)?.write(to: u)
+                }
+                if let sz = try? FileManager.default.attributesOfItem(atPath: u.path)[.size] as? Int, sz > 500_000 {
+                    try? FileManager.default.removeItem(at: u)
+                }
+            }
+        }
+        func snapshot() -> String {
+            lock.lock(); defer { lock.unlock() }
+            return ring.joined(separator: "\n")
+        }
+    }
+
     /// 第七十批:分段计时盒(取图/OCR/嵌入/标签/人脸 各段毫秒累计,线程安全)。
     /// 索引 3 小时的账要装机可对——瓶颈定位从「猜」变「读」
     final class StageTiming: @unchecked Sendable {
@@ -176,6 +218,7 @@ final class IndexingCoordinator: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor in
                 guard let self, self.isRunning, !self.backgroundPaused else { return }
+                DiagLog.shared.event("resign: 取消索引 在途OCR=\(Self.ocrInFlight) 在途嵌入=\(Self.embedInFlight)")
                 // 批80(五连崩同签名真根因):不申请后台主张,进后台瞬间
                 // 神经引擎服务被系统暂停——在途 Vision/CoreML 调用(不可中断)
                 // 整体冻结(229 崩溃 CPU 统计 0.017s/0% 实锤),主线程的进
@@ -187,6 +230,7 @@ final class IndexingCoordinator: ObservableObject {
                     self.bgTask = UIApplication.shared.beginBackgroundTask(withName: "index-drain") { [weak self] in
                         // Apple 契约:到期回调必须自行结束任务——主线程可能正忙,
                         // 依赖异步链的释放不可靠(验收 medium);同步 end + 异步取消
+                        DiagLog.shared.event("bgTask到期:同步end+cancel 在途OCR=\(Self.ocrInFlight)")
                         let id = self?.bgTask ?? .invalid
                         if id != .invalid {
                             self?.bgTask = .invalid
@@ -204,6 +248,7 @@ final class IndexingCoordinator: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
+                DiagLog.shared.event("didEnterBackground")
                 self.inBackground = true
                 // willResignActive 通常已取消过;兜底再打一次(幂等,防
                 // 直通后台路径漏触发)
@@ -218,6 +263,7 @@ final class IndexingCoordinator: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor in
                 guard let self else { return }
+                DiagLog.shared.event("willEnterForeground")
                 self.inBackground = false
                 if self.bgTask != .invalid {
                     UIApplication.shared.endBackgroundTask(self.bgTask)
@@ -238,6 +284,7 @@ final class IndexingCoordinator: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor in
                 guard let self, !self.inBackground, self.backgroundPaused else { return }
+                DiagLog.shared.event("didBecomeActive 即时续跑")
                 if self.bgTask != .invalid {
                     UIApplication.shared.endBackgroundTask(self.bgTask)
                     self.bgTask = .invalid
@@ -309,6 +356,7 @@ final class IndexingCoordinator: ObservableObject {
         // 窗口(waitingModel 最长 120 秒,验收 medium);标记幂等,失败时
         // 同步内 forceAll 路径仍以 known=∅ 全量兜底
         if full { try? store.markAllPhotosForEnrichment() }
+        DiagLog.shared.event("startRun full=\(full) 并发=\(indexConcurrency)")
         // 批77:任何一轮任务启动即记「首索引已开始」,自动同步从此放行
         UserDefaults.standard.set(true, forKey: "firstIndexStarted")
         isRunning = true
@@ -367,6 +415,7 @@ final class IndexingCoordinator: ObservableObject {
             await prebuildLabelVocab()   // 重建完成后预建路由词表,首次搜索不再有一次性延迟
 
             lastSyncAt = Date()
+            DiagLog.shared.event("完成: 处理\(processedLocal) 错\(errorCount)")
             phase = .done
         } catch is CancellationError {
             phase = .idle
@@ -516,6 +565,7 @@ final class IndexingCoordinator: ObservableObject {
             // (upsert 幂等,白费 1 万张×0.1s;三验 low)
             let scanned = (try? store.refKeysWithClipVectors()) ?? Set<String>()
             let scanList = newPhotos.filter { !scanned.contains($0.localIdentifier) }
+            DiagLog.shared.event("相位:快扫 x\(scanList.count) 并发\(indexConcurrency) 热态\(ProcessInfo.processInfo.thermalState.rawValue)")
             phase = .fastScan
             fastScanDone = 0
             fastScanTotal = scanList.count
@@ -582,6 +632,7 @@ final class IndexingCoordinator: ObservableObject {
         // 视频量级小先处理:几分钟后即可被「视频」范围搜到,不必等全部照片。
         // 第七十批:串行→2 路并发——抽帧/解码(CPU)与嵌入/OCR(ANE/Vision)
         // 错峰重叠,视频段约快一倍
+        DiagLog.shared.event("相位:视频")
         phase = .videos
         await withTaskGroup(of: Int.self) { group in
             var index = 0
@@ -677,6 +728,7 @@ final class IndexingCoordinator: ObservableObject {
             }
             if let faceAbort { throw MSError(faceAbort) }
         }
+        DiagLog.shared.event("相位:照片富集 并发\(indexConcurrency) 热态\(ProcessInfo.processInfo.thermalState.rawValue)")
         phase = .photos
         // 第七十批:并发 2→4(OCR/Vision 吃 CPU+GPU,嵌入走 ANE,错峰重叠),
         // 并挂分段计时——每 50 张把「取图/OCR/嵌入/标签/人脸 毫秒均摊」
@@ -951,6 +1003,16 @@ final class IndexingCoordinator: ObservableObject {
     /// 2 路并发 ≈ 3.6 张/秒 ≥ 四路 worker 的其余段合计速率,OCR 本来就是
     /// 瓶颈段,窄闸=流水线化)
     nonisolated private static let ocrGate = AsyncSemaphore(limit: 2)
+    /// 批81:在途计数(resign 时写进账本,崩溃反推的硬数据)
+    nonisolated private static let inflightLock = NSLock()
+    nonisolated private static var _ocrInFlight = 0
+    nonisolated static var ocrInFlight: Int {
+        inflightLock.lock(); defer { inflightLock.unlock() }; return _ocrInFlight
+    }
+    nonisolated private static var _embedInFlight = 0
+    nonisolated static var embedInFlight: Int {
+        inflightLock.lock(); defer { inflightLock.unlock() }; return _embedInFlight
+    }
 
     /// 索引并发数(批80二修,用户可调 2~8,默认 4):设置页「索引并发数」,
     /// 相位启动时读取——变更对下一次开始/续跑的索引生效
@@ -970,7 +1032,11 @@ final class IndexingCoordinator: ObservableObject {
     nonisolated private static func embedWithANERetry(
         _ clip: SigLIPEmbedder, _ cg: CGImage) async throws -> [Float] {
         await aneGate.wait()
-        defer { aneGate.signal() }
+        inflightLock.lock(); _embedInFlight += 1; inflightLock.unlock()
+        defer {
+            aneGate.signal()
+            inflightLock.lock(); _embedInFlight -= 1; inflightLock.unlock()
+        }
         if Task.isCancelled { throw CancellationError() }
         do {
             return try clip.embedImage(cg)
@@ -1258,15 +1324,27 @@ final class IndexingCoordinator: ObservableObject {
     /// return 0 不写任何行,下轮自愈重做(与嵌入路径同规)
     nonisolated private static func recognizeTextGated(in cg: CGImage) async throws -> String? {
         await ocrGate.wait()
-        defer { ocrGate.signal() }
+        inflightLock.lock(); _ocrInFlight += 1; inflightLock.unlock()
+        defer {
+            ocrGate.signal()
+            inflightLock.lock(); _ocrInFlight -= 1; inflightLock.unlock()
+        }
         if Task.isCancelled { throw CancellationError() }
-        return recognizeText(in: cg)
+        let t = CFAbsoluteTimeGetCurrent()
+        let r = recognizeText(in: cg)
+        let ms = Int((CFAbsoluteTimeGetCurrent() - t) * 1000)
+        if ms > 3000 { DiagLog.shared.event("OCR 慢:\(ms)ms>3s(ANE排队信号)") }
+        return r
     }
 
     /// 批79:Vision 标签过闸(同 OCR,CoreML 吃 ANE);取消同规 throw 中止
     nonisolated private static func visionLabelsGated(cg: CGImage) async throws -> String? {
         await aneGate.wait()
-        defer { aneGate.signal() }
+        inflightLock.lock(); _embedInFlight += 1; inflightLock.unlock()
+        defer {
+            aneGate.signal()
+            inflightLock.lock(); _embedInFlight -= 1; inflightLock.unlock()
+        }
         if Task.isCancelled { throw CancellationError() }
         return visionLabels(cg: cg)
     }

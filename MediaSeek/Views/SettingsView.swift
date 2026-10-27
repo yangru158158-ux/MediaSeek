@@ -366,6 +366,12 @@ struct SettingsView: View {
                 ForEach(2...8, id: \.self) { Text("\($0) 路").tag($0) }
             }
             Text("同时处理的照片数:越大越快、越热。默认 4;改动立即生效(进行中的索引热切换)")
+            if let diag = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first?
+                .appendingPathComponent("MediaSeek/diag.log"), FileManager.default.fileExists(atPath: diag.path) {
+                ShareLink(item: diag) {
+                    Label("导出诊断日志(崩溃时在途状态与相位记录)", systemImage: "doc.text")
+                }
+            }
                 .font(.caption).foregroundStyle(.secondary)
             Toggle(isOn: Binding(
                 get: { UserDefaults.standard.bool(forKey: "speechEnabled") },
