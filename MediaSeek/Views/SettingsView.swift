@@ -370,7 +370,7 @@ struct SettingsView: View {
                 ShareLink(item: { () -> URL in
                     IndexingCoordinator.DiagLog.shared.ensureFileExists()
                     return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-                        .appendingPathComponent("MediaSeek/diag.log")
+                        .appendingPathComponent("diag.log")
                 }()) {
                     Label("导出诊断日志", systemImage: "doc.text")
                 }

@@ -78,9 +78,9 @@ final class IndexingCoordinator: ObservableObject {
             // 同步开文件/追加是给看门狗递刀,落盘全部转后台任务
             let out = line
             Task.detached(priority: .utility) {
-                let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-                    .appendingPathComponent("MediaSeek", isDirectory: true)
-                try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                // 批82一修(用户点名):Application Support 在沙盒深处文件 App 看不见;
+                // Documents=文件 App「我的 iPhone → MediaSeek → diag.log」直达
+                let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
                 let u = dir.appendingPathComponent("diag.log")
                 if let h = FileHandle(forWritingAtPath: u.path) {
                     h.seekToEndOfFile()
@@ -96,9 +96,7 @@ final class IndexingCoordinator: ObservableObject {
         }
         /// 确保日志文件存在(设置页导出前调用,防分享不存在的文件——验收 medium)
         nonisolated func ensureFileExists() {
-            let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-                .appendingPathComponent("MediaSeek", isDirectory: true)
-            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             let u = dir.appendingPathComponent("diag.log")
             if !FileManager.default.fileExists(atPath: u.path) {
                 try? "—— 诊断日志 ——\n".data(using: .utf8)?.write(to: u)
