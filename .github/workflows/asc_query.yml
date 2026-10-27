@@ -3,42 +3,44 @@ on:
   workflow_dispatch:
 jobs:
   query:
-    runs-on: macOS-latest
+    runs-on: ubuntu-latest
     steps:
-      - name: ruby-jwt 直查
+      - name: pyjwt 直查
         env:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
           ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
         run: |
+          pip install --quiet pyjwt cryptography
           echo "$ASC_API_KEY_P8" | base64 --decode > "$HOME/asc.pem"
-          cat > /tmp/q.rb <<'RUBY'
-          require "jwt"; require "net/http"; require "uri"; require "json"
-          key = OpenSSL::PKey.read(File.expand_path("~/asc.pem"))
-          payload = { iss: ENV["ASC_ISSUER_ID"], iat: Time.now.to_i - 30, exp: Time.now.to_i + 1100 }
-          jwt = JWT.encode(payload, key, "ES256", { kid: ENV["ASC_KEY_ID"], typ: "JWT" })
-          def asc(path, jwt)
-            u = URI("https://api.appstoreconnect.apple.com" + path)
-            r = Net::HTTP.start(u.host, 443, use_ssl: true) { |h| h.get(u.request_uri, {"Authorization" => "Bearer " + jwt}) }
-            [r.code.to_i, r.body]
-          end
-          code, body = asc("/v1/apps?limit=50", jwt)
-          abort "APPS-HTTP #{code}: #{body[0,300]}" if code != 200
-          apps = JSON.parse(body)
-          apps["data"].each do |a|
-            puts "APP| #{a["attributes"]["bundleId"]} | #{a["attributes"]["name"]} | #{a["id"]}"
-            next unless a["attributes"]["bundleId"].to_s.include?("medseek")
-            aid = a["id"]
-            c, b = asc("/v1/apps/#{aid}/betaGroups?limit=20", jwt)
-            puts "GROUPS| #{b[0,3200]}"
-            c, b = asc("/v1/betaTesters?filter[email]=yangru158158@gmail.com&limit=5", jwt)
-            puts "GMAIL| #{b[0,1200]}"
-            c, b = asc("/v1/builds?filter[app]=#{aid}&limit=2&sort=-version", jwt)
-            JSON.parse(b)["data"].each do |bd|
-              cc, bb = asc("/v1/builds/#{bd["id"]}/buildBetaDetail", jwt)
-              attr = ((JSON.parse(bb)["data"] || {})["attributes"] || {}).to_json rescue bb[0,200]
-              puts "BUILD| #{bd["attributes"]["version"]} | #{attr}"
-            end
-          end
-          RUBY
-          ruby /tmp/q.rb
+          python3 - <<'PY'
+          import os, json, time, jwt, urllib.request
+          key = open(os.path.expanduser("~/asc.pem")).read()
+          now = int(time.time())
+          tok = jwt.encode({"iss": os.environ["ASC_ISSUER_ID"], "iat": now-30, "exp": now+1100},
+                           key, algorithm="ES256",
+                           headers={"kid": os.environ["ASC_KEY_ID"], "typ": "JWT"})
+          def asc(path):
+              req = urllib.request.Request("https://api.appstoreconnect.apple.com"+path,
+                                           headers={"Authorization": "Bearer "+tok})
+              try:
+                  with urllib.request.urlopen(req) as r: return r.status, r.read().decode()
+              except urllib.error.HTTPError as e: return e.code, e.read().decode()[:400]
+          c, b = asc("/v1/apps?limit=50")
+          if c != 200: print("APPS-HTTP", c, b); raise SystemExit(1)
+          for a in json.loads(b)["data"]:
+              at = a["attributes"]
+              print("APP|", at.get("bundleId"), "|", at.get("name"), "|", a["id"])
+              if "medseek" not in (at.get("bundleId") or ""): continue
+              aid = a["id"]
+              c, b = asc(f"/v1/apps/{aid}/betaGroups?limit=20")
+              print("GROUPS|", b[:3200])
+              c, b = asc("/v1/betaTesters?filter[email]=yangru158158@gmail.com&limit=5")
+              print("GMAIL|", b[:1200])
+              c, b = asc(f"/v1/builds?filter[app]={aid}&limit=2&sort=-version")
+              for bd in json.loads(b).get("data", []):
+                  cc, bb = asc(f"/v1/builds/{bd['id']}/buildBetaDetail")
+                  try: attr = json.loads(bb)["data"]["attributes"]
+                  except Exception: attr = bb[:200]
+                  print("BUILD|", bd["attributes"].get("version"), "|", json.dumps(attr, ensure_ascii=False))
+          PY
