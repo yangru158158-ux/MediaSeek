@@ -24,6 +24,8 @@ final class IndexingCoordinator: ObservableObject {
     /// 批77:当前是否真在后台(区分短暂失活与真后台,决定 didBecomeActive
     /// 是否即时续跑)
     private var inBackground = false
+    /// 批80:后台任务主张——真根因修复(见 willResignActive 注释)
+    private var bgTask = UIBackgroundTaskIdentifier.invalid
     @Published private(set) var errorCount = 0
     @Published private(set) var firstErrorMessage: String?
     @Published private(set) var lastSyncAt: Date?
@@ -174,6 +176,18 @@ final class IndexingCoordinator: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor in
                 guard let self, self.isRunning, !self.backgroundPaused else { return }
+                // 批80(五连崩同签名真根因):不申请后台主张,进后台瞬间
+                // 神经引擎服务被系统暂停——在途 Vision/CoreML 调用(不可中断)
+                // 整体冻结(229 崩溃 CPU 统计 0.017s/0% 实锤),主线程的进
+                // 后台系统观察者等一个永远不来的完成 → 10s 场景看门狗杀。
+                // 并发数从来不是变量(4/5/8 路同死法,只是冻住的线程数不同)。
+                // 主张给 ~30s:服务保持活 → 在途调用秒级排空 → 观察者解锁;
+                // 到期回调兜底取消,优雅挂起而非被杀
+                if self.bgTask == .invalid {
+                    self.bgTask = UIApplication.shared.beginBackgroundTask(withName: "index-drain") { [weak self] in
+                        Task { @MainActor in self?.task?.cancel() }
+                    }
+                }
                 self.task?.cancel()
                 self.backgroundPaused = true
             }
@@ -198,6 +212,10 @@ final class IndexingCoordinator: ObservableObject {
             Task { @MainActor in
                 guard let self else { return }
                 self.inBackground = false
+                if self.bgTask != .invalid {
+                    UIApplication.shared.endBackgroundTask(self.bgTask)
+                    self.bgTask = .invalid
+                }
                 guard self.backgroundPaused else { return }
                 self.backgroundPaused = false
                 // 批76:续跑轮本身就含文件/增量同步,顺带消费暂停期间积压的
@@ -213,6 +231,10 @@ final class IndexingCoordinator: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor in
                 guard let self, !self.inBackground, self.backgroundPaused else { return }
+                if self.bgTask != .invalid {
+                    UIApplication.shared.endBackgroundTask(self.bgTask)
+                    self.bgTask = .invalid
+                }
                 self.backgroundPaused = false
                 self.rerunPending = false
                 self.startRun(full: false)
@@ -300,6 +322,11 @@ final class IndexingCoordinator: ObservableObject {
             self.isRunning = false
             self.task = nil
             UIApplication.shared.isIdleTimerDisabled = false
+            // 批80:后台排空完毕即释放主张(后台额度有限,不白占)
+            if self.bgTask != .invalid {
+                UIApplication.shared.endBackgroundTask(self.bgTask)
+                self.bgTask = .invalid
+            }
             // 跑完后若期间有新导入排队,立刻补跑一轮(文件秒级变「已索引」)。
             // 批75:后台暂停触发的取消不补跑——后台重启索引=再送看门狗,
             // 留给回前台的 willEnterForeground 续跑
