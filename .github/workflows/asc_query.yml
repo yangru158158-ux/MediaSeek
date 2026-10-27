@@ -12,7 +12,10 @@ jobs:
           ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
         run: |
           echo "$ASC_API_KEY_P8" | base64 --decode > "$HOME/asc.pem"
-          head -c 40 "$HOME/asc.pem"
+          echo "SIZE: $(wc -c < "$HOME/asc.pem")"
+          echo "MD5: $(md5 -q "$HOME/asc.pem")"
+          echo "EC-CHECK: $(openssl ec -in "$HOME/asc.pem" -noout 2>&1 | head -1)"
+          openssl asn1parse -in "$HOME/asc.pem" -i 2>&1 | head -6
           ruby -e '
             require "spaceship"
             tok = Spaceship::ConnectAPI::Token.create(
