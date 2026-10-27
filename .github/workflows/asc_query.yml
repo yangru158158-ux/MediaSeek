@@ -35,6 +35,13 @@ jobs:
               aid = a["id"]
               c, b = asc(f"/v1/apps/{aid}/betaGroups?limit=20")
               print("GROUPS|", b[:3200])
+              # 每个组的成员名单(内测/外测资格的最终事实)
+              c, gb = asc(f"/v1/apps/{aid}/betaGroups?limit=20")
+              for g in json.loads(gb).get("data", []):
+                  gid = g["id"]
+                  c, tb = asc(f"/v1/betaGroups/{gid}/betaTesters?limit=50")
+                  emails = [t["attributes"].get("email") for t in json.loads(tb).get("data", [])]
+                  print("MEMBERS|", g["attributes"].get("name"), "|", "内部" if g["attributes"].get("isInternalGroup") else "外部", "|", emails)
               c, b = asc("/v1/betaTesters?filter[email]=yangru158158@gmail.com&limit=5")
               print("GMAIL|", b[:1200])
               c, b = asc("/v1/betaAppReviewSubmissions?filter[app]=" + aid + "&limit=10")
