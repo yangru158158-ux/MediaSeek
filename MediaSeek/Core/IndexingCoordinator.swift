@@ -1003,16 +1003,18 @@ final class IndexingCoordinator: ObservableObject {
     /// 2 路并发 ≈ 3.6 张/秒 ≥ 四路 worker 的其余段合计速率,OCR 本来就是
     /// 瓶颈段,窄闸=流水线化)
     nonisolated private static let ocrGate = AsyncSemaphore(limit: 2)
-    /// 批81:在途计数(resign 时写进账本,崩溃反推的硬数据)
-    nonisolated private static let inflightLock = NSLock()
-    nonisolated private static var _ocrInFlight = 0
-    nonisolated static var ocrInFlight: Int {
-        inflightLock.lock(); defer { inflightLock.unlock() }; return _ocrInFlight
+    /// 批81:在途计数(resign 时写进账本,崩溃反推的硬数据)。
+    /// nonisolated static var 不合法(Swift 并发)——值装进 final class 容器
+    final class Counter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var v = 0
+        func add(_ d: Int) { lock.lock(); v += d; lock.unlock() }
+        var value: Int { lock.lock(); defer { lock.unlock() }; return v }
     }
-    nonisolated private static var _embedInFlight = 0
-    nonisolated static var embedInFlight: Int {
-        inflightLock.lock(); defer { inflightLock.unlock() }; return _embedInFlight
-    }
+    nonisolated private static let _ocrInFlight = Counter()
+    nonisolated static var ocrInFlight: Int { _ocrInFlight.value }
+    nonisolated private static let _embedInFlight = Counter()
+    nonisolated static var embedInFlight: Int { _embedInFlight.value }
 
     /// 索引并发数(批80二修,用户可调 2~8,默认 4):设置页「索引并发数」,
     /// 相位启动时读取——变更对下一次开始/续跑的索引生效
@@ -1032,10 +1034,10 @@ final class IndexingCoordinator: ObservableObject {
     nonisolated private static func embedWithANERetry(
         _ clip: SigLIPEmbedder, _ cg: CGImage) async throws -> [Float] {
         await aneGate.wait()
-        inflightLock.lock(); _embedInFlight += 1; inflightLock.unlock()
+        _embedInFlight.add(1)
         defer {
             aneGate.signal()
-            inflightLock.lock(); _embedInFlight -= 1; inflightLock.unlock()
+            _embedInFlight.add(-1)
         }
         if Task.isCancelled { throw CancellationError() }
         do {
@@ -1324,10 +1326,10 @@ final class IndexingCoordinator: ObservableObject {
     /// return 0 不写任何行,下轮自愈重做(与嵌入路径同规)
     nonisolated private static func recognizeTextGated(in cg: CGImage) async throws -> String? {
         await ocrGate.wait()
-        inflightLock.lock(); _ocrInFlight += 1; inflightLock.unlock()
+        _ocrInFlight.add(1)
         defer {
             ocrGate.signal()
-            inflightLock.lock(); _ocrInFlight -= 1; inflightLock.unlock()
+            _ocrInFlight.add(-1)
         }
         if Task.isCancelled { throw CancellationError() }
         let t = CFAbsoluteTimeGetCurrent()
@@ -1340,10 +1342,10 @@ final class IndexingCoordinator: ObservableObject {
     /// 批79:Vision 标签过闸(同 OCR,CoreML 吃 ANE);取消同规 throw 中止
     nonisolated private static func visionLabelsGated(cg: CGImage) async throws -> String? {
         await aneGate.wait()
-        inflightLock.lock(); _embedInFlight += 1; inflightLock.unlock()
+        _embedInFlight.add(1)
         defer {
             aneGate.signal()
-            inflightLock.lock(); _embedInFlight -= 1; inflightLock.unlock()
+            _embedInFlight.add(-1)
         }
         if Task.isCancelled { throw CancellationError() }
         return visionLabels(cg: cg)
