@@ -185,6 +185,13 @@ final class IndexingCoordinator: ObservableObject {
                 // 到期回调兜底取消,优雅挂起而非被杀
                 if self.bgTask == .invalid {
                     self.bgTask = UIApplication.shared.beginBackgroundTask(withName: "index-drain") { [weak self] in
+                        // Apple 契约:到期回调必须自行结束任务——主线程可能正忙,
+                        // 依赖异步链的释放不可靠(验收 medium);同步 end + 异步取消
+                        let id = self?.bgTask ?? .invalid
+                        if id != .invalid {
+                            self?.bgTask = .invalid
+                            UIApplication.shared.endBackgroundTask(id)
+                        }
                         Task { @MainActor in self?.task?.cancel() }
                     }
                 }
