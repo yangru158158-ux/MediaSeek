@@ -972,7 +972,7 @@ final class IndexingCoordinator: ObservableObject {
             // 无文字也写 "" 占位行:增量同步靠「缺 OCR 行」识别待补照片,
             // 没有占位的话风景照等无字照片会被每轮反复重处理
             let t2 = CFAbsoluteTimeGetCurrent()
-            let ocr = await Self.recognizeTextGated(in: full)
+            let ocr = try await Self.recognizeTextGated(in: full)
             timing?.add("ocr", CFAbsoluteTimeGetCurrent() - t2)
             try store.saveOCR(refKey: asset.localIdentifier, text: ocr ?? "")
 
@@ -988,7 +988,7 @@ final class IndexingCoordinator: ObservableObject {
 
             let t4 = CFAbsoluteTimeGetCurrent()
             guard useLabels else { return 0 }
-            let labels = await Self.visionLabelsGated(cg: small)
+            let labels = try await Self.visionLabelsGated(cg: small)
             guard let labels, !labels.isEmpty else { return 0 }
             try Task.checkCancellation()
             let lvec = try gemma.embedDocument("photo tags: \(labels)")
@@ -1126,7 +1126,7 @@ final class IndexingCoordinator: ObservableObject {
                     // SigLIP 图文分数在本库区分度不足(马尔代夫 vs 抖音噪声分不开),
                     // 标签零幻觉:海滩/水上屋帧得 beach/island/water,抖音室内帧得
                     // people/clothing,词典词不命中即不灌入
-                    if let gemma, let labels = await Self.visionLabelsGated(cg: small) {
+                    if let gemma, let labels = try await Self.visionLabelsGated(cg: small) {
                         let lvec = try gemma.embedDocument("photo tags: \(labels)")
                         try store.upsert(kind: .videoFrameLabel, refKey: asset.localIdentifier,
                                          frameIndex: i, space: gemma.space, vector: lvec,
@@ -1134,7 +1134,7 @@ final class IndexingCoordinator: ObservableObject {
                         labelRows += 1
                     }
                     // 帧OCR(与照片同管线):视频画面里的文字可被 文字: 命中
-                    if let t = await Self.recognizeTextGated(in: frame) {
+                    if let t = try await Self.recognizeTextGated(in: frame) {
                         ocrParts.append("【帧\(i)】\(t)")
                     }
                 }
@@ -1208,19 +1208,22 @@ final class IndexingCoordinator: ObservableObject {
 
     /// Vision 内置 1300+ 类分类器,取高置信度标签(如 cat / dog / beach)
     /// 批79:OCR 过闸——Vision 的 performRequests 不可中断,挂死时与嵌入
-    /// 同死法;wait 后查取消,排队中的取消任务直接放弃(停止排空不等闸)
-    nonisolated private static func recognizeTextGated(in cg: CGImage) async -> String? {
+    /// 同死法。批79三修(验收 high):取消改 throw 中止本张——原 return nil
+    /// 会让管线继续走并写空 OCR 占位行,自愈判据把被取消照片错标「已补全」,
+    /// 每次停止批量丢一批照片的 OCR 且不可自愈;改 throw 后 catch 里
+    /// return 0 不写任何行,下轮自愈重做(与嵌入路径同规)
+    nonisolated private static func recognizeTextGated(in cg: CGImage) async throws -> String? {
         await aneGate.wait()
         defer { aneGate.signal() }
-        if Task.isCancelled { return nil }
+        if Task.isCancelled { throw CancellationError() }
         return recognizeText(in: cg)
     }
 
-    /// 批79:Vision 标签过闸(同 OCR,CoreML 吃 ANE)
-    nonisolated private static func visionLabelsGated(cg: CGImage) async -> String? {
+    /// 批79:Vision 标签过闸(同 OCR,CoreML 吃 ANE);取消同规 throw 中止
+    nonisolated private static func visionLabelsGated(cg: CGImage) async throws -> String? {
         await aneGate.wait()
         defer { aneGate.signal() }
-        if Task.isCancelled { return nil }
+        if Task.isCancelled { throw CancellationError() }
         return visionLabels(cg: cg)
     }
 
