@@ -75,7 +75,7 @@ final class ModelUpdateLoader: NSObject, ObservableObject, URLSessionDataDelegat
         }
     }
 
-    func download(_ file: ModelPkgFile) async throws -> URL {
+    func download(_ file: ModelPkgFile, version: String) async throws -> URL {
         downloadingKey = file.key
         progress = 0
         resuming = false
@@ -83,7 +83,20 @@ final class ModelUpdateLoader: NSObject, ObservableObject, URLSessionDataDelegat
             .appendingPathComponent("MediaSeek/Downloads", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         let part = dir.appendingPathComponent("pkg_\(file.key).part")
+        // 批85:断点缓存必须认包。Release 删了重建后同一 URL 指向全新字节,
+        // 旧 .part 直接 Range 续传会把新旧字节拼成坏 zip——解压第一步就
+        // 抛错,导入永远失败、版本号永不更新(234 装机实锤:标准包/so400m
+        // 两次下载全拼坏,已装版本停在 10-13)。清单版本按每次发布重生成
+        // (sha+时间戳),作包身份足够;.meta 侧车记录开始下载时的清单版本,
+        // 不匹配 = 服务器换过包,丢弃缓存重下。老版本装的缓存无 .meta,
+        // 视为不匹配自动清——用户的坏缓存自愈
+        let meta = dir.appendingPathComponent("pkg_\(file.key).meta")
+        let partVersion = (try? String(contentsOf: meta, encoding: .utf8)) ?? ""
         var existing = Int64((try? FileManager.default.attributesOfItem(atPath: part.path))?[.size] as? Int64 ?? 0)
+        if existing > 0, partVersion != version {
+            try? FileManager.default.removeItem(at: part)
+            existing = 0
+        }
         // 服务器包已更新:.part 比清单标称还大 = 旧包残片,丢弃重下
         if existing > file.size {
             try? FileManager.default.removeItem(at: part)
@@ -119,6 +132,9 @@ final class ModelUpdateLoader: NSObject, ObservableObject, URLSessionDataDelegat
         cancelIntent = false
         resuming = existing > 0
         progress = existing > 0 ? Double(existing) / Double(file.size) : 0
+        // 记录缓存对应的清单版本(200 全新路径会先删 .part 重建,meta 覆写
+        // 同值幂等;写失败则下次判不匹配丢弃重下,安全降级)
+        try? version.write(to: meta, atomically: true, encoding: .utf8)
         return try await withCheckedThrowingContinuation { c in
             self.continuation = c
             self.dataTask = session.dataTask(with: req)
@@ -338,7 +354,7 @@ struct ModelUpdateSection: View {
     private func install(_ f: ModelPkgFile, version: String) {
         Task {
             do {
-                let zipURL = try await loader.download(f)
+                let zipURL = try await loader.download(file: f, version: version)
                 loader.importing = true
                 // so400m 增强包落独立槽位 ImageEmbedderPro(第四十六批):
                 // 与随包标准模型并存,导入后自动切到 so400m,设置页可随时切回
