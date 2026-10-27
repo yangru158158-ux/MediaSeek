@@ -323,10 +323,10 @@ final class IndexingCoordinator: ObservableObject {
         case .idle: return backgroundPaused ? "后台已暂停,回到前台自动继续" : "未开始"
         case .waitingModel: return "等待模型加载…"
         case .fastScan:
-            return "快扫语义索引 \(fastScanDone)/\(fastScanTotal)(已可搜)" + (stageNote.isEmpty ? "" : " · \(stageNote)")
-        case .photos: return "正在索引照片" + (stageNote.isEmpty ? "" : " · \(stageNote)")
-        case .videos: return "正在索引视频" + (stageNote.isEmpty ? "" : " · \(stageNote)")
-        case .faces: return "正在补人脸数据" + (stageNote.isEmpty ? "" : " · \(stageNote)")
+            return "快扫 \(fastScanDone)/\(fastScanTotal) · \(indexConcurrency)路(已可搜)" + (stageNote.isEmpty ? "" : " · \(stageNote)")
+        case .photos: return "正在索引照片 · \(indexConcurrency)路" + (stageNote.isEmpty ? "" : " · \(stageNote)")
+        case .videos: return "正在索引视频 · 2路" + (stageNote.isEmpty ? "" : " · \(stageNote)")
+        case .faces: return "正在补人脸数据 · 2路" + (stageNote.isEmpty ? "" : " · \(stageNote)")
         case .files: return "正在索引文件"
         case .speech: return "正在转写视频语音"
         case .done: return "索引完成"
