@@ -9,7 +9,7 @@ struct LibraryView: View {
     @State private var videoCount = 0
     @State private var importedFiles: [ImportedFile] = []
     @State private var showFilePicker = false
-    @State private var showFolderPicker = false
+    @State private var pickFolder = false
     @State private var confirmRebuild = false
     @State private var refreshPending = false
     @State private var filesExpanded = false
@@ -46,14 +46,13 @@ struct LibraryView: View {
             .navigationTitle("资料库")
             .onAppear(perform: refresh)
             .onChange(of: app.indexing.phase) { _ in refresh() }
+            // 批86:两个 fileImporter 叠挂=后者占掉唯一呈现位,先挂的「选择
+            // 文件」点了没反应(只有「导入文件夹」能用,234 装机)。合并为
+            // 单一入口,模式由 pickFolder 决定——设置在呈现翻转前落定,
+            // fileImporter 呈现时读到的即是正确配置
             .fileImporter(isPresented: $showFilePicker,
-                          allowedContentTypes: [.item],
-                          allowsMultipleSelection: true) { result in
-                handleImport(result)
-            }
-            .fileImporter(isPresented: $showFolderPicker,
-                          allowedContentTypes: [.folder],
-                          allowsMultipleSelection: false) { result in
+                          allowedContentTypes: pickFolder ? [.folder] : [.item],
+                          allowsMultipleSelection: !pickFolder) { result in
                 handleImport(result)
             }
             .confirmationDialog("全量重建会删除现有索引并重新处理所有内容,耗时较长。继续?",
@@ -314,12 +313,14 @@ struct LibraryView: View {
     private var importSection: some View {
         Section("从「文件」导入") {
             Button {
+                pickFolder = false
                 showFilePicker = true
             } label: {
                 Label("选择文件(可多选)", systemImage: "plus.square.on.square")
             }
             Button {
-                showFolderPicker = true
+                pickFolder = true
+                showFilePicker = true
             } label: {
                 Label("导入整个文件夹", systemImage: "folder.badge.plus")
             }

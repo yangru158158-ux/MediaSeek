@@ -18,6 +18,10 @@ final class ImportLibrary: ObservableObject {
     /// 返回新导入的文件数(文件夹会递归展开为多个文件记录)
     func importURLs(_ urls: [URL]) throws -> Int {
         var count = 0
+        // 批86:按已解析的标准路径查重。此前同一文件/文件夹重复导入=每次
+        // 全新 UUID 各插一行,列表同名条目成串——「删了一条文件还在列表」
+        // 的另一条即此(234 装机)。seen 同时兜住本批内的重复选择
+        var seen = existingPathSet()
         for url in urls {
             let scoped = url.startAccessingSecurityScopedResource()
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
@@ -37,6 +41,9 @@ final class ImportLibrary: ObservableObject {
                         try autoreleasepool {
                             let values = try? child.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
                             guard values?.isRegularFile == true else { return }
+                            let std = (child.path as NSString).standardizingPath
+                            guard !seen.contains(std) else { return }   // 已导入过,跳过
+                            seen.insert(std)
                             let record = ImportedFile(
                                 id: UUID().uuidString,
                                 folderID: folderID,
@@ -56,6 +63,9 @@ final class ImportLibrary: ObservableObject {
                     throw error
                 }
             } else {
+                let std = (url.path as NSString).standardizingPath
+                guard !seen.contains(std) else { continue }
+                seen.insert(std)
                 let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
                 let record = ImportedFile(
                     id: UUID().uuidString,
@@ -75,6 +85,35 @@ final class ImportLibrary: ObservableObject {
 
     func allFiles() -> [ImportedFile] {
         (try? store.allFiles()) ?? []
+    }
+
+    /// 批86:已导入文件的标准路径全集(去重用)。文件夹书签按 folderID
+    /// 缓存解析,避免上千条 relPath 重复解析同一书签;书签解析不需要
+    /// 安全域授权——只取 path,不读内容
+    private func existingPathSet() -> Set<String> {
+        var out = Set<String>()
+        var folderBase: [Int64: String] = [:]
+        for f in allFiles() {
+            let path: String
+            if let fid = f.folderID, let rel = f.relPath {
+                if let base = folderBase[fid] {
+                    path = base + "/" + rel
+                } else if let data = try? store.folderBookmark(id: fid) {
+                    var stale = false
+                    guard let url = try? URL(resolvingBookmarkData: data, options: [],
+                                              relativeTo: nil, bookmarkDataIsStale: &stale) else { continue }
+                    folderBase[fid] = url.path
+                    path = url.path + "/" + rel
+                } else { continue }
+            } else if let bm = f.bookmark {
+                var stale = false
+                guard let url = try? URL(resolvingBookmarkData: bm, options: [],
+                                          relativeTo: nil, bookmarkDataIsStale: &stale) else { continue }
+                path = url.path
+            } else { continue }
+            out.insert((path as NSString).standardizingPath)
+        }
+        return out
     }
 
     func remove(_ record: ImportedFile) throws {

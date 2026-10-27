@@ -1298,7 +1298,11 @@ final class VectorStore {
         let stmt = try prepare("DELETE FROM files WHERE id = ?")
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, id, -1, Self.transient)
-        sqlite3_step(stmt)
+        // 批86:此前 step 结果被忽略——DB 忙/锁时 DELETE 静默丢失,UI 刷新后
+        // 文件「还在列表里」且无任何报错(234 装机)。改为核对执行结果与
+        // 受影响行数,失败如实抛错走 app.fail 提示
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw MSError("删除文件记录失败(DB 忙/锁)") }
+        guard sqlite3_changes(db) > 0 else { throw MSError("记录不存在或未删除") }
         // 全量清除:文件名向量、每页文本向量(fileChunk)、PDF OCR 原文(ocr_text)
         try removeEverythingForRef(id)
     } }
