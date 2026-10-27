@@ -37,6 +37,12 @@ jobs:
               print("GROUPS|", b[:3200])
               c, b = asc("/v1/betaTesters?filter[email]=yangru158158@gmail.com&limit=5")
               print("GMAIL|", b[:1200])
+              c, b = asc("/v1/betaAppReviewSubmissions?filter[app]=" + aid + "&limit=10")
+              print("REVIEWS|", b[:1500])
+              c, b = asc(f"/v1/builds?filter[app]={aid}&limit=1&filter[version]=195")
+              if json.loads(b).get("data"):
+                  cc, bb = asc(f"/v1/builds/{json.loads(b)['data'][0]['id']}/buildBetaDetail")
+                  print("V195|", bb[:400])
               c, b = asc(f"/v1/builds?filter[app]={aid}&limit=2&sort=-version")
               for bd in json.loads(b).get("data", []):
                   cc, bb = asc(f"/v1/builds/{bd['id']}/buildBetaDetail")
