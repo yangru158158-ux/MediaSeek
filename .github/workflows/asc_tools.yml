@@ -57,6 +57,7 @@ jobs:
         run: |
           ARGS=("${{ inputs.group }}")
           if [ -n "${{ inputs.contact_phone }}" ]; then
-            ARGS+=("${{ inputs.contact_last }}" "${{ inputs.contact_first }}" "${{ inputs.contact_email }}" "${{ inputs.contact_phone }}")
+            # 脚本吃参:argv[2]=名(First) argv[3]=姓(Last)——原工作流传反了
+            ARGS+=("${{ inputs.contact_first }}" "${{ inputs.contact_last }}" "${{ inputs.contact_email }}" "${{ inputs.contact_phone }}")
           fi
           python3 scripts/asc_external_setup.py "${ARGS[@]}"
