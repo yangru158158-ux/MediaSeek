@@ -528,10 +528,15 @@ enum QueryUnderstanding {
         ("吃的", "food"), ("好吃的", "food"), ("饮品", "drink"),
         // 证件/文书(同时带上 document 词,便于命中文档类标签)
         ("证件", "id card"), ("证件照", "id portrait"),
-        ("身份证", "id card"), ("驾照", "driver license document"),
+        ("身份证", "id card"), ("驾照", "driver license card"),
         // 第七十二批:驾驶证此前无词典对(只有驾照有)——繁体「駕駛證」归一到
         // 驾驶证后若查不到英文,模板还是会退回裸多语言嵌入,补齐与驾照同款
-        ("驾驶证", "driver license document"),
+        // 第八十三批:document→card。232 装机实测搜「驾驶证」语义 4,023——
+        // "document" 泛词对文档密集图库(银行月结单/收据/票据全是打印物)
+        // 在 tier-2(0.18) 大面积过线,tier-2 命中≥30 不再降档,底网豁免
+        // 修复管不到这一层。收窄成卡片形态词只匹配实体证卡;文字通道
+        // 不受影响(ocrAliases 已有 机动车驾驶证/准驾车型 字段别名)
+        ("驾驶证", "driver license card"),
         // 第六十九批:护照此前无词典对,中文查询走裸多语言嵌入——补 passport
         // 模板(与 ocrAliases 的护照条目、英文桥三处同族)
         ("护照", "passport"),

@@ -364,6 +364,9 @@ final class IndexingCoordinator: ObservableObject {
         guard !isRunning else {
             // 已有任务在跑:记一笔,本轮结束自动补跑(治「导入第二轮文件一直待索引」)
             rerunPending = true
+            // 批83:被挡必须可见——232 悬死时回前台续跑全被这里无声吞掉,
+            // diag 里 willEnterForeground 后没有任何 startRun 才靠推理定位
+            DiagLog.shared.event("startRun被挡:已有任务在跑 phase=\(phase)")
             return
         }
         // 批76:全量重建的 -1 标记提前到任务启动瞬间(原在照片同步开头)——
@@ -427,7 +430,7 @@ final class IndexingCoordinator: ObservableObject {
             try await syncPhotoLibrary(forceAll: full, errors: errors)
             // 语音转写(开关制)放最尾:核心索引不被数小时的转写挡道
             try await syncSpeechTranscripts(errors: errors)
-            await prebuildLabelVocab()   // 重建完成后预建路由词表,首次搜索不再有一次性延迟
+            try await prebuildLabelVocab()   // 批83:可中断——取消/超时不再悬死收尾
 
             lastSyncAt = Date()
             DiagLog.shared.event("完成: 处理\(processedLocal) 错\(errorCount)")
@@ -440,21 +443,41 @@ final class IndexingCoordinator: ObservableObject {
     }
 
     /// 把库内去重标签全部嵌入词向量表(语义路由用),量级几百条、一次性
-    private func prebuildLabelVocab() async {
+    /// 第八十三批:改可中断轮询。原实现 `await Task.detached{...}.value` 是
+    /// 非结构化等待——不吃父任务取消;嵌入调用被后台神经服务冻结则永不
+    /// 返回 → run() 悬死在收尾段,isRunning 永不归零 → startRun 全被
+    /// guard 挡死、回前台续跑不再发生,UI 卡「正在索引照片 2018/2018」+
+    /// 停止无效(232 装机实锤,按人物归组重启神经服务才碰巧解冻)。
+    /// 子任务照旧 detached(推理必须离主线程,防看门狗),完成信号走
+    /// Counter 盒:主循环每 200ms 醒一次(Task.sleep 吃取消),父取消
+    /// 立即抛中止;180s 超时放弃(词表只是首次搜索的提速优化,缺了由
+    /// 懒加载兜底、下轮完成时补建)。冻结子任务成僵尸不占闸不计数,
+    /// saveLabelVec 幂等,无害。
+    private func prebuildLabelVocab() async throws {
+        guard !Task.isCancelled else { throw CancellationError() }
         guard let gemma = models.gemma,
               let labels = try? store.allDistinctLabels(), !labels.isEmpty else { return }
         let known = Set(((try? store.labelVocab()) ?? []).map { $0.label })
-        // 推理必须放后台线程:主线程逐个嵌几百个标签会卡死主线程,
-        // 触发 scene-update 看门狗(10 秒上限)被系统击杀(18:01/18:03 两次崩溃根因)
-        let missing = labels.prefix(2000).filter { !known.contains($0) }
+        let missing = Array(labels.prefix(2000).filter { !known.contains($0) })
         guard !missing.isEmpty else { return }
-        await Task.detached(priority: .utility) { [store] in
+        let done = Counter()
+        Task.detached(priority: .utility) { [store, done] in
             for label in missing {
                 guard let v = try? gemma.embedDocument(label) else { continue }
                 try? store.saveLabelVec(label, vec: v)
                 try? await Task.sleep(nanoseconds: 2_000_000)   // 每 2ms 让路,防持续满载
             }
-        }.value
+            done.add(1)
+        }
+        let deadline = CFAbsoluteTimeGetCurrent() + 180
+        while done.value == 0 {
+            if Task.isCancelled { throw CancellationError() }
+            if CFAbsoluteTimeGetCurrent() > deadline {
+                DiagLog.shared.event("标签词表构建超时放弃(疑似冻结) missing=\(missing.count)")
+                return
+            }
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
     }
 
     // MARK: - 相册
