@@ -1,0 +1,57 @@
+name: ASC Query
+on:
+  workflow_dispatch:
+    inputs:
+      q:
+        description: 'query'
+        required: false
+        default: 'all'
+jobs:
+  query:
+    runs-on: macOS-latest
+    steps:
+      - name: 查询 ASC
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, time, subprocess, urllib.request, os
+          ISSUER = os.environ["ASC_ISSUER_ID"]; KID = os.environ["ASC_KEY_ID"]
+          key = os.path.expanduser("~/asc.pem")
+          open(key, "wb").write(base64.b64decode(os.environ["ASC_API_KEY_P8"]))
+          def b64u(b): return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
+          def read_int(d, o):
+              l = d[o]; o += 1; v = d[o:o+l]; o += l
+              return v.lstrip(b"\0"), o
+          def d2r(der):
+              o = 2; r, o = read_int(der, o); s, o = read_int(der, o)
+              return r.rjust(32, b"\0") + s.rjust(32, b"\0")
+          hdr = b64u(json.dumps({"alg":"ES256","kid":KID,"typ":"JWT"}).encode())
+          pl = b64u(json.dumps({"iss":ISSUER,"iat":int(time.time())-30,"exp":int(time.time())+1140}).encode())
+          der = subprocess.run(["openssl","dgst","-sha256","-sign",key],
+                               input=(hdr+"."+pl).encode(), capture_output=True).stdout
+          jwt = hdr+"."+pl+"."+b64u(d2r(der))
+          def asc(path):
+              req = urllib.request.Request("https://api.appstoreconnect.apple.com"+path,
+                                           headers={"Authorization":"Bearer "+jwt})
+              try:
+                  with urllib.request.urlopen(req) as r: return json.loads(r.read())
+              except urllib.error.HTTPError as e: return {"_err": e.code, "_b": e.read().decode()[:200]}
+          apps = asc("/v1/apps?limit=50")
+          print("APPS:", json.dumps(apps, ensure_ascii=False)[:2000])
+          for a in apps.get("data", []):
+              aid = a["id"]
+              if "medseek" in (a["attributes"].get("bundleId") or ""):
+                  print("== MediaSeek app id:", aid)
+                  g = asc(f"/v1/apps/{aid}/betaGroups?include=builds&limit=20")
+                  print("GROUPS:", json.dumps(g, ensure_ascii=False)[:4000])
+                  t = asc(f"/v1/betaTesters?filter[email]=yangru158158@gmail.com&limit=10")
+                  print("GMAIL-TESTER:", json.dumps(t, ensure_ascii=False)[:2000])
+                  b = asc(f"/v1/builds?filter[app]={aid}&limit=3&sort=-version")
+                  for bd in b.get("data", []):
+                      bid = bd["id"]; ver = bd["attributes"].get("version")
+                      d = asc(f"/v1/builds/{bid}/buildBetaDetail")
+                      print(f"BUILD {ver} ({bid}):", json.dumps(d.get("data",{}).get("attributes",{}), ensure_ascii=False))
+          PY
