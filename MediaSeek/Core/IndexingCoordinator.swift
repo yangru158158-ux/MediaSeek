@@ -661,12 +661,9 @@ final class IndexingCoordinator: ObservableObject {
         await withTaskGroup(of: Int.self) { group in
             var index = 0
             var inFlight = 0
-            // 第七十三批二修:4→8 路(装机实测 4 路一小时仅 3,910/13,548——
-            // 机身被快扫烤到 fair 后旧档减半,叠加 OCR 内部排队,实际近乎串行
-            // 1.08s/张)。热档换温热不减速版(与快扫同授权口径);OCR 551ms
-            // 是大头,8 路若被 Vision 内部限流,收益会低于线性——分段计时
-            // 的均摊数字装机可直接对账
-            let base = 8
+            // 批80:8→4(229 五路闸门下富集 600 张再崩,用户定调降回批70-72
+            // 的四路稳定形态——取图/OCR/嵌入全链 4 路并行;快扫相从未出事保持 8)
+            let base = 4
             // 阶段启动已 critical:先等降温(同快扫,防整段静默跳过)
             var limit = Self.thermalLimitBoosted(base: base)
             // 空清单不等待(同视频组,复验收 low)
@@ -911,9 +908,9 @@ final class IndexingCoordinator: ObservableObject {
     /// + Vision 标签共享。批78 只管 SigLIP 被装机证伪——228 崩溃时刻
     /// 7 个线程全卡在 recognizeText(Vision OCR 的 CoreML 同样跑 ANE,
     /// dSYM 符号化实锤),OCR 占单张 51% 才是最大消费者。
-    /// 上限 5=用户定调循序渐进(批70-72 四路稳定锚→先试五路,稳了再上探;
-    /// 8 路一步到位是四次看门狗的教训);吞吐≈5张/秒,13k 富集约 44 分钟
-    nonisolated private static let aneGate = AsyncSemaphore(limit: 5)
+    /// 上限 4(批80:229 五路装机实测富集 600 张再崩,用户定调降回四路——
+    /// 批70-72 全管线四路的原始稳定锚;吞吐≈4张/秒,13k 约 55 分钟)
+    nonisolated private static let aneGate = AsyncSemaphore(limit: 4)
 
     /// 批75:SigLIP 嵌入带一次 ANE 超时重试——8 路并发把神经引擎请求队列
     /// 挤爆的偶发超时(224 装机实测快扫 4/2753 报 E5RT: ANE inference
