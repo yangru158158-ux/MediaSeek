@@ -989,7 +989,7 @@ final class IndexingCoordinator: ObservableObject {
             let t4 = CFAbsoluteTimeGetCurrent()
             guard useLabels else { return 0 }
             let labels = await Self.visionLabelsGated(cg: small)
-            guard !labels.isEmpty else { return 0 }
+            guard let labels, !labels.isEmpty else { return 0 }
             try Task.checkCancellation()
             let lvec = try gemma.embedDocument("photo tags: \(labels)")
             try store.upsert(kind: .photoLabel, refKey: asset.localIdentifier, space: gemma.space,
