@@ -7,9 +7,9 @@ jobs:
     steps:
       - name: pyjwt 直查
         env:
-          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
-          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
-          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+          ASC_KEY_ID: ${{ secrets.ASC2_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC2_ISSUER }}
+          ASC_API_KEY_P8: ${{ secrets.ASC2_P8 }}
         run: |
           pip install --quiet pyjwt cryptography
           echo "$ASC_API_KEY_P8" | base64 --decode > "$HOME/asc.pem"
