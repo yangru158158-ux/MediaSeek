@@ -74,17 +74,34 @@ final class IndexingCoordinator: ObservableObject {
             ring.append(line)
             if ring.count > 300 { ring.removeFirst(ring.count - 300) }
             lock.unlock()
-            if let u = fileURL {
+            // 批81一修(验收):磁盘 I/O 移出调用线程——resign 热路径在主线程
+            // 同步开文件/追加是给看门狗递刀,落盘全部转后台任务
+            let out = line
+            Task.detached(priority: .utility) {
+                let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                    .appendingPathComponent("MediaSeek", isDirectory: true)
+                try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                let u = dir.appendingPathComponent("diag.log")
                 if let h = FileHandle(forWritingAtPath: u.path) {
                     h.seekToEndOfFile()
-                    h.write((line + "\n").data(using: .utf8)!)
+                    h.write((out + "\n").data(using: .utf8)!)
                     h.closeFile()
                 } else {
-                    try? (line + "\n").data(using: .utf8)?.write(to: u)
+                    try? (out + "\n").data(using: .utf8)?.write(to: u)
                 }
                 if let sz = try? FileManager.default.attributesOfItem(atPath: u.path)[.size] as? Int, sz > 500_000 {
                     try? FileManager.default.removeItem(at: u)
                 }
+            }
+        }
+        /// 确保日志文件存在(设置页导出前调用,防分享不存在的文件——验收 medium)
+        nonisolated func ensureFileExists() {
+            let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("MediaSeek", isDirectory: true)
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            let u = dir.appendingPathComponent("diag.log")
+            if !FileManager.default.fileExists(atPath: u.path) {
+                try? "—— 诊断日志 ——\n".data(using: .utf8)?.write(to: u)
             }
         }
         func snapshot() -> String {
@@ -218,7 +235,7 @@ final class IndexingCoordinator: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor in
                 guard let self, self.isRunning, !self.backgroundPaused else { return }
-                DiagLog.shared.event("resign: 取消索引 在途OCR=\(Self.ocrInFlight) 在途嵌入=\(Self.embedInFlight)")
+                DiagLog.shared.event("resign: 取消索引 在途OCR=\(Self.ocrInFlight) 在途嵌入或标签=\(Self.embedInFlight)")
                 // 批80(五连崩同签名真根因):不申请后台主张,进后台瞬间
                 // 神经引擎服务被系统暂停——在途 Vision/CoreML 调用(不可中断)
                 // 整体冻结(229 崩溃 CPU 统计 0.017s/0% 实锤),主线程的进
@@ -639,14 +656,14 @@ final class IndexingCoordinator: ObservableObject {
             var inFlight = 0
             let base = 2
             // 阶段启动已 critical:先等降温(同快扫,防整段静默跳过)
-            var limit = Self.thermalLimit(base: indexConcurrency)
+            var limit = Self.thermalLimit(base: base)
             // 空清单不等待:无事可做的增量同步不该在 critical 时空等数分钟
             // (快扫/人脸两处在各自非空 if 内,天然有护栏;复验收 low)
             if !newVideos.isEmpty {
                 while limit == 0, !Task.isCancelled {
                     stageNote = "过热暂停,冷却后继续"
                     try? await Task.sleep(nanoseconds: 5_000_000_000)
-                    limit = Self.thermalLimit(base: indexConcurrency)
+                    limit = Self.thermalLimit(base: base)
                 }
                 stageNote = ""
             }
@@ -660,12 +677,12 @@ final class IndexingCoordinator: ObservableObject {
                 processedLocal += 1
                 processed = processedLocal
                 if Task.isCancelled { break }
-                while Self.thermalLimit(base: indexConcurrency) == 0, !Task.isCancelled {
+                while Self.thermalLimit(base: base) == 0, !Task.isCancelled {
                     stageNote = "过热暂停,冷却后继续"
                     try? await Task.sleep(nanoseconds: 5_000_000_000)
                 }
                 stageNote = ""   // 恢复即清提示
-                limit = Self.thermalLimit(base: indexConcurrency)
+                limit = Self.thermalLimit(base: base)
                 while inFlight < limit, index < newVideos.count, !Task.isCancelled {
                     let asset = newVideos[index]; index += 1; inFlight += 1
                     group.addTask { await self.embedVideo(asset, errors: errors); return 0 }
@@ -686,11 +703,11 @@ final class IndexingCoordinator: ObservableObject {
                 var inFlight = 0
                 let base = 2
                 // 热背压同规(验收:人脸相位独缺背压=策略自相矛盾)
-                var limit = Self.thermalLimit(base: indexConcurrency)
+                var limit = Self.thermalLimit(base: base)
                 while limit == 0, !Task.isCancelled {
                     stageNote = "过热暂停,冷却后继续"
                     try? await Task.sleep(nanoseconds: 5_000_000_000)
-                    limit = Self.thermalLimit(base: indexConcurrency)
+                    limit = Self.thermalLimit(base: base)
                 }
                 stageNote = ""
                 while inFlight < limit, index < faceBackfill.count, !Task.isCancelled {
@@ -713,12 +730,12 @@ final class IndexingCoordinator: ObservableObject {
                         break
                     }
                     if Task.isCancelled { break }
-                    while Self.thermalLimit(base: indexConcurrency) == 0, !Task.isCancelled {
+                    while Self.thermalLimit(base: base) == 0, !Task.isCancelled {
                         stageNote = "过热暂停,冷却后继续"
                         try? await Task.sleep(nanoseconds: 5_000_000_000)
                     }
                     stageNote = ""
-                    limit = Self.thermalLimit(base: indexConcurrency)
+                    limit = Self.thermalLimit(base: base)
                     while inFlight < limit, index < faceBackfill.count, !Task.isCancelled {
                         let asset = faceBackfill[index]; index += 1; inFlight += 1
                         group.addTask { await Self.faceOnlyWork(

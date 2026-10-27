@@ -367,8 +367,11 @@ struct SettingsView: View {
             }
             Text("同时处理的照片数:越大越快、越热。默认 4;改动立即生效(进行中的索引热切换)")
             HStack {
-                ShareLink(item: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-                    .appendingPathComponent("MediaSeek/diag.log")) {
+                ShareLink(item: { () -> URL in
+                    IndexingCoordinator.DiagLog.shared.ensureFileExists()
+                    return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                        .appendingPathComponent("MediaSeek/diag.log")
+                }()) {
                     Label("导出诊断日志", systemImage: "doc.text")
                 }
                 .font(.caption)
