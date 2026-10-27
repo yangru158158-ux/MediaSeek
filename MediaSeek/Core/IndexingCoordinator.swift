@@ -1354,12 +1354,13 @@ final class IndexingCoordinator: ObservableObject {
         return r
     }
 
-    /// 批79:Vision 标签过闸(同 OCR,CoreML 吃 ANE);取消同规 throw 中止
+    /// 批79:Vision 标签过闸;批82二修:改走 ocrGate——231 崩溃实锤 4×
+    /// visionLabels 在途(aneGate=8 拦不住),与 OCR 共享窄闸(全部 Vision ≤2)
     nonisolated private static func visionLabelsGated(cg: CGImage) async throws -> String? {
-        await aneGate.wait()
+        await ocrGate.wait()
         _embedInFlight.add(1)
         defer {
-            aneGate.signal()
+            ocrGate.signal()
             _embedInFlight.add(-1)
         }
         if Task.isCancelled { throw CancellationError() }
