@@ -515,8 +515,11 @@ final class SearchEngine {
                         .flatMap { QueryUnderstanding.scriptVariants(of: $0) }
                     if Self.floorTierPermitted(
                         among: among, semanticOnly: semanticOnly, upperTierEmpty: hits.isEmpty,
+                        // 批82:底网豁免改白名单(floorExemptWords=卡面不印的词);
+                        // 驾驶证/驾照卡面印着这个词,文字通道已覆盖,旧的全表
+                        // 豁免=开底网灌杂音(231 装机实测;标准版 so400m 同病)
                         aliasExempt: probeTerms.contains {
-                            QueryUnderstanding.ocrAliases[$0] != nil
+                            QueryUnderstanding.floorExemptWords.contains($0)
                                 || QueryUnderstanding.chineseCounterpart(for: $0) != nil
                         },
                         textCovered: !semanticOnly && probeTerms.contains {
@@ -1130,7 +1133,7 @@ final class SearchEngine {
            // 只探测归一后的简体词会误判未覆盖,批68 要挡的底网噪声被放进
            Self.floorTierPermitted(
                among: nil, semanticOnly: false, upperTierEmpty: hits.isEmpty,
-               aliasExempt: QueryUnderstanding.ocrAliases[term] != nil
+               aliasExempt: QueryUnderstanding.floorExemptWords.contains(term)
                    || QueryUnderstanding.chineseCounterpart(for: term) != nil,
                textCovered: !QueryUnderstanding.scriptVariants(of: rawTerm).allSatisfy {
                    ((try? store.searchOCR(query: $0)) ?? []).isEmpty }) {
