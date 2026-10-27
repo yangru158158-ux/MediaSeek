@@ -1,12 +1,9 @@
 import SwiftUI
 import Photos
-import UniformTypeIdentifiers
 
 struct SettingsView: View {
     @EnvironmentObject var app: AppModel
 
-    @State private var showModelPicker = false
-    @State private var importing = false
     @State private var confirmWipe = false
     @State private var confirmRespeech = false
     @State private var videoDiagRunning = false
@@ -32,25 +29,9 @@ struct SettingsView: View {
             .sheet(isPresented: $showLabelVocab) {
                 LabelVocabSheet(items: labelVocab)
             }
-            .fileImporter(isPresented: $showModelPicker,
-                          allowedContentTypes: [.zip],
-                          allowsMultipleSelection: false) { result in
-                switch result {
-                case .success(let urls):
-                    guard let url = urls.first else { return }
-                    Task {
-                        importing = true
-                        do {
-                            try await app.models.importModelZip(at: url)
-                        } catch {
-                            app.fail(error)
-                        }
-                        importing = false
-                    }
-                case .failure(let error):
-                    app.fail(error)
-                }
-            }
+            // 第八十四批:「从文件导入模型包」入口移除——模型安装唯一通道
+            // 收敛到「模型在线更新」(断点续传+自动导入),手动 zip 导入只剩
+            // 调试价值;importModelZip 函数保留,在线更新下载后走同一函数
             .confirmationDialog("确定删除全部索引数据?导入文件记录与模型不受影响。",
                                 isPresented: $confirmWipe, titleVisibility: .visible) {
                 Button("清空索引", role: .destructive) {
@@ -116,18 +97,6 @@ struct SettingsView: View {
             if !app.models.detailText.isEmpty {
                 Text(app.models.detailText).font(.caption2).foregroundStyle(.secondary)
             }
-            Button {
-                showModelPicker = true
-            } label: {
-                if importing {
-                    HStack { ProgressView(); Text("导入中…") }
-                } else {
-                    Label("从「文件」导入模型包(zip)", systemImage: "square.and.arrow.down")
-                }
-            }
-            .disabled(importing)
-            Text("模型包包含 TextEmbedder / ImageEmbedder / FaceEmbedder(可选,人物归组用)三个目录;旧包没有人脸目录时 App 自动忽略,不影响其他功能。")
-                .font(.caption).foregroundStyle(.secondary)
         } header: {
             Text("端侧模型")
         } footer: {
@@ -455,9 +424,18 @@ struct SettingsView: View {
 
     // MARK: - 关于
 
+    /// 第八十四批:版本号此前硬编码 "1.0" 只显示一半——构建号看不到,
+    /// 排查问题时对不上构建;改读 Bundle(短版本+构建号,与 TestFlight
+    /// 页一致,报问题截图即可定位构建)
+    private var appVersionText: String {
+        let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
+        let b = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
+        return "\(v)(\(b))"
+    }
+
     private var aboutSection: some View {
         Section("关于") {
-            LabeledContent("版本", value: "1.0")
+            LabeledContent("版本", value: appVersionText)
             LabeledContent("目标设备", value: "iPhone(iPhone 17 Pro Max 适配)")
             LabeledContent("向量检索", value: "vDSP 余弦相似度")
         }

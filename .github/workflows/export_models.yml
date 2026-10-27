@@ -101,8 +101,9 @@ jobs:
                       "size": os.path.getsize(path), "note": note})
           add("full", "标准完整包(文本+图文+人脸)", "models.zip",
               "三个模型全量;首次安装或一次到位用这个")
-          add("face", "人脸模型增量(ArcFace r50)", "face-only.zip",
-              "已装旧包的设备补人物归组;r50 识别更强,导入后自动重建人脸数据")
+          # 第八十四批:人脸增量包②下架——完整包①自 10-13 起已内置 r50 人脸,
+          # ②只对更旧的①有用,新装走不到(客户端 ModelUpdateView 已同步过滤
+          # key=face;face-only.zip 仍随 Release 上传,仅不再进 manifest)
           add("so400m", "增强图像模型(so400m)", "models-so400m.zip",
               "识别更强、导入后需全量重建图像向量(约1-2小时,可中断续跑)")
           m = {

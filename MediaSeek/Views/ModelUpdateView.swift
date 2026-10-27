@@ -282,7 +282,10 @@ struct ModelUpdateSection: View {
             if let m = loader.manifest {
                 Text("服务端版本 \(m.version)(\(m.date))")
                     .font(.caption).foregroundStyle(.secondary)
-                ForEach(m.files) { f in
+                // 第八十四批:人脸增量包②下架——完整包①自 10-13 起已内置 r50
+                // 人脸,②只对更旧的①有用,新装走不到;服务端 manifest 仍列着,
+                // 客户端先挡,export_models.yml 后续重发清单时同步剔除
+                ForEach(m.files.filter { $0.key != "face" }) { f in
                     pkgRow(f, manifestVersion: m.version)
                 }
             }
