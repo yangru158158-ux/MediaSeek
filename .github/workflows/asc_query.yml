@@ -18,12 +18,14 @@ jobs:
           ISSUER = os.environ["ASC_ISSUER_ID"]; KID = os.environ["ASC_KEY_ID"]
           keyf = os.environ["KEYFILE"]
           def b64u(b): return base64.urlsafe_b64encode(b).rstrip(b"=").decode()
-          def read_int(d, o):
-              l = d[o]; o += 1; v = d[o:o+l]; o += l
-              return v.lstrip(b"\0"), o
           def d2r(der):
-              o = 2; r, o = read_int(der, o); s, o = read_int(der, o)
-              return r.rjust(32, b"\0") + s.rjust(32, b"\0")
+              assert der[0] == 0x30
+              o = 2; out = b""
+              for _ in range(2):
+                  assert der[o] == 0x02; o += 1
+                  l = der[o]; o += 1
+                  out += der[o:o+l].lstrip(b"\0").rjust(32, b"\0"); o += l
+              return out
           hdr = b64u(json.dumps({"alg":"ES256","kid":KID,"typ":"JWT"}).encode())
           pl = b64u(json.dumps({"iss":ISSUER,"iat":int(time.time())-30,"exp":int(time.time())+1100}).encode())
           p = subprocess.run(["openssl","dgst","-sha256","-sign",keyf],
