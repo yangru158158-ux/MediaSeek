@@ -35,6 +35,10 @@ struct SearchOutcome {
     let textIDs: Set<String>
     let timeLabel: String?
     let placeLabel: String?
+    /// 批96:AND 契约显式化——零命中词被 combine 静默丢弃时的点名提示
+    /// (「『XX』全网无命中,已从同时匹配中忽略」);nil=无。带默认值,
+    /// 既有构造点零改动
+    var note: String? = nil
     static let empty = SearchOutcome(hits: [], textIDs: [], timeLabel: nil, placeLabel: nil)
 }
 
@@ -304,7 +308,8 @@ final class SearchEngine {
             let scoped = try await searchScoped(spec: spec, scope: scope,
                                                 topK: topK, siglip: siglip, within: within)
             return SearchOutcome(hits: scoped.hits, textIDs: scoped.textIDs,
-                                 timeLabel: nil, placeLabel: nil)
+                                 timeLabel: nil, placeLabel: nil,
+                                 note: Self.andNote(scoped.ignored))
         }
         return try await runBareSearch(query: query, spec: spec, scope: scope, topK: topK,
                                        siglip: siglip, dateRange: dateRange,
@@ -325,6 +330,23 @@ final class SearchEngine {
     /// (PDF/CSV/XLSX/TXT 内容均已入库 ocr_text)双词精确命中。
     /// 空态分数提示(lastSemanticTopScore)仅 语义: 查询展示,而 语义: 已被
     /// 下方 channel 校验挡回主管线(主管线自己写该字段),本函数无需写
+    /// 批96:AND 零命中提示文案——按契约返回空(用户拍板改②):零命中词使
+    /// 「同时包含」无法成立,诚实出 0 并点名;出路(去词重搜/结果内缩小)
+    /// 由空态页补充。「无命中」不带范围限定词:全局=全网零命中,结果内=
+    /// 基数集内零命中,两态皆准
+    private static func andNote(_ ignored: [String]) -> String? {
+        ignored.isEmpty ? nil : "『\(ignored.joined(separator: "』『"))』无命中——同时匹配无法成立"
+    }
+
+    /// 批96:纯 ASCII 多词判定——英文的空格是构词符不是意图分隔符,
+    /// "a man riding a horse" 被逐词 AND 肢解剥夺自然语言表达(用户点名:
+    /// 交集能力结果内搜已完美承载,裸搜该说人话);中文/中英混合带分隔符
+    /// =用户显式意图,照旧 AND(用户拍板:「猫 cat」保持 AND)
+    static func isAsciiPhrase(_ query: String) -> Bool {
+        let ts = splitTerms(query)
+        return ts.count >= 2 && ts.allSatisfy { $0.unicodeScalars.allSatisfy(\.isASCII) }
+    }
+
     private func runBareSearch(query: String, spec: QuerySpec, scope: SearchScope,
                                topK: Int, siglip: SigLIPEmbedder?, dateRange: QueryDateRange?,
                                placeRegion: CLCircularRegion?, placeLabel: String?,
@@ -332,13 +354,16 @@ final class SearchEngine {
         // 只对裸搜(channel == .any)生效:语义: 前缀必须保持排他(只要语义
         // 命中),不得被改道 and: 并入 OCR——验收 medium 实锤(此前只看
         // scope 和词数,语义:多词被误改道且未在提交说明声明)
-        if spec.channel == .any, Self.splitTerms(query).count >= 2 {
+        // 批96:纯 ASCII 多词(英文短语/描述句)不改道——整串概念走主管线
+        if spec.channel == .any, Self.splitTerms(query).count >= 2,
+           !Self.isAsciiPhrase(query) {
             let andSpec = QuerySpec(connector: .and, channel: .any, body: query)
             let scoped = try await searchScoped(spec: andSpec, scope: scope, topK: topK,
                                                 siglip: siglip, within: among,
                                                 dateRange: dateRange)
             return SearchOutcome(hits: scoped.hits, textIDs: scoped.textIDs,
-                                 timeLabel: dateRange?.label, placeLabel: placeLabel)
+                                 timeLabel: dateRange?.label, placeLabel: placeLabel,
+                                 note: Self.andNote(scoped.ignored))
         }
         return try await runMainSearch(query: query, spec: spec, semanticOnly: spec.semanticOnly,
                                        scope: scope, topK: topK, siglip: siglip,
@@ -506,6 +531,10 @@ final class SearchEngine {
                 // core 清洗/时间剥离,也不经词典/桥/平均三道变换);多词语句
                 // 整句直进,SigLIP 原生判断首次可受控测量
                 q = try siglip.embedQuery(QueryUnderstanding.nativeSiglipQuery(spec.body))
+            } else if spec.channel == .any, Self.isAsciiPhrase(query) {
+                // 批96:英文整串概念——构词空格不当意图分隔,整句(经 core/时间
+                // 剥离后的 query)套原生模板壳,与 原生语义: 同款构造
+                q = try siglip.embedQuery(QueryUnderstanding.nativeSiglipQuery(query))
             } else if semanticOnly, semanticTerms.count >= 2,
                let avg = try? Self.averagedQuery(semanticTerms, siglip: siglip) {
                 q = avg
@@ -736,7 +765,10 @@ final class SearchEngine {
             // 重构时窄化成了「只有含数字的词走 OCR」)——纯中文多词(杨如 男)
             // 整串带空格当子串查,健康码印的是「杨如，男」永远 miss,用户实测
             // 裸搜搜不出、and: 反而搜得出。逐词并集,与 and:/or: 通道同构
-            let ocrTerms = terms.isEmpty ? [query] : terms
+            // 批96:ASCII 整串概念按整串查——逐词并集会让 "a"/"the" 单字母
+            // 子串灌整库文字命中(批41 前的老病从这扇门复活)
+            let ocrTerms = (spec.channel == .any && Self.isAsciiPhrase(query))
+                ? [query] : (terms.isEmpty ? [query] : terms)
             for t in ocrTerms where !t.isEmpty {
                 // 证件类 OCR 别名:人像面不印证件名(身份证正面只有「公民身份号码」等字段),
                 // 只搜证件名会漏掉全部正面照——补字段级别名并集保召回
@@ -801,13 +833,14 @@ final class SearchEngine {
     /// 文字:地图 189 个全挂语义、文字 0)
     private func searchScoped(spec: QuerySpec, scope: SearchScope,
                               topK: Int, siglip: SigLIPEmbedder?, within: Set<String>? = nil,
-                              dateRange: QueryDateRange? = nil) async throws -> (hits: [DisplayHit], textIDs: Set<String>) {
+                              dateRange: QueryDateRange? = nil)
+        async throws -> (hits: [DisplayHit], textIDs: Set<String>, ignored: [String]) {
         // 第七十一批:删除「文件范围整体返回空」守卫(第三十九批为拦照片/视频
         // 而设,把文字通道一并拦死——文件页签 文字:/and: 恒空,与裸搜同病)。
         // 放行后各通道自筛:文字通道 scopeAllowedKinds 过滤只出文件;视觉通道
         // 在 semanticHits 内对文件范围早退(文件无 SigLIP 向量)
         let terms = Self.splitTerms(spec.body)
-        guard !terms.isEmpty else { return ([], []) }
+        guard !terms.isEmpty else { return ([], [], []) }
         // so400m 校准(第六十一批):SigLIP 门槛按激活模型缩放,透传给 semanticHits
         let gate = await MainActor.run { models.siglipGateScale }
         // 第五十批:归类器一次搜索共用一个实例——逐词各建一套会把 files/
@@ -842,7 +875,13 @@ final class SearchEngine {
             let combined = combine(perTerm, connector: spec.connector)
             let textIDs = Set(combined.filter { $0.space == "ocr" }
                 .map { "\($0.kind.rawValue)-\($0.refKey)" })
-            return (resolve(combined, dateRange: dateRange), textIDs)
+            // 批96二改(用户拍板按契约返回空):有词零命中(全局=全网,结果内=基数集内)=任何照片不可能
+            // 同时包含全部词,诚实出 0——与结果内「基数空绝不静默退化全局」
+            // 同一哲学;原因与出路交空态页呈现,不再返回剩余词的交集
+            let ignored = spec.connector == .and
+                ? zip(terms, perTerm).filter { $0.1.isEmpty }.map(\.0) : []
+            if !ignored.isEmpty { return ([], [], ignored) }
+            return (resolve(combined, dateRange: dateRange), textIDs, ignored)
         }
 
         // 语义/自动通道:数字词→文字,其余词→视觉
@@ -931,6 +970,10 @@ final class SearchEngine {
             }
         }
         var combined = combine(perTerm, connector: spec.connector)
+        // 批96二改(用户拍板按契约返回空,与上方 .text 分支同规)
+        let ignored = spec.connector == .and
+            ? zip(terms, perTerm).filter { $0.1.isEmpty }.map(\.0) : []
+        if !ignored.isEmpty { return ([], [], ignored) }
         // AND 模式逐照片合成标题(第十七批):combine 去重只保留第一个词的命中
         // 条目,and:杨如 男 的卡片全部显示「含「杨如」文字」——第二个词的
         // 命中只字不提,用户看不出交集凭什么成立(照片明明同时含「男」)。
@@ -957,7 +1000,7 @@ final class SearchEngine {
         }
         let textIDs = Set(combined.filter { $0.space == "ocr" }
             .map { "\($0.kind.rawValue)-\($0.refKey)" })
-        return (resolve(combined, dateRange: dateRange), textIDs)
+        return (resolve(combined, dateRange: dateRange), textIDs, ignored)
     }
 
     /// 范围允许的命中 kind(第三十九批):文字/自动通道统一按范围过滤,
@@ -1068,10 +1111,14 @@ final class SearchEngine {
 
     private static func siglipQuery(_ concept: String, nativeZh: Bool = false) -> String {
         if let en = QueryUnderstanding.english(for: concept) {
-            // 批95:词典命中的输入必是中文词——so400m 激活时直用原文模板壳
-            // (原生路径,依据与边界见 ModelManager.preferNativeZhQuery);
-            // 标准版仍走词典英译(nativeZh=false,原行为逐字不变)
-            if nativeZh { return QueryUnderstanding.nativeSiglipQuery(concept) }
+            // 批95:so400m 激活时中文词直用原文模板壳(原生路径,依据与边界
+            // 见 ModelManager.preferNativeZhQuery);标准版仍走词典英译。
+            // ⚠️ 复核修正:词典含少量 ASCII 键(pdf→document/qq),「词典命中
+            // 必是中文」不成立——nativeZh 只对含非 ASCII 字符的词生效,
+            // ASCII 键保持英译(document 泛词是文档截图的刻意选择)
+            if nativeZh, !concept.unicodeScalars.allSatisfy(\.isASCII) {
+                return QueryUnderstanding.nativeSiglipQuery(concept)
+            }
             return "This is a photo of \(en)."
         }
         // 第六十九批英文证件桥:表内词(id/identity→身份证 族)套对应词的

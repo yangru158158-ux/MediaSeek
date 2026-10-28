@@ -1066,7 +1066,8 @@ final class IndexingCoordinator: ObservableObject {
     /// operation failed/timed out),等 0.8s 让队列排空再试一次;再失败按
     /// 原路抛出(各相位既有记账/自愈照走)。只重试一次:真坏图/坏模型
     /// 不该空转两轮以上。
-    /// 批78:①过闸(aneGate ≤2 路,闸外不算 ANE 压力,defer 保证释放);
+    /// 批78:①过闸(aneGate,批80二修起上限 8=保险层,真正压并发的是
+    ///    indexConcurrency 设置项;闸外不算 ANE 压力,defer 保证释放);
     /// ②重试前查取消——正在挂死的调用救不了,但「重试再挂 10 秒」直接
     /// 跳过,停止后最多 10 秒内排空(227 装机「反复按停止无效」实锤)
     nonisolated private static func embedWithANERetry(

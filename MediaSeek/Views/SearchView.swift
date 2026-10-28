@@ -15,6 +15,8 @@ struct SearchView: View {
     @State private var searching = false
     @State private var searchedOnce = false
     @State private var elapsedMs = 0
+    /// 批96:AND 零命中词忽略提示(引擎 note 字段;nil=无)
+    @State private var andNote: String?
     @State private var selectedHit: DisplayHit?
     // 「不相关」黑名单:当前查询词下被标记的结果(隐藏;「显示」可揭示,详情页可恢复)
     @State private var blockedRefs: Set<String> = []
@@ -269,6 +271,9 @@ struct SearchView: View {
                              : "\(visibleResults.count) / \(results.count) 个结果 · \(elapsedMs) ms")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
+                        // 批96 复核修正:AND 零命中提示只走空态页一处——按契约
+                        // 返回空后 note 非空⇒结果必空,结果头显示必与空态页
+                        // 重复,删此处留空态页(原因+出路的完整呈现面)
                     }
                     Spacer()
                     if !selectionMode {
@@ -380,6 +385,11 @@ struct SearchView: View {
     /// 空结果提示:按查询模式分别说明
     private func emptyStateHint(_ query: String, refining: Bool) -> String {
         let q = query.lowercased()
+        // 批96二改:AND 零命中词按契约返回空——原因+两条出路(去掉该词重搜/
+        // 先搜其余词再用结果内逐步缩小,正好教交集的正确用法)
+        if let andNote {
+            return andNote + "\n去掉该词重搜,或先搜其余词再用「结果内」逐步缩小交集"
+        }
         if refining {
             return "结果内搜索无命中:锁定范围与新条件没有交集\n可点「↩返回」退回上一轮结果换词再搜\n或关闭「结果内」改回全局搜索"
         }
@@ -870,6 +880,7 @@ struct SearchView: View {
         let refining = refineMode
         searching = true
         searchedOnce = true
+        andNote = nil   // 批96:新一轮搜索清旧提示
         // 本轮开始前的可见集(含颜色/维度镜头)——「所见即所搜」的收窄来源
         let lensHits = visibleResults
         // 新一轮从干净镜头开始:旧颜色筛选不清除会把无颜色结果(文件卡片)
@@ -893,6 +904,7 @@ struct SearchView: View {
                 textHitIDs = []
                 timeChip = nil
                 placeChip = nil
+                andNote = nil
                 resultTab = .all
                 lastRoundCount = 0
                 searching = false
@@ -931,7 +943,9 @@ struct SearchView: View {
                 textHitIDs = outcome.textIDs
                 timeChip = outcome.timeLabel
                 placeChip = outcome.placeLabel
-                resultTab = q.hasPrefix("文字:") ? .text : (q.hasPrefix("语义:") ? .semantic : .all)
+                andNote = outcome.note
+                resultTab = q.hasPrefix("文字:") ? .text
+                    : ((q.hasPrefix("语义:") || q.hasPrefix("原生语义:")) ? .semantic : .all)
                 searching = false
                 // 级联收窄:本轮结果(含 0)自动成为下一轮「结果内」的范围,所见即所搜;
                 // 空了之后的恢复=「返回」退回保存的历史轮次,或关「结果内」改全局
