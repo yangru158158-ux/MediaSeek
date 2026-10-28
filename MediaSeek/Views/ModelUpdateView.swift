@@ -319,18 +319,31 @@ struct ModelUpdateSection: View {
     private func pkgRow(_ f: ModelPkgFile, manifestVersion: String) -> some View {
         let isDownloading = loader.downloadingKey == f.key
         let installed = UserDefaults.standard.string(forKey: "pkg_\(f.key)")
+        // 批87:按钮语义按「槽位是否已有模型」判,不只看版本记账——服务端
+        // 每次重发清单版本必变,按旧记账所有已装包都显示「下载」,用户实锤
+        // 「so400m 已装却提示下载」(上次成功安装早于服务端重发)。so400m
+        // 槽位=proInstalled;标准完整包槽位=人脸模型已装(文本/图像随 App
+        // 包内置,人脸才是①独有内容)
+        let slotPresent = f.key == "so400m"
+            ? app.models.proInstalled
+            : (f.key == "full" && app.models.faceState != .missing)
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(f.name).font(.subheadline)
                     Text("\(fmtSize(f.size)) · \(f.note)")
                         .font(.caption2).foregroundStyle(.secondary)
+                    // 已装但记账落后于服务端:标出已装版本,「重装」语义无歧义
+                    if slotPresent, installed != manifestVersion {
+                        Text("已装(\(installed ?? "未知版本")) · 服务端有更新")
+                            .font(.caption2).foregroundStyle(.orange)
+                    }
                 }
                 Spacer()
                 if isDownloading {
                     ProgressView()
                 } else if loader.downloadingKey == nil {
-                    Button(installed == manifestVersion ? "重装" : "下载") {
+                    Button(slotPresent || installed == manifestVersion ? "重装" : "下载") {
                         install(f, version: manifestVersion)
                     }
                     .font(.subheadline)
