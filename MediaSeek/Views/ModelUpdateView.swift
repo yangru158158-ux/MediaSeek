@@ -8,6 +8,9 @@ struct ModelPkgFile: Codable, Identifiable {
     let url: String
     let size: Int64
     let note: String
+    // 批89:内容指纹(各槽位 meta.json 的 dim/model_size 派生)。旧清单无此
+    // 字段=服务端还没重发,UI 回退到版本对比;有则按内容判「是否真有更新」
+    let fingerprint: String?
     var id: String { key }
 }
 
@@ -327,14 +330,26 @@ struct ModelUpdateSection: View {
         let slotPresent = f.key == "so400m"
             ? app.models.proInstalled
             : (f.key == "full" && app.models.faceState != .missing)
+        // 批89:内容指纹裁决。版本字符串随 CI 重发必变(内容没变也提示「有更
+        // 新」,用户被诱导重下 1.2GB/2.1GB 未变化的模型——多次点名);指纹按
+        // 模型内容计算,一致=服务端只是重发,绿字明示无需重装。清单无指纹
+        // (服务端未升级)或槽位不全时回退批87 的版本对比
+        let localFP = f.fingerprint != nil ? app.models.installedFingerprint(forPackage: f.key) : nil
+        let fpMatch = f.fingerprint != nil && localFP == f.fingerprint
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 VStack(alignment: .leading, spacing: 2) {
                     Text(f.name).font(.subheadline)
                     Text("\(fmtSize(f.size)) · \(f.note)")
                         .font(.caption2).foregroundStyle(.secondary)
-                    // 已装但记账落后于服务端:标出已装版本,「重装」语义无歧义
-                    if slotPresent, installed != manifestVersion {
+                    if fpMatch {
+                        Text("已装模型与服务端一致,无需重装")
+                            .font(.caption2).foregroundStyle(.green)
+                    } else if f.fingerprint != nil, localFP == nil {
+                        Text("未安装或安装不完整")
+                            .font(.caption2).foregroundStyle(.orange)
+                    } else if slotPresent, installed != manifestVersion {
+                        // 批87 的版本对比回退(清单尚无指纹时)
                         Text("已装(\(installed ?? "未知版本")) · 服务端有更新")
                             .font(.caption2).foregroundStyle(.orange)
                     }

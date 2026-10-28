@@ -292,6 +292,33 @@ final class ModelManager: ObservableObject {
         }
     }
 
+    // MARK: - 包内容指纹(批89)
+
+    /// 包内容指纹:按包内各槽位 meta.json 的内容派生字段拼装(文本/图像=dim,
+    /// 人脸=dim+ONNX 字节数)。这些值随模型内容变、不随 CI 重发变——服务端
+    /// 重发同一批模型(版本字符串必变)指纹不变,「与服务端一致,无需重装」
+    /// 才成立;真换模型至少 dim/model_size 会变(mbf→r50 字节变,标准→so400m
+    /// 维度变,均被覆盖)。字段只用历代包必有的(不用 image_size 等后加字段,
+    /// 旧包不错杀);任一槽位缺失(没装全)返回 nil = 需要安装。
+    /// 与 export_models 生成 manifest.fingerprint 的拼法同规,改一处须同步另一处
+    func installedFingerprint(forPackage key: String) -> String? {
+        let slots: [ModelSlot] = key == "so400m" ? [.imagePro] : [.text, .image, .face]
+        var parts: [String] = []
+        for slot in slots {
+            let metaURL = supportRoot.appendingPathComponent(slot.rawValue)
+                .appendingPathComponent("meta.json")
+            guard let data = try? Data(contentsOf: metaURL),
+                  let meta = try? JSONDecoder().decode(ModelMeta.self, from: data) else { return nil }
+            switch slot {
+            case .text: parts.append("T:\(meta.dim)")
+            case .image: parts.append("I:\(meta.dim)")
+            case .imagePro: parts.append("P:\(meta.dim)")
+            case .face: parts.append("F:\(meta.dim):\(meta.model_size ?? 0)")
+            }
+        }
+        return parts.joined(separator: "|")
+    }
+
     // MARK: - 从 zip 导入模型包
 
     /// zip 根目录应包含 TextEmbedder/ 与 ImageEmbedder/(各含 .mlpackage、tokenizer.json、meta.json)

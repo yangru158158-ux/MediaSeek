@@ -91,21 +91,46 @@ jobs:
       - name: 生成更新清单 manifest.json
         run: |
           python - <<'EOF'
-          import json, os, datetime
+          import json, os, datetime, zipfile
           files = []
-          def add(key, name, path, note):
+          def add(key, name, path, note, fingerprint=""):
               if os.path.exists(path):
                   files.append({
                       "key": key, "name": name,
                       "url": "https://github.com/yangru158158-ux/MediaSeek/releases/download/models/" + path,
-                      "size": os.path.getsize(path), "note": note})
+                      "size": os.path.getsize(path), "note": note,
+                      "fingerprint": fingerprint})
+          # 批89:内容指纹——读 zip 内各槽位 meta.json 的内容派生字段
+          # (文本/图像=dim,人脸=dim+ONNX 字节数)。值随模型内容变、不随重发变:
+          # CI 重发同一批模型(版本字符串必变)指纹不变,App 端比对后明示
+          # 「与服务端一致,无需重装」,不再诱导用户重下未变化的 1.2GB/2.1GB。
+          # 拼法与 ModelManager.installedFingerprint 同规,改一处须同步另一处
+          def slot_meta(zpath, dirname):
+              try:
+                  with zipfile.ZipFile(zpath) as z:
+                      n = dirname + "/meta.json"
+                      if n in z.namelist():
+                          return json.loads(z.read(n))
+              except Exception:
+                  pass
+              return {}
+          def fp_full():
+              t = slot_meta("models.zip", "TextEmbedder")
+              i = slot_meta("models.zip", "ImageEmbedder")
+              f = slot_meta("models.zip", "FaceEmbedder")
+              return "T:%d|I:%d|F:%d:%d" % (
+                  t.get("dim", 0), i.get("dim", 0),
+                  f.get("dim", 0), f.get("model_size", 0))
+          def fp_pro():
+              i = slot_meta("models-so400m.zip", "ImageEmbedder")
+              return "P:%d" % i.get("dim", 0)
           add("full", "标准完整包(文本+图文+人脸)", "models.zip",
-              "三个模型全量;首次安装或一次到位用这个")
+              "三个模型全量;首次安装或一次到位用这个", fingerprint=fp_full())
           # 第八十四批:人脸增量包②下架——完整包①自 10-13 起已内置 r50 人脸,
           # ②只对更旧的①有用,新装走不到(客户端 ModelUpdateView 已同步过滤
           # key=face;face-only.zip 仍随 Release 上传,仅不再进 manifest)
           add("so400m", "增强图像模型(so400m)", "models-so400m.zip",
-              "识别更强、导入后需全量重建图像向量(约1-2小时,可中断续跑)")
+              "识别更强、导入后需全量重建图像向量(约1-2小时,可中断续跑)", fingerprint=fp_pro())
           m = {
               "version": (os.environ.get("GITHUB_SHA", "")[:7] or "dev")
                          + "-" + datetime.datetime.utcnow().strftime("%Y%m%d%H%M"),
