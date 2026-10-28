@@ -518,16 +518,18 @@ final class SearchEngine {
                         QueryUnderstanding.floorExemptWords.contains($0)
                             || QueryUnderstanding.chineseCounterpart(for: $0) != nil
                     }
-                    // 批91:证件类豁免词的底网固定 0.05、不随模型缩放——so400m
+                    // 批91:证件类豁免词的底网固定、不随模型缩放——so400m
                     // 分布整体下移(批61),0.08×0.87=0.070 捞不到真卡(244 装机:
                     // licence/驾驶证 语义全空,用户确认在 so400m);批43 先例本是
-                    // 0.05-0.08,白名单窄+模板已收窄,0.05 不开闸放杂音。反空
-                    // 兜底(非豁免词)维持 0.08×gate 不变
+                    // 0.05-0.08,白名单窄+模板已收窄,固定值不放杂音。
+                    // 批92:0.05→0.04——ANE 查询嵌入非确定(±0.005 抖动,见
+                    // SigLIPEmbedder.queryVecCache),卡分数贴线会话间横跳,
+                    // 0.04 留出抖动余量;反空兜底维持 0.08×gate
                     let floor: Float
                     if among != nil {
                         floor = 0.03
                     } else if exempt {
-                        floor = 0.05
+                        floor = 0.04
                     } else {
                         floor = 0.08 * gate
                     }
@@ -1143,8 +1145,9 @@ final class SearchEngine {
            // 第七十二批二修(验收 medium):探测与 ocrUnionHits 同口径扩为
            // 原词+繁→简转换词——繁体词只有原词命中 OCR 时(月结单印繁体),
            // 只探测归一后的简体词会误判未覆盖,批68 要挡的底网噪声被放进
-           // 批91:证件豁免词的地板固定 0.05 不随模型缩放(so400m 0.070
-           // 捞不到真卡,与主流程同改;双通道对称面)
+           // 批91:证件豁免词的地板固定不随模型缩放(so400m 0.070
+           // 捞不到真卡,与主流程同改;双通道对称面);批92:0.05→0.04
+           // 给 ANE 嵌入抖动留余量(见 SigLIPEmbedder.queryVecCache)
            Self.floorTierPermitted(
                among: nil, semanticOnly: false, upperTierEmpty: hits.isEmpty,
                aliasExempt: QueryUnderstanding.floorExemptWords.contains(term)
@@ -1153,7 +1156,7 @@ final class SearchEngine {
                    ((try? store.searchOCR(query: $0)) ?? []).isEmpty }) {
             let exempt = QueryUnderstanding.floorExemptWords.contains(term)
                 || QueryUnderstanding.chineseCounterpart(for: term) != nil
-            let floor: Float = exempt ? 0.05 : 0.08 * gateScale
+            let floor: Float = exempt ? 0.04 : 0.08 * gateScale
             hits = Self.dedupByRef((try? store.search(
                 space: siglip.space, kinds: searchKinds, query: q, limit: topK,
                 minScore: floor)) ?? [])

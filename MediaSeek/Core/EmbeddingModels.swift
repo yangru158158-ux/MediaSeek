@@ -152,7 +152,32 @@ final class SigLIPEmbedder {
             .inputDescriptionsByName["attention_mask"] != nil
     }
 
+    // 批92:查询向量缓存。ANE 浮点推理非确定(Apple 文档:float16 执行路径
+    // 差异),同一文本每次 embedQuery 产出微小不同的向量——贴门槛的条目
+    // (驾驶证卡对 "driver license card" 在 so400m ≈0.05 贴着地板线)在
+    // 线两边横跳,同词连搜时出时不出(245 装机实锤:第一次出、后续不出、
+    // 再搜又出;VectorStore 检索本身确定性,唯一变化的是查询向量)。
+    // 同文本复用首次向量:会话内同词搜索结果完全可复现;缓存随 embedder
+    // 实例生灭,模型切换自动失效。NSLock 防 Task.detached 并发竞态
+    private var queryVecCache: [String: [Float]] = [:]
+    private let queryCacheLock = NSLock()
+
     func embedQuery(_ text: String) throws -> [Float] {
+        queryCacheLock.lock()
+        if let v = queryVecCache[text] {
+            queryCacheLock.unlock()
+            return v
+        }
+        queryCacheLock.unlock()
+        let v = try embedQueryCompute(text)
+        queryCacheLock.lock()
+        if queryVecCache.count > 512 { queryVecCache.removeAll() }   // 会话级防膨胀
+        queryVecCache[text] = v
+        queryCacheLock.unlock()
+        return v
+    }
+
+    private func embedQueryCompute(_ text: String) throws -> [Float] {
         if needsAttentionMask {
             let padded = try tokenizer.encodePadded(text, maxLength: HFTokenizer.maxSequenceSiglip)
             let ids = try MLMultiArray(shape: [1, NSNumber(value: padded.ids.count)], dataType: .int32)
