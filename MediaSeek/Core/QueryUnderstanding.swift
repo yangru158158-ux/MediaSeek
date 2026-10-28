@@ -345,6 +345,18 @@ enum QueryUnderstanding {
         return [zh] + (ocrAliases[zh] ?? [])
     }
 
+    /// 第九十四批:原生语义: 前缀的模板构造——唯一规则:官方零样本模板壳 +
+    /// 用户原文 + 句号,零转换(不查词典/不过英文桥/不拆词平均/不繁简归一/
+    /// 不 core 清洗/不时间解析;license 就是 license,駕駛證 就是 駕駛證,
+    /// 语句整句直进)。背景:三道变换(词典英译/英文桥/批93平均)使原生向量
+    /// 在旧语法里不可表达——license 必被桥成 driver license card 模板、语句
+    /// 必被拆词,SigLIP 对词/句的原生判断从未被受控测量过。原生语义: 与
+    /// 语义: 的通道待遇完全同构(关 OCR 免占座/同阶梯同尾线同豁免),A/B
+    /// 唯一变量=向量
+    static func nativeSiglipQuery(_ body: String) -> String {
+        "This is a photo of \(body)."
+    }
+
     /// 第七十二批:繁→简字符映射(单遍逐字替换)。自建表不用系统的
     /// applyingTransform——ICU 在 swift-corelibs(Windows 本地测试/ubuntu CI)
     /// 与 iOS 真机行为不一致,三端一致的确定性只能靠自己的表。收录范围:

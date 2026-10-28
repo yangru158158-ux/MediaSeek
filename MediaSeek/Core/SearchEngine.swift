@@ -59,12 +59,14 @@ final class SearchEngine {
     /// 例:「or 文字:发票 收据」「and 语义:猫 狗」「文字:身份证」「and:2026 屏幕」
     struct QuerySpec {
         enum Connector { case and, or, none }
-        enum Channel { case any, text, semantic }
+        enum Channel { case any, text, semantic, native }
         let connector: Connector
         let channel: Channel
         let body: String
         var isExplicit: Bool { channel != .any || connector != .none }
-        var semanticOnly: Bool { channel == .semantic && connector == .none }
+        /// 批94:.native(原生语义:)与 .semantic 同享排他待遇:关 OCR 免占座、
+        /// 一档地板 0.25、textCovered 按「无」计——A/B 实验唯一变量=向量
+        var semanticOnly: Bool { (channel == .semantic || channel == .native) && connector == .none }
     }
 
     static func parseQuery(_ raw: String) -> QuerySpec {
@@ -89,6 +91,14 @@ final class SearchEngine {
         if s.hasPrefix("文字:") || s.hasPrefix("文字:") {
             channel = .text
             s = String(s.dropFirst(3)).trimmingCharacters(in: CharacterSet(charactersIn: " :"))
+        } else if s.hasPrefix("原生语义:") {
+            // 第九十四批:原生语义:=SigLIP 原生能力受控实验前缀。通道待遇
+            // 与 语义: 完全同构(semanticOnly 含 .native),唯一区别=向量:
+            // 官方模板壳+原文零转换(不词典/不桥/不平均/不繁简/不 core 清洗/
+            // 不时间解析),构造见 QueryUnderstanding.nativeSiglipQuery。
+            // 判在 语义: 前:两前缀互不为对方前缀,先后无行为差,仅为可读
+            channel = .native
+            s = String(s.dropFirst(5)).trimmingCharacters(in: CharacterSet(charactersIn: " :"))
         } else if s.hasPrefix("语义:") || s.hasPrefix("语义:") {
             channel = .semantic
             s = String(s.dropFirst(3)).trimmingCharacters(in: CharacterSet(charactersIn: " :"))
@@ -137,7 +147,9 @@ final class SearchEngine {
         let raw = rawQuery.trimmingCharacters(in: .whitespaces)
         guard !raw.isEmpty else { return .empty }
         let spec = Self.parseQuery(raw)
-        var query = QueryUnderstanding.core(spec.body)
+        // 批94:原生语义: 零转换从源头守起——core() 的指令/否定/载体清洗
+        // 也是变换(「没有猫的照片」会被截成空),原生前缀直取 spec.body
+        var query = spec.channel == .native ? spec.body : QueryUnderstanding.core(spec.body)
         guard !query.isEmpty else { return .empty }
 
         let siglip = await MainActor.run { models.siglip }
@@ -471,7 +483,10 @@ final class SearchEngine {
         // 以 ≥0.60 命中,造成整库截图照灌进结果(「医学出生证明」事故)
         // 显式「语义:」查询门槛放宽到 0.14(用户点名要语义召回)
         // 文字: 前缀排他:视觉通道(照片/视频帧)不参与
-        if !imageKinds.isEmpty, spec.channel != .text, !semanticTerms.isEmpty, let siglip {
+        // 批94:原生语义: 不看 semanticTerms(其逐词过滤闸对整句向量无意义,
+        // 专名/纯数字句也会空表直接跳过通道)——判 .native 即跑
+        if !imageKinds.isEmpty, spec.channel != .text,
+           (!semanticTerms.isEmpty || spec.channel == .native), let siglip {
             // so400m 校准(第六十一批):SigLIP 绝对门槛按激活模型缩放
             // (so400m 命中带 = base × 0.87,CI 双模型分布实测,详见
             // ModelManager.siglipGateScale 注释)
@@ -483,7 +498,12 @@ final class SearchEngine {
             // 各概念向量的中间地带。裸搜多词不经过此处(批41 改道逐词 AND),
             // 单词两路等价——行为变化仅 语义: 多词,正是要消灭的洪水
             let q: [Float]
-            if semanticOnly, semanticTerms.count >= 2,
+            if spec.channel == .native {
+                // 批94:原生向量——唯一规则=官方模板壳+spec.body 原文(未过
+                // core 清洗/时间剥离,也不经词典/桥/平均三道变换);多词语句
+                // 整句直进,SigLIP 原生判断首次可受控测量
+                q = try siglip.embedQuery(QueryUnderstanding.nativeSiglipQuery(spec.body))
+            } else if semanticOnly, semanticTerms.count >= 2,
                let avg = try? Self.averagedQuery(semanticTerms, siglip: siglip) {
                 q = avg
             } else {

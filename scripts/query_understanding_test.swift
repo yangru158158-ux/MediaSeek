@@ -232,6 +232,19 @@ enum QueryUnderstandingTest {
                     == ["驾照", "准驾车型", "机动车驾驶证"],
                "licence 桥接变体=驾照+别名(第七十一批;原 %licence% 匹配不动,纯追加)")
 
+        // —— 第九十四批:原生语义: 模板构造(唯一规则,零转换) ——
+        expect(QueryUnderstanding.nativeSiglipQuery("license") == "This is a photo of license.",
+               "原生语义:license 不经英文桥,裸词直进模板壳(对照:语义:license 桥成 driver license card)")
+        expect(QueryUnderstanding.nativeSiglipQuery("licence") == "This is a photo of licence.",
+               "原生语义:licence 与 license 是两根不同向量——拼写即身份,不再合并")
+        expect(QueryUnderstanding.nativeSiglipQuery("駕駛證") == "This is a photo of 駕駛證.",
+               "原生语义:繁体不归一、中文原文直进(SigLIP2 中文原生能力的首个受控实验入口)")
+        expect(QueryUnderstanding.nativeSiglipQuery("a man riding a horse on the beach")
+                    == "This is a photo of a man riding a horse on the beach.",
+               "原生语义:语句不拆词不平均,整句直进(批93 平均仅 语义: 多词在用)")
+        expect(QueryUnderstanding.nativeSiglipQuery("2026") == "This is a photo of 2026.",
+               "原生语义:时间词也是内容词,不解析不过滤(用户拍板:语句可能带时间)")
+
         // —— 第七十二批:繁→简归一 + 证件与 licence 同权 ——
         expect(QueryUnderstanding.simplified("駕駛證") == "驾驶证"
             && QueryUnderstanding.simplified("證件") == "证件"
@@ -308,7 +321,7 @@ enum QueryUnderstandingTest {
         expect(passCn == zhToEns.count,
                "全量 \(zhToEns.count) 个中文词反查全部命中标签通道")
 
-        // 断言数口径:全文 expect 调用 87 项(另含 1 行函数定义)
-        print("PASS: 查询理解 87 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词穷尽)")
+        // 断言数口径:全文 expect 调用 92 项(另含 1 行函数定义,批94 增 5)
+        print("PASS: 查询理解 92 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词穷尽)")
     }
 }
