@@ -491,6 +491,9 @@ final class SearchEngine {
             // (so400m 命中带 = base × 0.87,CI 双模型分布实测,详见
             // ModelManager.siglipGateScale 注释)
             let gate = await MainActor.run { models.siglipGateScale }
+            // 批95:so400m 下裸搜/语义: 的中文词走原生模板壳(矩阵三族 3:0
+            // 实证);标准版 false=词典英译原配。只挂单词径,平均/桥不动
+            let nativeZh = await MainActor.run { models.preferNativeZhQuery }
             // 批93:语义: 多词=组合概念——各词模板向量「归一化→平均→再归一化」
             // (CLIP 论文 80 模板 ensemble 同款配方)。整串拼嵌的落点由文本塔
             // 注意力决定、不可控(词袋效应:license certificate document 拼串
@@ -507,7 +510,7 @@ final class SearchEngine {
                let avg = try? Self.averagedQuery(semanticTerms, siglip: siglip) {
                 q = avg
             } else {
-                q = try siglip.embedQuery(Self.siglipQuery(semanticTerms.joined(separator: " ")))
+                q = try siglip.embedQuery(Self.siglipQuery(semanticTerms.joined(separator: " "), nativeZh: nativeZh))
             }
             // 照片与视频帧分开走各自的门槛阶梯:分数分布不同,且照片行为已验收冻结
             var hits: [SearchHit] = []
@@ -1063,8 +1066,12 @@ final class SearchEngine {
         return q
     }
 
-    private static func siglipQuery(_ concept: String) -> String {
+    private static func siglipQuery(_ concept: String, nativeZh: Bool = false) -> String {
         if let en = QueryUnderstanding.english(for: concept) {
+            // 批95:词典命中的输入必是中文词——so400m 激活时直用原文模板壳
+            // (原生路径,依据与边界见 ModelManager.preferNativeZhQuery);
+            // 标准版仍走词典英译(nativeZh=false,原行为逐字不变)
+            if nativeZh { return QueryUnderstanding.nativeSiglipQuery(concept) }
             return "This is a photo of \(en)."
         }
         // 第六十九批英文证件桥:表内词(id/identity→身份证 族)套对应词的
