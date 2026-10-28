@@ -50,7 +50,11 @@ struct SearchView: View {
     @State private var renameText = ""
     @State private var colorFilter: String?
 
-    private let exampleQueries = ["一只猫", "海边的日落", "文字:身份证", "语义:身份证", "and:2026 屏幕", "or:猫 狗"]
+    // 第八十八批:示例跟着占位符的引导走——「一个词/英文单词」为主
+    // (SigLIP 对短裸词/词典词锚定最好,长句反而稀释),保留 文字:/语义:
+    // 与 and: 各一条给进阶语法露脸
+    private let exampleQueries = ["猫", "驾驶证", "发票", "licence", "beach", "phone",
+                                  "文字:身份证", "语义:身份证", "and:2026 屏幕"]
 
     private let columns = [GridItem(.adaptive(minimum: 105), spacing: 10)]
 
@@ -132,7 +136,7 @@ struct SearchView: View {
     private var searchField: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-            TextField("用一句话找照片、视频、文件…", text: $query)
+            TextField("用一个词或英文单词找照片、视频、文件…", text: $query)
                 .submitLabel(.search)
                 .onSubmit(runSearch)
             if !query.isEmpty {
