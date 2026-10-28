@@ -476,7 +476,19 @@ final class SearchEngine {
             // (so400m 命中带 = base × 0.87,CI 双模型分布实测,详见
             // ModelManager.siglipGateScale 注释)
             let gate = await MainActor.run { models.siglipGateScale }
-            let q = try siglip.embedQuery(Self.siglipQuery(semanticTerms.joined(separator: " ")))
+            // 批93:语义: 多词=组合概念——各词模板向量「归一化→平均→再归一化」
+            // (CLIP 论文 80 模板 ensemble 同款配方)。整串拼嵌的落点由文本塔
+            // 注意力决定、不可控(词袋效应:license certificate document 拼串
+            // 落 document 带 992 灌屏,换组词可能落荒地);平均向量确定落在
+            // 各概念向量的中间地带。裸搜多词不经过此处(批41 改道逐词 AND),
+            // 单词两路等价——行为变化仅 语义: 多词,正是要消灭的洪水
+            let q: [Float]
+            if semanticOnly, semanticTerms.count >= 2,
+               let avg = try? Self.averagedQuery(semanticTerms, siglip: siglip) {
+                q = avg
+            } else {
+                q = try siglip.embedQuery(Self.siglipQuery(semanticTerms.joined(separator: " ")))
+            }
             // 照片与视频帧分开走各自的门槛阶梯:分数分布不同,且照片行为已验收冻结
             var hits: [SearchHit] = []
             if imageKinds.contains(.photo) {
@@ -1012,6 +1024,25 @@ final class SearchEngine {
     /// 词典命中的精选英文描述套模板,未命中(长句/自由文本)保持原文。
     /// ⚠️ 提示词集成(多模板平均)虽是通行做法,但会平移全库语义分数、
     /// 现有门槛按单模板分布标定——要上必须先在设备上 A/B 单独验证
+    /// 批93:组合概念查询向量——各词经 siglipQuery 得到模板向量,取平均再
+    /// 归一化(CLIP 论文 80 模板 ensemble 同款配方)。输入向量已是单位向量
+    /// (导出管线归一),平均后必须再归一化,余弦相似度才成立;任一词嵌入
+    /// 失败跳过该词,全部失败返回 nil(调用方回退整串拼嵌)
+    private static func averagedQuery(_ terms: [String], siglip: SigLIPEmbedder) -> [Float]? {
+        var vecs: [[Float]] = []
+        for t in terms {
+            if let v = try? siglip.embedQuery(siglipQuery(t)) { vecs.append(v) }
+        }
+        guard !vecs.isEmpty, vecs.allSatisfy({ $0.count == vecs[0].count }) else { return nil }
+        var q = vecs[0]
+        for v in vecs.dropFirst() {
+            for i in q.indices { q[i] += v[i] }
+        }
+        let norm = q.map { $0 * $0 }.reduce(Float(0), +).squareRoot()
+        if norm > 0 { for i in q.indices { q[i] /= norm } }
+        return q
+    }
+
     private static func siglipQuery(_ concept: String) -> String {
         if let en = QueryUnderstanding.english(for: concept) {
             return "This is a photo of \(en)."
