@@ -508,20 +508,32 @@ final class SearchEngine {
                     // 浮顶,噪声由低置信尾线 0.95 收。
                     // 第六十八批:全局模式改反空兜底——文字通道已有命中或上两档
                     // 已有命中时不再换底网(判据与三案实测见 floorTierPermitted)
-                    let floor: Float = (among != nil ? 0.03 : 0.08) * gate
                     // 第七十二批:探测与文字通道同口径(原词+繁→简转换词)——
                     // 文字通道命中过任一变体即算 covered,否则繁体词探测简体库恒空
                     let probeTerms = (terms.isEmpty ? [query] : terms)
                         .flatMap { QueryUnderstanding.scriptVariants(of: $0) }
+                    // 批82:底网豁免白名单(floorExemptWords)+英文证件桥;
+                    // 批90:驾驶证/驾照入白名单
+                    let exempt = probeTerms.contains {
+                        QueryUnderstanding.floorExemptWords.contains($0)
+                            || QueryUnderstanding.chineseCounterpart(for: $0) != nil
+                    }
+                    // 批91:证件类豁免词的底网固定 0.05、不随模型缩放——so400m
+                    // 分布整体下移(批61),0.08×0.87=0.070 捞不到真卡(244 装机:
+                    // licence/驾驶证 语义全空,用户确认在 so400m);批43 先例本是
+                    // 0.05-0.08,白名单窄+模板已收窄,0.05 不开闸放杂音。反空
+                    // 兜底(非豁免词)维持 0.08×gate 不变
+                    let floor: Float
+                    if among != nil {
+                        floor = 0.03
+                    } else if exempt {
+                        floor = 0.05
+                    } else {
+                        floor = 0.08 * gate
+                    }
                     if Self.floorTierPermitted(
                         among: among, semanticOnly: semanticOnly, upperTierEmpty: hits.isEmpty,
-                        // 批82:底网豁免改白名单(floorExemptWords=卡面不印的词);
-                        // 驾驶证/驾照卡面印着这个词,文字通道已覆盖,旧的全表
-                        // 豁免=开底网灌杂音(231 装机实测;标准版 so400m 同病)
-                        aliasExempt: probeTerms.contains {
-                            QueryUnderstanding.floorExemptWords.contains($0)
-                                || QueryUnderstanding.chineseCounterpart(for: $0) != nil
-                        },
+                        aliasExempt: exempt,
                         textCovered: !semanticOnly && probeTerms.contains {
                             !((try? store.searchOCR(query: $0)) ?? []).isEmpty }) {
                         hits = Self.dedupByRef(try store.search(
@@ -1131,16 +1143,20 @@ final class SearchEngine {
            // 第七十二批二修(验收 medium):探测与 ocrUnionHits 同口径扩为
            // 原词+繁→简转换词——繁体词只有原词命中 OCR 时(月结单印繁体),
            // 只探测归一后的简体词会误判未覆盖,批68 要挡的底网噪声被放进
+           // 批91:证件豁免词的地板固定 0.05 不随模型缩放(so400m 0.070
+           // 捞不到真卡,与主流程同改;双通道对称面)
            Self.floorTierPermitted(
                among: nil, semanticOnly: false, upperTierEmpty: hits.isEmpty,
                aliasExempt: QueryUnderstanding.floorExemptWords.contains(term)
                    || QueryUnderstanding.chineseCounterpart(for: term) != nil,
                textCovered: !QueryUnderstanding.scriptVariants(of: rawTerm).allSatisfy {
                    ((try? store.searchOCR(query: $0)) ?? []).isEmpty }) {
-            // 真尺度地板 0.08(与主流程照片第三档同规)
+            let exempt = QueryUnderstanding.floorExemptWords.contains(term)
+                || QueryUnderstanding.chineseCounterpart(for: term) != nil
+            let floor: Float = exempt ? 0.05 : 0.08 * gateScale
             hits = Self.dedupByRef((try? store.search(
                 space: siglip.space, kinds: searchKinds, query: q, limit: topK,
-                minScore: 0.08 * gateScale)) ?? [])
+                minScore: floor)) ?? [])
         }
         }
         let best = hits.first?.score ?? 0

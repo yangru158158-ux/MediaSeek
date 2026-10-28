@@ -334,7 +334,9 @@ struct SettingsView: View {
                 set: { UserDefaults.standard.set($0, forKey: "indexConcurrency") })) {
                 ForEach(2...8, id: \.self) { Text("\($0) 路").tag($0) }
             }
-            Text("同时处理的照片数:越大越快、越热。默认 4;改动立即生效(进行中的索引热切换)")
+            // 批91:措辞改「当前 N 路」——「默认 4」曾被读成当前值(用户实测
+            // 误会);当前值在行右侧,提示行只说明出厂默认与生效方式
+            Text("当前 \(app.indexing.indexConcurrency) 路 · 出厂默认 4;越大越快、越热。改动立即生效(进行中的索引热切换)")
             HStack {
                 ShareLink(item: { () -> URL in
                     IndexingCoordinator.DiagLog.shared.ensureFileExists()

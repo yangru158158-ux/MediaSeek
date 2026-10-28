@@ -278,6 +278,9 @@ final class ModelUpdateLoader: NSObject, ObservableObject, URLSessionDataDelegat
 struct ModelUpdateSection: View {
     @EnvironmentObject var app: AppModel
     @StateObject private var loader = ModelUpdateLoader()
+    // 批91:改 @AppStorage——记账被 alignInstalledVersions 对齐后视图即时刷新
+    // (直读 UserDefaults 不会触发重渲染)
+    @AppStorage("modelPkgVersion") private var installedPkgVersion = ""
 
     private func fmtSize(_ bytes: Int64) -> String {
         ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
@@ -286,7 +289,7 @@ struct ModelUpdateSection: View {
     var body: some View {
         Section {
             LabeledContent("已装版本",
-                           value: UserDefaults.standard.string(forKey: "modelPkgVersion") ?? "手动导入/未知")
+                           value: installedPkgVersion.isEmpty ? "手动导入/未知" : installedPkgVersion)
             Button {
                 Task { await loader.check() }
             } label: {
@@ -315,6 +318,26 @@ struct ModelUpdateSection: View {
             Text("模型在线更新")
         } footer: {
             Text("从 GitHub Release 下载模型包并自动导入,建议 Wi-Fi 且保持 App 前台。增强图像模型(so400m)识别更强,导入后自动切换并全量重建视觉向量(约 1-2 小时,可中断续跑);之后可在上方「图像模型切换」随时切回标准模型对比效果。")
+        }
+        // 批91:指纹一致=已装内容就是该服务端版本,记账自动对齐(不下载)——
+        // 顶行「已装版本」不再停在旧字符串,与绿字判定自相矛盾(用户点名)
+        .onChange(of: loader.manifest?.version) { _ in alignInstalledVersions() }
+        .onAppear { alignInstalledVersions() }
+    }
+
+    /// 批91:逐包比对内容指纹,一致即把该包记账与服务端版本对齐;任一包
+    /// 一致则顶行全局记账也对齐。不触发任何下载/导入
+    private func alignInstalledVersions() {
+        guard let m = loader.manifest else { return }
+        var anyMatch = false
+        for f in m.files {
+            guard let fp = f.fingerprint,
+                  app.models.installedFingerprint(forPackage: f.key) == fp else { continue }
+            UserDefaults.standard.set(m.version, forKey: "pkg_\(f.key)")
+            anyMatch = true
+        }
+        if anyMatch {
+            UserDefaults.standard.set(m.version, forKey: "modelPkgVersion")
         }
     }
 
