@@ -158,7 +158,11 @@ enum PlaceGeocoder {
     /// 同病)。现取「真实范围与调用方下限」较大者,800km 封顶;placemark
     /// 范围缺失回退调用方半径——城市零变化(杭州 extent<50km 仍 50km)
     static func region(for name: String, radius: CLLocationDistance = 20_000) async -> CLCircularRegion? {
-        let cacheKey = name as NSString   // 批100:半径由地名自身决定,缓存键去 radius
+        // 批102:缓存键恢复 name|radius——批100 去掉 radius 后同地名在 20km
+        // (在X)/50km(裸/地点词)两档调用下限间串用首缓存圆,城市行为随查询
+        // 顺序漂移(验收 medium 实锤);分档各存各的,代价是同地名至多两次
+        // 地理编码,可接受
+        let cacheKey = "\(name)|\(radius)" as NSString
         if let v = cache.object(forKey: cacheKey) { return v }
         let region: CLCircularRegion? = await withCheckedContinuation { cont in
             let geocoder = CLGeocoder()

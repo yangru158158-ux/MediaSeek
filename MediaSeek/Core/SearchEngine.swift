@@ -236,7 +236,10 @@ final class SearchEngine {
             // 证据(「在杭州 猫」类抽取路径的 main 内容搜的是猫,杭州命名
             // 标签原本进不来),排浏览之后、内容命中之前;重复由 seen 过滤
             if let pl = placeLabel, scope == .all || scope == .photo {
-                for h in resolve(placeUserTagHits(pl)) where !seen.contains(h.refKey) {
+                // 批102:dateRange 透传(验收 medium:时间词组合下命名照片
+                // 不得越过时间过滤;resolve 按照片真实拍摄日期裁决)
+                for h in resolve(placeUserTagHits(pl), dateRange: dateRange)
+                    where !seen.contains(h.refKey) {
                     seen.insert(h.refKey)
                     merged.append(h)
                 }
@@ -257,8 +260,10 @@ final class SearchEngine {
                                       space: "browse", title: nil, date: asset.creationDate,
                                       score: 1.0, color: nil))
             }
-            // 批99全局化:纯地点浏览同样并入用户命名标签(用户证据全局适用)
-            if let pl = placeLabel {
+            // 批99全局化:纯地点浏览同样并入用户命名标签(用户证据全局适用);
+            // 批102:补 scope 守卫(验收 medium:userTag 是照片侧数据,视频
+            // 页签不得混入);本分支末尾 resolve 的 dateRange 同批补透传
+            if let pl = placeLabel, scope == .all || scope == .photo {
                 var seenB = Set(hits.map(\.refKey))
                 for h in placeUserTagHits(pl) where !seenB.contains(h.refKey) {
                     seenB.insert(h.refKey)
@@ -274,7 +279,9 @@ final class SearchEngine {
                     }
                 }
             }
-            return SearchOutcome(hits: resolve(hits), textIDs: [],
+            // 批102:纯浏览 resolve 补 dateRange(GPS 侧已 assetPasses 预滤,
+            // 此处为 userTag 侧的照片真实日期裁决补闸)
+            return SearchOutcome(hits: resolve(hits, dateRange: dateRange), textIDs: [],
                                  timeLabel: dateRange?.label, placeLabel: placeLabel)
         }
 
@@ -877,6 +884,10 @@ final class SearchEngine {
         guard !terms.isEmpty else { return ([], [], []) }
         // so400m 校准(第六十一批):SigLIP 门槛按激活模型缩放,透传给 semanticHits
         let gate = await MainActor.run { models.siglipGateScale }
+        // 批102(C5):AND/or: 逐词线接原生化——253 装机实锤「马尔代夫 阳光/
+        // 骑车」恒空:落空词(词典未收)裸嵌入弱带全灭。so400m 下逐词也走
+        // 原生模板壳(与单词径批95 同源);标准版 false=原行为
+        let nativeZh = await MainActor.run { models.preferNativeZhQuery }
         // 第五十批:归类器一次搜索共用一个实例——逐词各建一套会把 files/
         // videoFrame 全表查询与 PHAsset 批查放大数倍(多词×别名×常见词数千命中)
         let classifier = OCRRefClassifier(store: store)
@@ -990,7 +1001,8 @@ final class SearchEngine {
                 }
                 // 非地点词(能走到这里 hits 必为空):语义主座直接落座
                 hits.append(contentsOf: semanticHits(t, siglip: siglip, topK: topK,
-                                                      within: within, scope: scope, gateScale: gate))
+                                                      within: within, scope: scope, gateScale: gate,
+                                                      nativeZh: nativeZh))
                 if let within { hits = hits.filter { within.contains($0.refKey) } }
                 var seen = Set(hits.map(\.refKey))
                 // 「像或含字」同构(第十六批):裸搜模式里每个词 = OCR∪视觉任一
@@ -1227,11 +1239,13 @@ final class SearchEngine {
         if isAscii, wordCount >= 1, wordCount <= 3 {
             return "This is a photo of \(concept)."
         }
-        // 批98:含「的」的中文描述短语(so400m 原生路径)套原生壳——词典
-        // 盖不满(美丽的天空:美丽不在册→覆盖 partial→落空)时不再裸多
-        // 语言。范围刻意限「的」短语:全部落空词套壳=未测面(财报专名/
-        // 人名当初因裸嵌噪声被闸),全壳化待独立 A/B(排查报告 C2 项)
-        if nativeZh, concept.contains("的"), !isAscii {
+        // 批98+批102:落空的中文词(so400m 原生路径)套原生壳。批98 只给
+        // 「的」短语开壳;253 装机实锤「阳光/骑车」(词典未收的普通词)裸搜
+        // 与 AND 组合双死——落空裸嵌弱带全灭。扩到全部非 ASCII 落空词:
+        // 能走到此处的词已经过专名闸(run≥2 华研机器人类)/人名闸/数字闸
+        // 三道筛,剩下正是该救的普通词;财报专名类被闸挡在前面,噪声面
+        // 可控,地板/尾线照旧兜底。标准版 nativeZh=false 走原裸嵌路径
+        if nativeZh, !isAscii {
             return QueryUnderstanding.nativeSiglipQuery(concept)
         }
         return concept
@@ -1242,7 +1256,8 @@ final class SearchEngine {
     private func semanticHits(_ rawTerm: String, siglip: SigLIPEmbedder?, topK: Int,
                               within: Set<String>? = nil,
                               scope: SearchScope = .all,
-                              gateScale: Float = 1.0) -> [SearchHit] {
+                              gateScale: Float = 1.0,
+                              nativeZh: Bool = false) -> [SearchHit] {
         guard let siglip else { return [] }
         // 第七十二批:繁→简归一(在通道入口自守,调用方无须预处理)——内部
         // 专名闸/词典模板/证件豁免/性别逻辑全按简体键运转,繁体原串会绕过
@@ -1266,7 +1281,7 @@ final class SearchEngine {
         // 第六十三批性别词深潜(与主管线 genderDive 同规):第三档地板+豁免
         // 尾线,性别裁决交给下方对比边距(低分段实测依据见主管线注释)
         let genderDive = QueryUnderstanding.genderContrast(of: term) != nil
-        guard let q = try? siglip.embedQuery(Self.siglipQuery(term)) else { return [] }
+        guard let q = try? siglip.embedQuery(Self.siglipQuery(term, nativeZh: nativeZh)) else { return [] }
         // 第三十九批:按范围取 kinds(与主管线 imageKinds 同构,.file→[] 空)——
         // 此前全部写死 [.photo],视频范围下视频帧向量从不被查询
         let searchKinds: [ItemKind] = scope == .all ? [.photo, .videoFrame]
