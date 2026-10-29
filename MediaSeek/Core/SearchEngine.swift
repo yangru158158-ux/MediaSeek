@@ -550,7 +550,8 @@ final class SearchEngine {
             // ModelManager.siglipGateScale 注释)
             let gate = await MainActor.run { models.siglipGateScale }
             // 批95:so400m 下裸搜/语义: 的中文词走原生模板壳(矩阵三族 3:0
-            // 实证);标准版 false=词典英译原配。只挂单词径,平均/桥不动
+            // 实证);标准版 false=词典英译原配。批107 起单词径与 语义:多词
+            // 交集径同用此原料(批106 先扩到平均径,批107 平均退役改交集)
             let nativeZh = await MainActor.run { models.preferNativeZhQuery }
             // 批93:语义: 多词=组合概念——各词模板向量「归一化→平均→再归一化」
             // (CLIP 论文 80 模板 ensemble 同款配方)。整串拼嵌的落点由文本塔
@@ -558,11 +559,16 @@ final class SearchEngine {
             // 落 document 带 992 灌屏,换组词可能落荒地);平均向量确定落在
             // 各概念向量的中间地带。裸搜多词不经过此处(批41 改道逐词 AND),
             // 单词两路等价——行为变化仅 语义: 多词,正是要消灭的洪水
+            // 批107:平均向量退役——「中间地带」恰是错位所在:用户意图是
+            // AND 交集,熔合概念在异质词对上落荒地(259 装机 猫沙发 594 张
+            // 房产广告灌屏),改逐词宽召回交集(见下方 isectWords 分支)
             // 批105①:摘要行路径标签与嵌入分支同源赋值——批104 三态标签把
             // 批96 英文整串与批93 平均分支错标成「模板/条件原生」,标准版英文
             // 短语日志失真;标签只能来自实际执行的分支,平均失败降级也自动正确
             let q: [Float]
             let embedPath: String
+            // 批107:非 nil=语义:多词交集路径(阶梯/视频帧/空态三处按它改道)
+            var isectWords: [String]? = nil
             if spec.channel == .native {
                 // 批94:原生向量——唯一规则=官方模板壳+spec.body 原文(未过
                 // core 清洗/时间剥离,也不经词典/桥/平均三道变换);多词语句
@@ -574,11 +580,17 @@ final class SearchEngine {
                 // 剥离后的 query)套原生模板壳,与 原生语义: 同款构造
                 q = try siglip.embedQuery(QueryUnderstanding.nativeSiglipQuery(query))
                 embedPath = "英文整串"
-            } else if semanticOnly, semanticTerms.count >= 2,
-               let avg = try? Self.averagedQuery(semanticTerms, siglip: siglip, nativeZh: nativeZh) {
-                // 批106(C4):原料随单词径同代——so400m 各词原生壳向量平均
-                q = avg
-                embedPath = "平均"
+            } else if semanticOnly, semanticTerms.count >= 2 {
+                // 批107:语义:多词 = AND 意图(「猫 沙发」=有猫且有沙发)。
+                // 批93/批106 的平均向量是概念熔合:共现词对(阳光 海滩)碰巧
+                // 熔出风景照,异质词对(猫 沙发)熔出「毛绒室内质感」——259
+                // 装机实测原生「沙发」邻域的房产广告截图 best 抬到 0.151、
+                // 尾线 0.128 切完仍 594 张灌屏(258 模板系 84 张)。改逐词宽
+                // 召回取交集(与裸搜 AND 线批103 同规),综合分=min(各词分)。
+                // q 置空:本路径不消费它,下游三处消费点均按 isectWords 跳过
+                isectWords = semanticTerms
+                q = []
+                embedPath = "交集"
             } else {
                 let joined = semanticTerms.joined(separator: " ")
                 q = try siglip.embedQuery(Self.siglipQuery(joined, nativeZh: nativeZh))
@@ -589,7 +601,47 @@ final class SearchEngine {
             // 照片与视频帧分开走各自的门槛阶梯:分数分布不同,且照片行为已验收冻结
             var hits: [SearchHit] = []
             if imageKinds.contains(.photo) {
-                if genderDive {
+                if let words = isectWords {
+                    // 批107:逐词第三档地板宽召回(0.08×gate,证件豁免词 0.04
+                    // 固定,与 AND 线批103/批91 同规)取 refKey 交集;综合分
+                    // =min(各词分)——短板语义:广告截图沙发分高猫分低,min
+                    // 压尾,真组合照两词都像而领先。任一词嵌入失败跳过该词,
+                    // 全失败=空交集诚实空(交集即精度,批103 教义);免尾线
+                    // (见下方 tailFactor),摘要行命中数即界面语义通道口径
+                    var common: Set<String>? = nil
+                    var perWord: [String: [Float]] = [:]
+                    var template: [String: SearchHit] = [:]
+                    var wordCount = 0
+                    var firstWordTop: Float = 0
+                    for t in words {
+                        guard let qw = try? siglip.embedQuery(
+                            Self.siglipQuery(t, nativeZh: nativeZh)) else { continue }
+                        wordCount += 1
+                        let exempt = QueryUnderstanding.floorExemptWords.contains(t)
+                            || QueryUnderstanding.chineseCounterpart(for: t) != nil
+                        let wh = Self.dedupByRef(try store.search(
+                            space: siglip.space, kinds: [.photo], query: qw,
+                            limit: topK, minScore: exempt ? 0.04 : 0.08 * gate, among: among))
+                        if common == nil { firstWordTop = wh.first?.score ?? 0 }
+                        let keys = Set(wh.map(\.refKey))
+                        common = common.map { $0.intersection(keys) } ?? keys
+                        for h in wh {
+                            perWord[h.refKey, default: []].append(h.score)
+                            if template[h.refKey] == nil { template[h.refKey] = h }
+                        }
+                    }
+                    hits = (common ?? []).compactMap { ref -> SearchHit? in
+                        guard wordCount > 0, let base = template[ref],
+                              let scores = perWord[ref], scores.count == wordCount
+                        else { return nil }
+                        return SearchHit(kind: base.kind, refKey: ref,
+                                         frameIndex: base.frameIndex, space: base.space,
+                                         title: base.title, date: base.date,
+                                         score: scores.min() ?? 0, color: base.color)
+                    }.sorted { $0.score > $1.score }
+                    // 交集空:空态提示用首词最高分(下方 670 段按 isectWords 跳过)
+                    if hits.isEmpty { lastSemanticTopScore = firstWordTop }
+                } else if genderDive {
                     // 深潜:第三档地板直取(阶梯与薄判都不适用——品类词要的是
                     // 全量召回,质量裁决交给下方性别对比线)
                     let floor: Float = (among != nil ? 0.03 : 0.08) * gate
@@ -654,7 +706,9 @@ final class SearchEngine {
                 }
                 }
             }
-            if imageKinds.contains(.videoFrame) {
+            if imageKinds.contains(.videoFrame), isectWords == nil {
+                // 批107:交集路径不含视频帧——AND 即精度,多词交集下单帧分无
+                // 稳定语义;打了对应标签的视频仍由标签通道(零幻觉)独立承载
                 // 真尺度校准:纯 SigLIP 的视频帧区分度不足——古庙绿崖 0.11 vs 真海滩 0.13-0.14,
                 // 相对标定尾线必然放进噪声(2026-10-12 马尔代夫实测)。按 113 确立的通道优先级
                 // (标签零幻觉 > OCR > SigLIP 兜底),视频帧入场必须有实据:
@@ -667,7 +721,8 @@ final class SearchEngine {
                 hits = Self.dedupByRef(hits)
             }
             // 兜底后仍空 = 全库最高分都不到 0.08,记下最高原始分供空态提示
-            if hits.isEmpty {
+            // (批107:交集路径的空态分已在交集计算内置,此处须跳过——q 为空数组)
+            if hits.isEmpty, isectWords == nil {
                 lastSemanticTopScore = (try? store.search(
                     space: siglip.space, kinds: imageKinds, query: q, limit: 1,
                     minScore: -1, among: among))?.first?.score
@@ -710,7 +765,10 @@ final class SearchEngine {
             // 性别词深潜豁免尾线(第六十三批):尾线以最佳分为基准,最佳 0.35 时
             // 85% 线=0.298,下探捞回的低分段真命中会被一刀全砍,深潜白做;
             // 性别词的噪声闸=对比边距(0.010),尾线职责由它接管
-            let tailFactor: Float = genderDive ? 0 : (best >= 0.13 * gate ? 0.85 : 0.95)
+            // 批107:交集免尾线(交集即精度,与 AND 线批103 同规;尾线是相对
+            // 线,挡不住邻域内真高分的杂音,反会砍掉弱词侧真命中)
+            let tailFactor: Float = genderDive || isectWords != nil
+                ? 0 : (best >= 0.13 * gate ? 0.85 : 0.95)
             // 批104⑤:语义查询摘要行——分数带从「推断」变「读数」:边界项抖动
             // (255 装机 原生语义:阳光 9→10 的 ±0.005 疑云)、档位取舍、尾线
             // 切割,此后全部凭 diag.log 原始分定案,不再靠猜
@@ -1205,28 +1263,8 @@ final class SearchEngine {
     /// 词典命中的精选英文描述套模板,未命中(长句/自由文本)保持原文。
     /// ⚠️ 提示词集成(多模板平均)虽是通行做法,但会平移全库语义分数、
     /// 现有门槛按单模板分布标定——要上必须先在设备上 A/B 单独验证
-    /// 批93:组合概念查询向量——各词经 siglipQuery 得到向量,取平均再
-    /// 归一化(CLIP 论文 80 模板 ensemble 同款配方)。输入向量已是单位向量
-    /// (导出管线归一),平均后必须再归一化,余弦相似度才成立;任一词嵌入
-    /// 失败跳过该词,全部失败返回 nil(调用方回退整串拼嵌)
-    /// 批106(C4):透传 nativeZh——so400m 下各词先吃原生壳再平均,与单词径
-    /// 同配方(A/B 矩阵实证原生 3:0 胜词典英译后,单/多词原料不再两代);
-    /// 257 装机基线:语义:阳光 海滩(模板系原料)best=0.133,原生单词径 best=0.163
-    private static func averagedQuery(_ terms: [String], siglip: SigLIPEmbedder, nativeZh: Bool = false) -> [Float]? {
-        var vecs: [[Float]] = []
-        for t in terms {
-            if let v = try? siglip.embedQuery(siglipQuery(t, nativeZh: nativeZh)) { vecs.append(v) }
-        }
-        guard !vecs.isEmpty, vecs.allSatisfy({ $0.count == vecs[0].count }) else { return nil }
-        var q = vecs[0]
-        for v in vecs.dropFirst() {
-            for i in q.indices { q[i] += v[i] }
-        }
-        let norm = q.map { $0 * $0 }.reduce(Float(0), +).squareRoot()
-        if norm > 0 { for i in q.indices { q[i] /= norm } }
-        return q
-    }
-
+    /// (批93/批106 的 averagedQuery 平均向量已被批107 交集路径替代删除,
+    /// 259 装机实测熔合概念与 AND 意图错位;配方与教训见 git 历史 d7f520d)
     private static func siglipQuery(_ concept: String, nativeZh: Bool = false) -> String {
         if let en = QueryUnderstanding.english(for: concept) {
             // 批95:so400m 激活时中文词直用原文模板壳(原生路径,依据与边界

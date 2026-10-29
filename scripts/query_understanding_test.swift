@@ -241,7 +241,7 @@ enum QueryUnderstandingTest {
                "原生语义:繁体不归一、中文原文直进(SigLIP2 中文原生能力的首个受控实验入口)")
         expect(QueryUnderstanding.nativeSiglipQuery("a man riding a horse on the beach")
                     == "This is a photo of a man riding a horse on the beach.",
-               "原生语义:语句不拆词不平均,整句直进(批93 平均仅 语义: 多词在用)")
+               "原生语义:语句不拆词,整句直进(批93 平均已在批107 退役,语义:多词改逐词交集)")
         expect(QueryUnderstanding.nativeSiglipQuery("2026") == "This is a photo of 2026.",
                "原生语义:时间词也是内容词,不解析不过滤(用户拍板:语句可能带时间)")
 

@@ -99,8 +99,9 @@ final class ModelManager: ObservableObject {
     /// **矩阵只在 so400m 上跑过,标准版的原生中文是从未测量的空白格**——
     /// 批71 前科:so400m 结论不跨模型迁移(licence 翻案三批)。故 so400m
     /// 激活时裸搜/语义: 的中文词走模板壳+中文原文;标准版保持词典英译
-    /// 原配行为(nativeZh=false 逐字不变)。范围只含单词语径(runMainSearch);
-    /// AND 线逐词/语义:多词平均/英文桥维持模板——各待独立 A/B 后再动。
+    /// 原配行为(nativeZh=false 逐字不变)。范围=单词语径与 语义:多词交集径
+    /// (runMainSearch;批106 曾扩到平均径,批107 平均退役改交集,原料沿用);
+    /// AND 线逐词/英文桥维持模板——各待独立 A/B 后再动。
     /// 原生语义: 前缀不受此条件约束(显式实验意图,任何模型无条件直通)
     var preferNativeZhQuery: Bool {
         activeImageSlot == .imagePro
