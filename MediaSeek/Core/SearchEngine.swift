@@ -699,6 +699,14 @@ final class SearchEngine {
             // 85% 线=0.298,下探捞回的低分段真命中会被一刀全砍,深潜白做;
             // 性别词的噪声闸=对比边距(0.010),尾线职责由它接管
             let tailFactor: Float = genderDive ? 0 : (best >= 0.13 * gate ? 0.85 : 0.95)
+            // 批104⑤:语义查询摘要行——分数带从「推断」变「读数」:边界项抖动
+            // (255 装机 原生语义:阳光 9→10 的 ±0.005 疑云)、档位取舍、尾线
+            // 切割,此后全部凭 diag.log 原始分定案,不再靠猜
+            IndexingCoordinator.DiagLog.shared.event(
+                String(format: "语义[%@] 路径=%@ 命中=%d best=%.3f min=%.3f",
+                       query,
+                       spec.channel == .native ? "原生前缀" : (nativeZh ? "条件原生" : "模板"),
+                       hits.count, best, hits.map(\.score).min() ?? 0))
             channels.append((1.0, best > 0 && tailFactor > 0
                 ? hits.filter { $0.score >= best * tailFactor } : hits))
         }
@@ -1310,8 +1318,9 @@ final class SearchEngine {
             }
             }
             let best = hits.first?.score ?? 0
-            // 深潜豁免尾线(低分段真命中会被 best×0.85 一刀砍光,与主管线同规)
-            if best > 0, !genderDive { hits = hits.filter { $0.score >= best * 0.85 } }
+            // 深潜豁免尾线(低分段真命中会被 best×0.85 一刀砍光,与主管线同规);
+            // 批104②:AND 宽召回在结果内分支同享免尾线(与全局路径同规,交集即精度)
+            if best > 0, !genderDive, !andRecall { hits = hits.filter { $0.score >= best * 0.85 } }
             // 第五十批:性别词对比过滤(结果内同规,见 QueryUnderstanding.genderOpposites;
             // 第五十五批:对比串=文献标准形式,正反向对称打分,线 0.010 见标定注释)
             if let pair = QueryUnderstanding.genderContrast(of: term),
@@ -1330,6 +1339,11 @@ final class SearchEngine {
                     ((fwdScores[$0.refKey] ?? $0.score) - (oppScores[$0.refKey] ?? 0)) >= 0.010
                 })
             }
+            // 批104⑤:语义查询摘要行(逐词路径·结果内分支)
+            IndexingCoordinator.DiagLog.shared.event(
+                String(format: "语义[%@] 路径=%@(结果内) 命中=%d best=%.3f min=%.3f",
+                       term, andRecall ? "AND宽召回" : "常规",
+                       hits.count, hits.first?.score ?? 0, hits.map(\.score).min() ?? 0))
             return videoFrameGuard(hits, term: term, gateScale: gateScale)
         }
         var hits: [SearchHit]
@@ -1411,6 +1425,11 @@ final class SearchEngine {
                 ((fwdScores[$0.refKey] ?? $0.score) - (oppScores[$0.refKey] ?? 0)) >= 0.010
             })
         }
+        // 批104⑤:语义查询摘要行(逐词路径·全局分支)
+        IndexingCoordinator.DiagLog.shared.event(
+            String(format: "语义[%@] 路径=%@ 命中=%d best=%.3f min=%.3f",
+                   term, andRecall ? "AND宽召回" : "常规",
+                   hits.count, hits.first?.score ?? 0, hits.map(\.score).min() ?? 0))
         return videoFrameGuard(hits, term: term, gateScale: gateScale)
     }
 
