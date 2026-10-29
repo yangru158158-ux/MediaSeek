@@ -558,21 +558,32 @@ final class SearchEngine {
             // 落 document 带 992 灌屏,换组词可能落荒地);平均向量确定落在
             // 各概念向量的中间地带。裸搜多词不经过此处(批41 改道逐词 AND),
             // 单词两路等价——行为变化仅 语义: 多词,正是要消灭的洪水
+            // 批105①:摘要行路径标签与嵌入分支同源赋值——批104 三态标签把
+            // 批96 英文整串与批93 平均分支错标成「模板/条件原生」,标准版英文
+            // 短语日志失真;标签只能来自实际执行的分支,平均失败降级也自动正确
             let q: [Float]
+            let embedPath: String
             if spec.channel == .native {
                 // 批94:原生向量——唯一规则=官方模板壳+spec.body 原文(未过
                 // core 清洗/时间剥离,也不经词典/桥/平均三道变换);多词语句
                 // 整句直进,SigLIP 原生判断首次可受控测量
                 q = try siglip.embedQuery(QueryUnderstanding.nativeSiglipQuery(spec.body))
+                embedPath = "原生前缀"
             } else if spec.channel == .any, Self.isAsciiPhrase(query) {
                 // 批96:英文整串概念——构词空格不当意图分隔,整句(经 core/时间
                 // 剥离后的 query)套原生模板壳,与 原生语义: 同款构造
                 q = try siglip.embedQuery(QueryUnderstanding.nativeSiglipQuery(query))
+                embedPath = "英文整串"
             } else if semanticOnly, semanticTerms.count >= 2,
                let avg = try? Self.averagedQuery(semanticTerms, siglip: siglip) {
                 q = avg
+                embedPath = "平均"
             } else {
-                q = try siglip.embedQuery(Self.siglipQuery(semanticTerms.joined(separator: " "), nativeZh: nativeZh))
+                let joined = semanticTerms.joined(separator: " ")
+                q = try siglip.embedQuery(Self.siglipQuery(joined, nativeZh: nativeZh))
+                // 条件原生的生效线与 siglipQuery 内部一致:仅非 ASCII 串吃原生壳
+                embedPath = (nativeZh && !joined.unicodeScalars.allSatisfy(\.isASCII))
+                    ? "条件原生" : "模板"
             }
             // 照片与视频帧分开走各自的门槛阶梯:分数分布不同,且照片行为已验收冻结
             var hits: [SearchHit] = []
@@ -705,7 +716,7 @@ final class SearchEngine {
             IndexingCoordinator.DiagLog.shared.event(
                 String(format: "语义[%@] 路径=%@ 命中=%d best=%.3f min=%.3f",
                        query,
-                       spec.channel == .native ? "原生前缀" : (nativeZh ? "条件原生" : "模板"),
+                       embedPath,
                        hits.count, best, hits.map(\.score).min() ?? 0))
             channels.append((1.0, best > 0 && tailFactor > 0
                 ? hits.filter { $0.score >= best * tailFactor } : hits))
@@ -1318,9 +1329,6 @@ final class SearchEngine {
             }
             }
             let best = hits.first?.score ?? 0
-            // 深潜豁免尾线(低分段真命中会被 best×0.85 一刀砍光,与主管线同规);
-            // 批104②:AND 宽召回在结果内分支同享免尾线(与全局路径同规,交集即精度)
-            if best > 0, !genderDive, !andRecall { hits = hits.filter { $0.score >= best * 0.85 } }
             // 第五十批:性别词对比过滤(结果内同规,见 QueryUnderstanding.genderOpposites;
             // 第五十五批:对比串=文献标准形式,正反向对称打分,线 0.010 见标定注释)
             if let pair = QueryUnderstanding.genderContrast(of: term),
@@ -1340,10 +1348,16 @@ final class SearchEngine {
                 })
             }
             // 批104⑤:语义查询摘要行(逐词路径·结果内分支)
+            // 批105②:移到尾线切割前——原记在切割后,常规路径 min=幸存集
+            // 最小值,被砍分数不可见且与主管线(切割前记录)口径不一致;
+            // 对比/尾线两个滤子交换顺序,集合等价,行为零变化
             IndexingCoordinator.DiagLog.shared.event(
                 String(format: "语义[%@] 路径=%@(结果内) 命中=%d best=%.3f min=%.3f",
                        term, andRecall ? "AND宽召回" : "常规",
                        hits.count, hits.first?.score ?? 0, hits.map(\.score).min() ?? 0))
+            // 深潜豁免尾线(低分段真命中会被 best×0.85 一刀砍光,与主管线同规);
+            // 批104②:AND 宽召回在结果内分支同享免尾线(与全局路径同规,交集即精度)
+            if best > 0, !genderDive, !andRecall { hits = hits.filter { $0.score >= best * 0.85 } }
             return videoFrameGuard(hits, term: term, gateScale: gateScale)
         }
         var hits: [SearchHit]
@@ -1400,12 +1414,6 @@ final class SearchEngine {
         }
         }
         let best = hits.first?.score ?? 0
-        // 低置信收紧与主流程同规:最佳 <0.13 = 无真匹配,只留贴近最佳的一小撮;
-        // 深潜豁免(性别词的噪声闸=对比边距,与主管线同规);
-        // 批103:AND 宽召回免尾线(交集即精度)
-        if best > 0, !genderDive, !andRecall {
-            hits = hits.filter { $0.score >= best * (best >= 0.13 * gateScale ? 0.85 : 0.95) }
-        }
         // 第五十批:性别词对比过滤(与主管线视觉通道同规;第五十五批:对比串
         // =文献标准「a photo of a woman/man」形式+正反向对称打分+线0.010,
         // 真实照片标定见 QueryUnderstanding.genderEnglish 注释)
@@ -1426,10 +1434,18 @@ final class SearchEngine {
             })
         }
         // 批104⑤:语义查询摘要行(逐词路径·全局分支)
+        // 批105②:移到尾线切割前(与主管线/结果内分支同口径,被砍分数可见;
+        // 对比/尾线两个滤子交换顺序,集合等价,行为零变化)
         IndexingCoordinator.DiagLog.shared.event(
             String(format: "语义[%@] 路径=%@ 命中=%d best=%.3f min=%.3f",
                    term, andRecall ? "AND宽召回" : "常规",
                    hits.count, hits.first?.score ?? 0, hits.map(\.score).min() ?? 0))
+        // 低置信收紧与主流程同规:最佳 <0.13 = 无真匹配,只留贴近最佳的一小撮;
+        // 深潜豁免(性别词的噪声闸=对比边距,与主管线同规);
+        // 批103:AND 宽召回免尾线(交集即精度)
+        if best > 0, !genderDive, !andRecall {
+            hits = hits.filter { $0.score >= best * (best >= 0.13 * gateScale ? 0.85 : 0.95) }
+        }
         return videoFrameGuard(hits, term: term, gateScale: gateScale)
     }
 
