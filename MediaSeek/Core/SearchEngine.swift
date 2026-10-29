@@ -232,6 +232,15 @@ final class SearchEngine {
             // 地点浏览命中(拍摄时间倒序,fetchAllAssets 即此顺序)排前,内容命中随后
             var merged = browseHits
             var seen = Set(browseHits.map { $0.refKey })
+            // 批99全局化:用户命名符合地址的标签并入——与 GPS 拍摄同属用户
+            // 证据(「在杭州 猫」类抽取路径的 main 内容搜的是猫,杭州命名
+            // 标签原本进不来),排浏览之后、内容命中之前;重复由 seen 过滤
+            if let pl = placeLabel, scope == .all || scope == .photo {
+                for h in resolve(placeUserTagHits(pl)) where !seen.contains(h.refKey) {
+                    seen.insert(h.refKey)
+                    merged.append(h)
+                }
+            }
             for h in main.hits where !seen.contains(h.refKey) { merged.append(h) }
             return SearchOutcome(hits: merged, textIDs: main.textIDs,
                                  timeLabel: dateRange?.label, placeLabel: placeLabel)
@@ -247,6 +256,14 @@ final class SearchEngine {
                                       refKey: asset.localIdentifier, frameIndex: 0,
                                       space: "browse", title: nil, date: asset.creationDate,
                                       score: 1.0, color: nil))
+            }
+            // 批99全局化:纯地点浏览同样并入用户命名标签(用户证据全局适用)
+            if let pl = placeLabel {
+                var seenB = Set(hits.map(\.refKey))
+                for h in placeUserTagHits(pl) where !seenB.contains(h.refKey) {
+                    seenB.insert(h.refKey)
+                    hits.append(h)
+                }
             }
             if let allFiles = try? imports.allFiles() {
                 for f in allFiles where hits.count < topK {
@@ -330,6 +347,23 @@ final class SearchEngine {
     /// (PDF/CSV/XLSX/TXT 内容均已入库 ocr_text)双词精确命中。
     /// 空态分数提示(lastSemanticTopScore)仅 语义: 查询展示,而 语义: 已被
     /// 下方 channel 校验挡回主管线(主管线自己写该字段),本函数无需写
+    /// 批99全局化(用户定则):用户产生的证据适用全局——地址搜索任何路径,
+    /// 用户命名符合地址的标签与 GPS 拍摄合并入结果。简繁并查、refKey 去重;
+    /// 照片侧数据;title 标注证据来源便于核对
+    private func placeUserTagHits(_ place: String) -> [SearchHit] {
+        var out: [SearchHit] = []
+        var seen = Set<String>()
+        for vt in QueryUnderstanding.scriptVariants(of: place) {
+            for r in ((try? store.searchUserTags(query: vt)) ?? []) where !seen.contains(r) {
+                seen.insert(r)
+                out.append(SearchHit(kind: .photo, refKey: r, frameIndex: 0,
+                                     space: "userTag", title: "用户命名「\(place)」",
+                                     date: nil, score: 0.9, color: nil))
+            }
+        }
+        return out
+    }
+
     /// 批96:AND 零命中提示文案——按契约返回空(用户拍板改②):零命中词使
     /// 「同时包含」无法成立,诚实出 0 并点名;出路(去词重搜/结果内缩小)
     /// 由空态页补充。「无命中」不带范围限定词:全局=全网零命中,结果内=
@@ -906,11 +940,9 @@ final class SearchEngine {
                 // 实测 or:上海 杭州 语义栏 110 个多为异地城市照、相对分贴 14%
                 // 弱带;而杭州 GPS 拍摄 318 张大量漏在结果外——精度与召回双病)。
                 // 根因:地点解析圈死在 connector==.none 的闸内,前缀查询结构性
-                // 绕过 GPS。修法:逐词车间里 barePlace 命中→地理编码 50km→该地
-                // 拍摄的照片/视频直接命中(space="browse",score 1.0 居名单之首),
-                // 语义/标签/OCR 降为补缺。文字: 前缀不注入(纯文字语义不变);
-                // and: 地名+内容词由此获得「在地拍摄∩内容」能力(and:上海 猫=
-                // 在上海拍的猫)。裸搜路径不受影响(本就有地点浏览并集)
+                // 绕过 GPS。文字: 前缀不注入(纯文字语义不变);and: 地名+
+                // 内容词由此获得「在地拍摄∩内容」能力(and:上海 猫=在上海
+                // 拍的猫)。裸搜整串单地名走既有地点浏览并集(路径不变)
                 var hits: [SearchHit] = []
                 if scope != .file, let p = QueryUnderstanding.barePlace(t),
                    let region = await PlaceGeocoder.region(for: p, radius: 50_000) {
@@ -926,21 +958,47 @@ final class SearchEngine {
                             space: "browse", title: "\(p)拍摄",
                             date: asset.creationDate, score: 1.0, color: nil))
                     }
+                    // 批99:地点词四通道定稿(用户三轮纠正):GPS 拍摄(语义侧)+
+                    // OCR 文字命中(文字侧,杭州上海既是地址也是文字)+用户标签
+                    // (用户亲手命名某组/某照「上海」=精度极高,绝不能出局);
+                    // 出局者仅机器侧的语义视觉填充与 Vision 帧标签——前者是
+                    // 「城市名无视觉特征」教义下的定义性噪声(250 装机误报源
+                    // =福州/黄山城市感图片混入语义栏),后者是机器物体标签非
+                    // 用户命名。区域零照片→GPS 侧空名单(OR=他词兜着,AND=
+                    // 批96 契约空);地理编码失败→不进此分支照旧全填充
+                    var seenPlace = Set(hits.map(\.refKey))
+                    for (rank, r) in ocrUnionHits(t, scope: scope, within: within,
+                                                  topK: topK, classifier: classifier)
+                        .filter({ allowed.contains($0.kind) })
+                        .enumerated() where !seenPlace.contains(r.refKey) {
+                        seenPlace.insert(r.refKey)
+                        hits.append(SearchHit(kind: r.kind, refKey: r.refKey, frameIndex: 0,
+                                              space: "ocr", title: "含「\(t)」文字", date: nil,
+                                              score: Float(1.0 / Double(rank + 1)), color: nil))
+                    }
+                    if allowed.contains(.photo) {
+                        // 用户标签(批99三改;helper 同款构造,within 基数照守)
+                        for h in placeUserTagHits(p)
+                            where !seenPlace.contains(h.refKey)
+                                && (within?.contains(h.refKey) ?? true) {
+                            seenPlace.insert(h.refKey)
+                            hits.append(h)
+                        }
+                    }
+                    perTerm.append(hits)
+                    continue
                 }
-                var seen = Set(hits.map(\.refKey))
-                // 结果内时语义分数限定在基数集合内算(同 searchWithin 的修正);
-                // 批97:地点词时语义降为补缺(GPS 已认领的本就排前,不重复入表)
-                let sem = semanticHits(t, siglip: siglip, topK: topK, within: within, scope: scope,
-                                       gateScale: gate)
-                    .filter { !seen.contains($0.refKey) }
-                hits.append(contentsOf: sem)
+                // 非地点词(能走到这里 hits 必为空):语义主座直接落座
+                hits.append(contentsOf: semanticHits(t, siglip: siglip, topK: topK,
+                                                      within: within, scope: scope, gateScale: gate))
                 if let within { hits = hits.filter { within.contains($0.refKey) } }
+                var seen = Set(hits.map(\.refKey))
                 // 「像或含字」同构(第十六批):裸搜模式里每个词 = OCR∪视觉任一
                 // 命中即算,and:/or: 自动通道此前只送语义——证件/文件类词语义
                 // 天生弱(0.05-0.08 过不了地板),and:身份证 正面 恒空。每词并入
                 // OCR(含证件别名)命中再按连接词交并;同照片双命中时语义条目
-                // 优先(带真实分),OCR 只补缺口。(批97:seen 已随地点通道前置
-                // 声明,语义条目亦经其过滤,此处不再重建)
+                // 优先(带真实分),OCR 只补缺口。(批99:地点词已在上方 continue
+                // 出局,以下填充仅服务非地点词)
                 // 第六十五批:视频帧标签通道(与主管线 runMainSearch 同构)——
                 // 帧标签与查询词有交集的视频直接命中,零幻觉、不依赖分数。
                 // 此前结果内路径没有这条通道,视频只剩 semanticHits 一跳:打了

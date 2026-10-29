@@ -262,8 +262,8 @@ expect(to_simplified("动物") == "动物" and to_simplified("美團 存款") ==
        "简体/同形透传,空格保留")
 expect(OCR_ALIASES.get("证件") == ["身份证", "护照", "驾驶证"],
        "证件入别名表(与 licence 同权,221 装机实测 证件 语义0)")
-expect(dict(DICTIONARY).get("驾驶证") == "driver license document",
-       "驾驶证词典对补齐(与驾照同款模板)")
+expect(dict(DICTIONARY).get("驾驶证") == "driver license card",
+       "驾驶证词典对补齐(批83 已 document→card,镜像滞后三批实锤)")
 print(f"证件桥: 表 {len(COUNTERPARTS)} 键 / 别名 {len(OCR_ALIASES)} 组 对拍一致")
 
 print("PASS: 镜像全绿(词典", len(DICTIONARY), "条/标签", len(ZH), "词/泛化", len(GENERIC), "个)")
