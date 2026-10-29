@@ -150,16 +150,25 @@ enum PlaceGeocoder {
     private static let cache = NSCache<NSString, CLCircularRegion>()
 
     /// 地名 → 圆形区域(带缓存;离线/失败返回 nil,搜索照常降级)。
-    /// 「在X」用默认 20km;裸城市名浏览用 50km(城市建成区+郊区一站式覆盖)
+    /// 「在X」用默认 20km;裸城市名浏览用 50km(城市建成区+郊区一站式覆盖)。
+    /// 批100:半径随地名自身尺度——placemark.region 反映行政区真实范围
+    /// (城市 ~10-20km,国家/群岛数百 km)。此前硬编码 20/50km 圆:马尔代夫
+    /// 是南北 ~870km 的 26 组环礁,50km 圆只盖住马累周边——251 装机实测
+    /// 裸搜仅 33 个,各环礁度假村照片全被圆外切掉(西藏/呼伦贝尔/黄山
+    /// 同病)。现取「真实范围与调用方下限」较大者,800km 封顶;placemark
+    /// 范围缺失回退调用方半径——城市零变化(杭州 extent<50km 仍 50km)
     static func region(for name: String, radius: CLLocationDistance = 20_000) async -> CLCircularRegion? {
-        let cacheKey = "\(name)|\(radius)" as NSString
+        let cacheKey = name as NSString   // 批100:半径由地名自身决定,缓存键去 radius
         if let v = cache.object(forKey: cacheKey) { return v }
         let region: CLCircularRegion? = await withCheckedContinuation { cont in
             let geocoder = CLGeocoder()
             geocoder.geocodeAddressString(name) { placemarks, _ in
-                if let loc = placemarks?.first?.location {
+                if let pm = placemarks?.first, let loc = pm.location {
+                    // placemark.region 是 CLRegion 基类,radius 在 CLCircularRegion
+                    let extent = (pm.region as? CLCircularRegion)?.radius ?? radius
+                    let r = min(max(extent, radius), 800_000)
                     cont.resume(returning: CLCircularRegion(
-                        center: loc.coordinate, radius: radius, identifier: name))
+                        center: loc.coordinate, radius: r, identifier: name))
                 } else {
                     cont.resume(returning: nil)
                 }
