@@ -575,7 +575,8 @@ final class SearchEngine {
                 q = try siglip.embedQuery(QueryUnderstanding.nativeSiglipQuery(query))
                 embedPath = "英文整串"
             } else if semanticOnly, semanticTerms.count >= 2,
-               let avg = try? Self.averagedQuery(semanticTerms, siglip: siglip) {
+               let avg = try? Self.averagedQuery(semanticTerms, siglip: siglip, nativeZh: nativeZh) {
+                // 批106(C4):原料随单词径同代——so400m 各词原生壳向量平均
                 q = avg
                 embedPath = "平均"
             } else {
@@ -1204,14 +1205,17 @@ final class SearchEngine {
     /// 词典命中的精选英文描述套模板,未命中(长句/自由文本)保持原文。
     /// ⚠️ 提示词集成(多模板平均)虽是通行做法,但会平移全库语义分数、
     /// 现有门槛按单模板分布标定——要上必须先在设备上 A/B 单独验证
-    /// 批93:组合概念查询向量——各词经 siglipQuery 得到模板向量,取平均再
+    /// 批93:组合概念查询向量——各词经 siglipQuery 得到向量,取平均再
     /// 归一化(CLIP 论文 80 模板 ensemble 同款配方)。输入向量已是单位向量
     /// (导出管线归一),平均后必须再归一化,余弦相似度才成立;任一词嵌入
     /// 失败跳过该词,全部失败返回 nil(调用方回退整串拼嵌)
-    private static func averagedQuery(_ terms: [String], siglip: SigLIPEmbedder) -> [Float]? {
+    /// 批106(C4):透传 nativeZh——so400m 下各词先吃原生壳再平均,与单词径
+    /// 同配方(A/B 矩阵实证原生 3:0 胜词典英译后,单/多词原料不再两代);
+    /// 257 装机基线:语义:阳光 海滩(模板系原料)best=0.133,原生单词径 best=0.163
+    private static func averagedQuery(_ terms: [String], siglip: SigLIPEmbedder, nativeZh: Bool = false) -> [Float]? {
         var vecs: [[Float]] = []
         for t in terms {
-            if let v = try? siglip.embedQuery(siglipQuery(t)) { vecs.append(v) }
+            if let v = try? siglip.embedQuery(siglipQuery(t, nativeZh: nativeZh)) { vecs.append(v) }
         }
         guard !vecs.isEmpty, vecs.allSatisfy({ $0.count == vecs[0].count }) else { return nil }
         var q = vecs[0]
