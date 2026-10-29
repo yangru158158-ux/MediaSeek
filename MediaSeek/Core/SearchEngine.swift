@@ -1169,6 +1169,13 @@ final class SearchEngine {
         if isAscii, wordCount >= 1, wordCount <= 3 {
             return "This is a photo of \(concept)."
         }
+        // 批98:含「的」的中文描述短语(so400m 原生路径)套原生壳——词典
+        // 盖不满(美丽的天空:美丽不在册→覆盖 partial→落空)时不再裸多
+        // 语言。范围刻意限「的」短语:全部落空词套壳=未测面(财报专名/
+        // 人名当初因裸嵌噪声被闸),全壳化待独立 A/B(排查报告 C2 项)
+        if nativeZh, concept.contains("的"), !isAscii {
+            return QueryUnderstanding.nativeSiglipQuery(concept)
+        }
         return concept
     }
 

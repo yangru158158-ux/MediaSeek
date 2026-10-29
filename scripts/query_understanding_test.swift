@@ -245,6 +245,14 @@ enum QueryUnderstandingTest {
         expect(QueryUnderstanding.nativeSiglipQuery("2026") == "This is a photo of 2026.",
                "原生语义:时间词也是内容词,不解析不过滤(用户拍板:语句可能带时间)")
 
+        // —— 第九十八批:专名闸「的」豁免(美丽的天空误杀案) ——
+        expect(QueryUnderstanding.isProperNoun("美丽的天空") == false,
+               "含「的」=描述短语不判专名(249 装机实锤:美丽2生字符+天空在册→旧闸判专名→视觉踢除→裸搜0)")
+        expect(QueryUnderstanding.isProperNoun("华研机器人") == true,
+               "无「的」的专名闸门本体不变(批62 原始案例)")
+        expect(QueryUnderstanding.isProperNoun("红裙子") == false,
+               "1 生字符修饰词形态维持不判专名(批62 既有边界)")
+
         // —— 第七十二批:繁→简归一 + 证件与 licence 同权 ——
         expect(QueryUnderstanding.simplified("駕駛證") == "驾驶证"
             && QueryUnderstanding.simplified("證件") == "证件"
@@ -321,7 +329,7 @@ enum QueryUnderstandingTest {
         expect(passCn == zhToEns.count,
                "全量 \(zhToEns.count) 个中文词反查全部命中标签通道")
 
-        // 断言数口径:全文 expect 调用 92 项(另含 1 行函数定义,批94 增 5)
-        print("PASS: 查询理解 92 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词穷尽)")
+        // 断言数口径:全文 expect 调用 95 项(另含 1 行函数定义,批94 增 5 批98 增 3)
+        print("PASS: 查询理解 95 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词穷尽)")
     }
 }

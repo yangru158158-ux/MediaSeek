@@ -169,6 +169,12 @@ enum QueryUnderstanding {
     /// (整词原文给 SigLIP);零命中(财报)不是专名,词典没收的普通词,
     /// 照走多语言原文。
     static func isProperNoun(_ term: String) -> Bool {
+        // 批98:「的」豁免——含「的」=描述短语(形容词+的+名词),汉语专名
+        // 不含此结构;专名闸曾误杀「美丽的天空」(美丽2生字符+天空在册→
+        // 判专名→视觉整词踢除→裸搜0结果 vs 原生语义:40,249 装机实锤)。
+        // 已知取舍:「美的集团」类品牌名含的将不再判专名——视觉多一路
+        // 命中,OCR 权重 8 仍主导排序,危害有限
+        if term.contains("的") { return false }
         if case .partial(let run) = termCoverage(term) { return run >= 2 }
         return false
     }
