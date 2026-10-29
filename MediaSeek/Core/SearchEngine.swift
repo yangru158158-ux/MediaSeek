@@ -901,16 +901,46 @@ final class SearchEngine {
                                   score: Float(1.0 / Double(rank + 1)), color: nil)
                     })
             } else {
-                // 结果内时语义分数限定在基数集合内算(同 searchWithin 的修正)
-                var hits = semanticHits(t, siglip: siglip, topK: topK, within: within, scope: scope,
-                                         gateScale: gate)
+                // 批97:地点词=GPS 拍摄通道,真相优先(用户拍板方案B)。城市名
+                // 无视觉特征——词典城市模板的邻居=全世界的城市感照片(249 装机
+                // 实测 or:上海 杭州 语义栏 110 个多为异地城市照、相对分贴 14%
+                // 弱带;而杭州 GPS 拍摄 318 张大量漏在结果外——精度与召回双病)。
+                // 根因:地点解析圈死在 connector==.none 的闸内,前缀查询结构性
+                // 绕过 GPS。修法:逐词车间里 barePlace 命中→地理编码 50km→该地
+                // 拍摄的照片/视频直接命中(space="browse",score 1.0 居名单之首),
+                // 语义/标签/OCR 降为补缺。文字: 前缀不注入(纯文字语义不变);
+                // and: 地名+内容词由此获得「在地拍摄∩内容」能力(and:上海 猫=
+                // 在上海拍的猫)。裸搜路径不受影响(本就有地点浏览并集)
+                var hits: [SearchHit] = []
+                if scope != .file, let p = QueryUnderstanding.barePlace(t),
+                   let region = await PlaceGeocoder.region(for: p, radius: 50_000) {
+                    photo.fetchAllAssets().enumerateObjects { asset, _, _ in
+                        guard hits.count < topK else { return }
+                        if scope == .photo, asset.mediaType != .image { return }
+                        if scope == .video, asset.mediaType != .video { return }
+                        guard Self.assetPasses(asset, dateRange: dateRange, place: region) else { return }
+                        guard within?.contains(asset.localIdentifier) ?? true else { return }
+                        hits.append(SearchHit(
+                            kind: asset.mediaType == .video ? .videoFrame : .photo,
+                            refKey: asset.localIdentifier, frameIndex: 0,
+                            space: "browse", title: "\(p)拍摄",
+                            date: asset.creationDate, score: 1.0, color: nil))
+                    }
+                }
+                var seen = Set(hits.map(\.refKey))
+                // 结果内时语义分数限定在基数集合内算(同 searchWithin 的修正);
+                // 批97:地点词时语义降为补缺(GPS 已认领的本就排前,不重复入表)
+                let sem = semanticHits(t, siglip: siglip, topK: topK, within: within, scope: scope,
+                                       gateScale: gate)
+                    .filter { !seen.contains($0.refKey) }
+                hits.append(contentsOf: sem)
                 if let within { hits = hits.filter { within.contains($0.refKey) } }
                 // 「像或含字」同构(第十六批):裸搜模式里每个词 = OCR∪视觉任一
                 // 命中即算,and:/or: 自动通道此前只送语义——证件/文件类词语义
                 // 天生弱(0.05-0.08 过不了地板),and:身份证 正面 恒空。每词并入
                 // OCR(含证件别名)命中再按连接词交并;同照片双命中时语义条目
-                // 优先(带真实分),OCR 只补缺口
-                var seen = Set(hits.map(\.refKey))
+                // 优先(带真实分),OCR 只补缺口。(批97:seen 已随地点通道前置
+                // 声明,语义条目亦经其过滤,此处不再重建)
                 // 第六十五批:视频帧标签通道(与主管线 runMainSearch 同构)——
                 // 帧标签与查询词有交集的视频直接命中,零幻觉、不依赖分数。
                 // 此前结果内路径没有这条通道,视频只剩 semanticHits 一跳:打了
@@ -984,9 +1014,11 @@ final class SearchEngine {
                 for h in list {
                     // 第六十五批:space=="label"(视频帧标签通道)标「帧标签」,
                     // 与 userTag 的「标签」区分——命中方式来源不可错标(验收拦下)
+                    // 批97:space=="browse"(地点 GPS 通道)标「拍摄地」同规
                     let way = h.space == "ocr" ? "文字"
-                        : (h.space == "userTag" ? "标签"
-                           : (h.space == "label" ? "帧标签" : "语义"))
+                        : (h.space == "browse" ? "拍摄地"
+                           : (h.space == "userTag" ? "标签"
+                              : (h.space == "label" ? "帧标签" : "语义")))
                     info[h.refKey, default: []].append("\(t)·\(way)")
                 }
             }
