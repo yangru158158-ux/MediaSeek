@@ -606,8 +606,9 @@ final class SearchEngine {
                     // 固定,与 AND 线批103/批91 同规)取 refKey 交集;综合分
                     // =min(各词分)——短板语义:广告截图沙发分高猫分低,min
                     // 压尾,真组合照两词都像而领先。任一词嵌入失败跳过该词,
-                    // 全失败=空交集诚实空(交集即精度,批103 教义);免尾线
-                    // (见下方 tailFactor),摘要行命中数即界面语义通道口径
+                    // 全失败=空交集诚实空。⚠️批108 实测教训:宽召回两词基数
+                    // 都是几千张时交集不收敛(260 装机 2618 张),收口靠下方
+                    // 尾线(min 分排序+尾线切割双精选),不靠交集基数本身
                     var common: Set<String>? = nil
                     var perWord: [String: [Float]] = [:]
                     var template: [String: SearchHit] = [:]
@@ -639,7 +640,8 @@ final class SearchEngine {
                                          title: base.title, date: base.date,
                                          score: scores.min() ?? 0, color: base.color)
                     }.sorted { $0.score > $1.score }
-                    // 交集空:空态提示用首词最高分(下方 670 段按 isectWords 跳过)
+                    // 交集空:空态提示用首词最高分(下方空态守卫段按 isectWords 跳过;
+                    // 不引行号——本段插入会推移下游行号,批107 验收 low 教训)
                     if hits.isEmpty { lastSemanticTopScore = firstWordTop }
                 } else if genderDive {
                     // 深潜:第三档地板直取(阶梯与薄判都不适用——品类词要的是
@@ -765,20 +767,26 @@ final class SearchEngine {
             // 性别词深潜豁免尾线(第六十三批):尾线以最佳分为基准,最佳 0.35 时
             // 85% 线=0.298,下探捞回的低分段真命中会被一刀全砍,深潜白做;
             // 性别词的噪声闸=对比边距(0.010),尾线职责由它接管
-            // 批107:交集免尾线(交集即精度,与 AND 线批103 同规;尾线是相对
-            // 线,挡不住邻域内真高分的杂音,反会砍掉弱词侧真命中)
-            let tailFactor: Float = genderDive || isectWords != nil
-                ? 0 : (best >= 0.13 * gate ? 0.85 : 0.95)
+            // 批108:交集恢复尾线——批107 曾免(「交集即精度」),260 装机实锤
+            // 该教义不成立:两词宽召回基数都是几千张(截图类对任何词都有
+            // 0.07-0.11 基础相似度),交集不收敛(阳光海滩 2618 张灌屏);min
+            // 短板分把杂音(两词都只有基础相似度)压在 0.09-0.11 带,尾线
+            // 0.85×best 恰好收口,「两词都像」的排前且幸存
+            let tailFactor: Float = genderDive ? 0 : (best >= 0.13 * gate ? 0.85 : 0.95)
             // 批104⑤:语义查询摘要行——分数带从「推断」变「读数」:边界项抖动
             // (255 装机 原生语义:阳光 9→10 的 ±0.005 疑云)、档位取舍、尾线
             // 切割,此后全部凭 diag.log 原始分定案,不再靠猜
+            // 批108:增记「尾线后」计数——命中=尾线切割前(诊断阶梯),尾线后=
+            // 切割后幸存(≈界面语义通道基数,259 装机曾把命中数误当界面数,
+            // 两口径并列后不再靠推算)
+            let survivors = best > 0 && tailFactor > 0
+                ? hits.filter { $0.score >= best * tailFactor } : hits
             IndexingCoordinator.DiagLog.shared.event(
-                String(format: "语义[%@] 路径=%@ 命中=%d best=%.3f min=%.3f",
+                String(format: "语义[%@] 路径=%@ 命中=%d best=%.3f min=%.3f 尾线后=%d",
                        query,
                        embedPath,
-                       hits.count, best, hits.map(\.score).min() ?? 0))
-            channels.append((1.0, best > 0 && tailFactor > 0
-                ? hits.filter { $0.score >= best * tailFactor } : hits))
+                       hits.count, best, hits.map(\.score).min() ?? 0, survivors.count))
+            channels.append((1.0, survivors))
         }
 
         // 用户标签通道:中文子串精确匹配(文字: 排他,不参与)
