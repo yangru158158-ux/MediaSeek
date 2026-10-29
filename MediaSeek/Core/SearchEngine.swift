@@ -204,49 +204,41 @@ final class SearchEngine {
             }
         }
 
-        // 裸地名是「加法」不是「过滤」:内容通道与普通搜索完全一致(不得挂 GPS
-        // 过滤——照片没有定位、截图在本乡本土,挂了就会把 38 个命中杀成 0),
-        // GPS 地点浏览(该地拍摄的照片/视频,不依赖索引)只做并集排前
-        if let placeRegion, placeLabel != nil, !query.isEmpty,
+        // 批103:抽取路径(在X+内容词)改交集——用户教义「地点+内容=在地拍摄∩
+        // 内容」(批97/99 确立)取代旧加法并集。254 装机实锤「在杭州 猫」=248:
+        // 旧加法把全网猫(语义220)灌进结果,杭州拍摄反而被淹没。旧设计注释
+        // (挂 GPS 过滤会杀掉无定位截图)由交集基数只含「GPS 在域 ∪ 用户
+        // 命名该地」化解:无定位又无命名的照片本就不属于「在杭州拍的」。
+        // 实现:先收基数集合,内容搜索全局跑完按基数过滤(规避 SQLite IN
+        // 参数上限,排序继承内容通道全局名次)
+        if let placeRegion, let pl = placeLabel, !query.isEmpty,
            spec.channel == .any, spec.connector == .none, within == nil {
-            let main = try await runBareSearch(query: query, spec: spec, scope: scope, topK: topK,
-                                               siglip: siglip, dateRange: dateRange,
-                                               placeRegion: nil, placeLabel: placeLabel, among: nil)
-            var browseHits: [DisplayHit] = []
+            var base = Set<String>()
             photo.fetchAllAssets().enumerateObjects { asset, _, _ in
-                guard browseHits.count < topK else { return }
-                if scope == .file { return }   // 文件无 GPS,地点浏览只列相册内容
+                if scope == .file { return }   // 文件无 GPS
                 if scope == .photo, asset.mediaType != .image { return }
                 if scope == .video, asset.mediaType != .video { return }
                 guard Self.assetPasses(asset, dateRange: dateRange, place: placeRegion) else { return }
-                let isVideo = asset.mediaType == .video
-                browseHits.append(DisplayHit(
-                    id: "\(isVideo ? ItemKind.videoFrame.rawValue : ItemKind.photo.rawValue)-\(asset.localIdentifier)",
-                    refKey: asset.localIdentifier,
-                    target: .asset(asset),
-                    kind: isVideo ? .videoFrame : .photo,
-                    title: isVideo ? "视频" : "照片",
-                    score: 1.0, date: asset.creationDate,
-                    color: self.store.colorForRef(asset.localIdentifier)))
+                base.insert(asset.localIdentifier)
             }
-            // 地点浏览命中(拍摄时间倒序,fetchAllAssets 即此顺序)排前,内容命中随后
-            var merged = browseHits
-            var seen = Set(browseHits.map { $0.refKey })
-            // 批99全局化:用户命名符合地址的标签并入——与 GPS 拍摄同属用户
-            // 证据(「在杭州 猫」类抽取路径的 main 内容搜的是猫,杭州命名
-            // 标签原本进不来),排浏览之后、内容命中之前;重复由 seen 过滤
-            if let pl = placeLabel, scope == .all || scope == .photo {
-                // 批102:dateRange 透传(验收 medium:时间词组合下命名照片
-                // 不得越过时间过滤;resolve 按照片真实拍摄日期裁决)
-                for h in resolve(placeUserTagHits(pl), dateRange: dateRange)
-                    where !seen.contains(h.refKey) {
-                    seen.insert(h.refKey)
-                    merged.append(h)
+            if scope == .all || scope == .photo {
+                for vt in QueryUnderstanding.scriptVariants(of: pl) {
+                    for r in ((try? store.searchUserTags(query: vt)) ?? []) { base.insert(r) }
                 }
             }
-            for h in main.hits where !seen.contains(h.refKey) { merged.append(h) }
-            return SearchOutcome(hits: merged, textIDs: main.textIDs,
-                                 timeLabel: dateRange?.label, placeLabel: placeLabel)
+            guard !base.isEmpty else {
+                return SearchOutcome(hits: [], textIDs: [],
+                                     timeLabel: dateRange?.label, placeLabel: pl)   // 该地无拍摄:诚实空
+            }
+            let main = try await runBareSearch(query: query, spec: spec, scope: scope, topK: topK,
+                                               siglip: siglip, dateRange: dateRange,
+                                               placeRegion: nil, placeLabel: nil, among: nil)
+            let filtered = main.hits.filter { base.contains($0.refKey) }
+            let textIDs = Set(filtered
+                .map { "\($0.kind.rawValue)-\($0.refKey)" }
+                .filter { main.textIDs.contains($0) })
+            return SearchOutcome(hits: filtered, textIDs: textIDs,
+                                 timeLabel: dateRange?.label, placeLabel: pl)
         }
 
         // 纯时间/地点浏览:无内容词,按拍摄时间倒序列出该时段的照片/视频/文件
@@ -1002,7 +994,8 @@ final class SearchEngine {
                 // 非地点词(能走到这里 hits 必为空):语义主座直接落座
                 hits.append(contentsOf: semanticHits(t, siglip: siglip, topK: topK,
                                                       within: within, scope: scope, gateScale: gate,
-                                                      nativeZh: nativeZh))
+                                                      nativeZh: nativeZh,
+                                                      andRecall: spec.connector == .and))
                 if let within { hits = hits.filter { within.contains($0.refKey) } }
                 var seen = Set(hits.map(\.refKey))
                 // 「像或含字」同构(第十六批):裸搜模式里每个词 = OCR∪视觉任一
@@ -1257,7 +1250,8 @@ final class SearchEngine {
                               within: Set<String>? = nil,
                               scope: SearchScope = .all,
                               gateScale: Float = 1.0,
-                              nativeZh: Bool = false) -> [SearchHit] {
+                              nativeZh: Bool = false,
+                              andRecall: Bool = false) -> [SearchHit] {
         guard let siglip else { return [] }
         // 第七十二批:繁→简归一(在通道入口自守,调用方无须预处理)——内部
         // 专名闸/词典模板/证件豁免/性别逻辑全按简体键运转,繁体原串会绕过
@@ -1344,6 +1338,18 @@ final class SearchEngine {
             hits = Self.dedupByRef((try? store.search(
                 space: siglip.space, kinds: searchKinds, query: q, limit: topK,
                 minScore: 0.08 * gateScale)) ?? [])
+        } else if andRecall {
+            // 批103:AND 逐词宽召回——交集即精度,逐词不再各自收紧(阶梯+尾线
+            // 都是单词查询的防噪工具,组合查询里它们抢交集的活,把弱向量词
+            // (阳光:裸搜语义仅9张)砍到交集饿死——254 装机 马尔代夫 阳光=1)。
+            // 第三档地板直取+免尾线;证件豁免同规;OR 模式不走此路(并集
+            // 仍需逐词精度)
+            let exempt = QueryUnderstanding.floorExemptWords.contains(term)
+                || QueryUnderstanding.chineseCounterpart(for: term) != nil
+            let floor: Float = exempt ? 0.04 : 0.08 * gateScale
+            hits = Self.dedupByRef((try? store.search(
+                space: siglip.space, kinds: searchKinds, query: q, limit: topK,
+                minScore: floor)) ?? [])
         } else {
         hits = Self.dedupByRef((try? store.search(
             space: siglip.space, kinds: searchKinds, query: q, limit: topK,
@@ -1381,8 +1387,9 @@ final class SearchEngine {
         }
         let best = hits.first?.score ?? 0
         // 低置信收紧与主流程同规:最佳 <0.13 = 无真匹配,只留贴近最佳的一小撮;
-        // 深潜豁免(性别词的噪声闸=对比边距,与主管线同规)
-        if best > 0, !genderDive {
+        // 深潜豁免(性别词的噪声闸=对比边距,与主管线同规);
+        // 批103:AND 宽召回免尾线(交集即精度)
+        if best > 0, !genderDive, !andRecall {
             hits = hits.filter { $0.score >= best * (best >= 0.13 * gateScale ? 0.85 : 0.95) }
         }
         // 第五十批:性别词对比过滤(与主管线视觉通道同规;第五十五批:对比串

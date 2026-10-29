@@ -158,38 +158,50 @@ enum PlaceGeocoder {
     /// 同病)。现取「真实范围与调用方下限」较大者,800km 封顶;placemark
     /// 范围缺失回退调用方半径——城市零变化(杭州 extent<50km 仍 50km)
     static func region(for name: String, radius: CLLocationDistance = 20_000) async -> CLCircularRegion? {
-        // 批102:缓存键恢复 name|radius——批100 去掉 radius 后同地名在 20km
-        // (在X)/50km(裸/地点词)两档调用下限间串用首缓存圆,城市行为随查询
-        // 顺序漂移(验收 medium 实锤);分档各存各的,代价是同地名至多两次
-        // 地理编码,可接受
+        // 批102:缓存键 name|radius——两档下限各存各的(20km 在X/50km 裸)
         let cacheKey = "\(name)|\(radius)" as NSString
         if let v = cache.object(forKey: cacheKey) { return v }
-        let region: CLCircularRegion? = await withCheckedContinuation { cont in
+        // 批103④:英文名重试——中文名串在 Apple 地理编码器上有个别解析不动
+        // (254 diag.log 实锤:西双版纳 kCLError 8 无结果;澳洲口语名同理),
+        // 失败后用英文串再试一次
+        var placemark = await geocodeOne(name)
+        if placemark == nil, let en = englishAliases[name] {
+            placemark = await geocodeOne(en)
+        }
+        guard let pm = placemark, let loc = pm.location else {
+            IndexingCoordinator.DiagLog.shared.event(
+                "地理编码[\(name)]✗ 无结果(含英文重试)")
+            return nil
+        }
+        // placemark.region 是 CLRegion 基类,radius 在 CLCircularRegion;
+        // 批103③:800km 封顶放开——diag.log 实锤 澳大利亚圆心在大陆正中沙漠
+        // (-24.67,134.15) extent=3163km,封顶 800km 把墨尔本(~1730km)切在
+        // 圈外;改按 Apple 自家 extent 放开,与调用方下限取大
+        let extent = (pm.region as? CLCircularRegion)?.radius ?? radius
+        let r = max(extent, radius)
+        IndexingCoordinator.DiagLog.shared.event(
+            String(format: "地理编码[%@]→%@/%@ @%.2f,%.2f extent=%.0fk 最终=%.0fk",
+                   name, pm.country ?? "?", pm.administrativeArea ?? "?",
+                   loc.coordinate.latitude, loc.coordinate.longitude,
+                   extent / 1000, r / 1000))
+        let region = CLCircularRegion(center: loc.coordinate, radius: r, identifier: name)
+        cache.setObject(region, forKey: cacheKey)
+        return region
+    }
+
+    /// 中文名 → 英文重试串(解析失败个案;随 diag.log 实锤增补)
+    static let englishAliases: [String: String] = [
+        "西双版纳": "Xishuangbanna",
+        "澳洲": "Australia",
+        "桂林阳朔": "Yangshuo",
+    ]
+
+    private static func geocodeOne(_ name: String) async -> CLPlacemark? {
+        await withCheckedContinuation { cont in
             let geocoder = CLGeocoder()
-            geocoder.geocodeAddressString(name) { placemarks, error in
-                if let pm = placemarks?.first, let loc = pm.location {
-                    // placemark.region 是 CLRegion 基类,radius 在 CLCircularRegion
-                    let extent = (pm.region as? CLCircularRegion)?.radius ?? radius
-                    let r = min(max(extent, radius), 800_000)
-                    // 批101:地理编码全记录——253 装机判别实锤 墨尔本✓/悉尼✗/
-                    // 澳大利亚✗/澳洲(不在册):中文名可能解析失败或解析到
-                    // 错误同名地(悉尼→加拿大新斯科舍?)。国家/行政区/坐标/
-                    // 范围/最终半径全打 diag.log,装机重现一次即可定案
-                    IndexingCoordinator.DiagLog.shared.event(
-                        String(format: "地理编码[%@]→%@/%@ @%.2f,%.2f extent=%.0fk 最终=%.0fk",
-                               name, pm.country ?? "?", pm.administrativeArea ?? "?",
-                               loc.coordinate.latitude, loc.coordinate.longitude,
-                               extent / 1000, r / 1000))
-                    cont.resume(returning: CLCircularRegion(
-                        center: loc.coordinate, radius: r, identifier: name))
-                } else {
-                    IndexingCoordinator.DiagLog.shared.event(
-                        "地理编码[\(name)]✗ 无结果 err=\(error?.localizedDescription ?? "nil")")
-                    cont.resume(returning: nil)
-                }
+            geocoder.geocodeAddressString(name) { placemarks, _ in
+                cont.resume(returning: placemarks?.first)
             }
         }
-        if let region { cache.setObject(region, forKey: cacheKey) }
-        return region
     }
 }
