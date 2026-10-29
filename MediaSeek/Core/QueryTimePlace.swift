@@ -162,14 +162,25 @@ enum PlaceGeocoder {
         if let v = cache.object(forKey: cacheKey) { return v }
         let region: CLCircularRegion? = await withCheckedContinuation { cont in
             let geocoder = CLGeocoder()
-            geocoder.geocodeAddressString(name) { placemarks, _ in
+            geocoder.geocodeAddressString(name) { placemarks, error in
                 if let pm = placemarks?.first, let loc = pm.location {
                     // placemark.region 是 CLRegion 基类,radius 在 CLCircularRegion
                     let extent = (pm.region as? CLCircularRegion)?.radius ?? radius
                     let r = min(max(extent, radius), 800_000)
+                    // 批101:地理编码全记录——253 装机判别实锤 墨尔本✓/悉尼✗/
+                    // 澳大利亚✗/澳洲(不在册):中文名可能解析失败或解析到
+                    // 错误同名地(悉尼→加拿大新斯科舍?)。国家/行政区/坐标/
+                    // 范围/最终半径全打 diag.log,装机重现一次即可定案
+                    IndexingCoordinator.DiagLog.shared.event(
+                        String(format: "地理编码[%@]→%@/%@ @%.2f,%.2f extent=%.0fk 最终=%.0fk",
+                               name, pm.country ?? "?", pm.administrativeArea ?? "?",
+                               loc.coordinate.latitude, loc.coordinate.longitude,
+                               extent / 1000, r / 1000))
                     cont.resume(returning: CLCircularRegion(
                         center: loc.coordinate, radius: r, identifier: name))
                 } else {
+                    IndexingCoordinator.DiagLog.shared.event(
+                        "地理编码[\(name)]✗ 无结果 err=\(error?.localizedDescription ?? "nil")")
                     cont.resume(returning: nil)
                 }
             }
