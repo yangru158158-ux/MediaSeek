@@ -604,89 +604,90 @@ final class SearchEngine {
             var hits: [SearchHit] = []
             if imageKinds.contains(.photo) {
                 if let words = isectWords {
-                    // 批111(用户设计定稿):高精并集筛子 × SigLIP 交集。
-                    // 目的与手段(用户教义):目的是「符合现实的结果」,高精
-                    // 筛子与尾线都只是手段——筛子有效则免尾线(收口的活已被
-                    // 筛子干了),无筛子才保留尾线。批109 逐词分层的死因:
-                    // OCR 把无映射词抬成「高精词」后与他集求交(文字出现≠
-                    // 画面内容);批110 乘性约束的死因:每词都要牌命中,
-                    // 「美女与卢沟桥合影」只有 OCR 一侧证据会被乘性归零。
-                    // 定稿公式:筛子 S=∪(每词的 照片标签∪帧标签∪用户命名,
-                    // 跨词并集,至少一词有画面事实证据即过筛);基底 B=∩(每词
-                    // SigLIP 宽召回 0.070);结果=B∩S(S 非空,免尾线)或
-                    // B+尾线(S 空,批108 行为)。语义相关性由 B 保证(每词都
-                    // 过 SigLIP 宽召回),事实证据由 S 保证(至少一词),双高
-                    // 原巧合(无任何证据)被筛掉。
-                    // 批112:OCR 剔出筛子(263 装机实锤)——OCR 命中的截图类
-                    // 与 SigLIP 高原交集天然重叠(写着「沙发」的广告截图恰是
-                    // SigLIP 高原分照片),文字证据≠画面证据,筛子只收画面
-                    // 事实(标签牌/帧标签/用户命名);免尾线维持(筛后量级
-                    // 个位数-十几,远不到尾线治的灌屏量级)
-                    var sieve: Set<String> = []
+                    // 批113(定稿):每词一关,牌免试、SigLIP 词级精选自把关。
+                    // 批111/112 的结构错误(264 装机四查询全=1 实锤):把「每词
+                    // 都过 SigLIP 宽召回」做成前置统考,标签降级成加分项——
+                    // 筛子的免试权被没收:cat 牌照片仍要过「沙发 SigLIP 统考」,
+                    // 而窄分布词(美女全库仅 2301 张 ≥0.070)把真值整批挡在
+                    // 统考外,bridge 牌∩统考≈1。定稿回到设计原理:高精度筛子
+                    // 在前(免试),SigLIP 各词只考自己那关:
+                    //   入选 = ∩( 每词: 牌命中 ∪ 该词SigLIP精选 )
+                    //   词级精选=该词宽召回上 best×0.85/0.95 线(批108 尾线
+                    //   规则下沉词级)——牌免试不重考(证据不重复要求),
+                    //   双高原巧合(无牌且两词都只有 0.10-0.14 中间分)两关
+                    //   都过不了线,自然出局。OCR 维持剔除(批112)。
+                    //   预期:桥美女=bridge牌∩美女关∪woman牌∩桥关≈几百;
+                    //   猫沙发=cat牌∩沙发关∪sofa牌∩猫关≈0(真值0);
+                    //   阳光海滩=beach牌∩阳光关≈几十
+                    var result: Set<String>? = nil
+                    var wordEvidence: [String: Set<String>] = [:]   // 词→过关集(排序/可观测备用)
+                    var firstWordTop: Float = 0
                     for t in words {
+                        var pass: Set<String> = []
+                        // ①牌免试:照片Vision标签∪帧标签∪用户命名
                         let lt = QueryUnderstanding.labelTokens(t)
                         if !lt.isEmpty {
                             if imageKinds.contains(.photo), let rows = try? store.allPhotoLabels() {
                                 for row in rows where among?.contains(row.refKey) ?? true {
                                     let toks = Set(row.title.lowercased()
                                         .components(separatedBy: CharacterSet(charactersIn: ", ")))
-                                    if !lt.intersection(toks).isEmpty { sieve.insert(row.refKey) }
+                                    if !lt.intersection(toks).isEmpty { pass.insert(row.refKey) }
                                 }
                             }
                             if scope == .all || scope == .video, let rows = try? store.allVideoFrameLabels() {
                                 for row in rows where among?.contains(row.refKey) ?? true {
                                     let toks = Set(row.title.lowercased()
                                         .components(separatedBy: CharacterSet(charactersIn: ", ")))
-                                    if !lt.intersection(toks).isEmpty { sieve.insert(row.refKey) }
+                                    if !lt.intersection(toks).isEmpty { pass.insert(row.refKey) }
                                 }
                             }
                         }
                         for vt in QueryUnderstanding.scriptVariants(of: t) {
                             for r in ((try? store.searchUserTags(query: vt)) ?? [])
-                                where among?.contains(r) ?? true { sieve.insert(r) }
+                                where among?.contains(r) ?? true { pass.insert(r) }
                         }
+                        // ②该词自己的 SigLIP 关:宽召回 + 词级尾线(强语义证据)
+                        if let qw = try? siglip.embedQuery(
+                            Self.siglipQuery(t, nativeZh: nativeZh)) {
+                            let exempt = QueryUnderstanding.floorExemptWords.contains(t)
+                                || QueryUnderstanding.chineseCounterpart(for: t) != nil
+                            let wh = Self.dedupByRef(try store.search(
+                                space: siglip.space, kinds: [.photo], query: qw,
+                                limit: topK, minScore: exempt ? 0.04 : 0.08 * gate, among: among))
+                            let wb = wh.first?.score ?? 0
+                            if result == nil { firstWordTop = wb }
+                            let line = wb >= 0.13 * gate ? wb * 0.85 : wb * 0.95
+                            for h in wh where h.score >= line { pass.insert(h.refKey) }
+                        }
+                        wordEvidence[t] = pass
+                        result = result.map { $0.intersection(pass) } ?? pass
                     }
-                    // 基底:全部词 SigLIP 宽召回交集(批107 机制)
-                    var bKeys: Set<String>? = nil
-                    var firstWordTop: Float = 0
-                    for t in words {
-                        guard let qw = try? siglip.embedQuery(
-                            Self.siglipQuery(t, nativeZh: nativeZh)) else { continue }
-                        let exempt = QueryUnderstanding.floorExemptWords.contains(t)
-                            || QueryUnderstanding.chineseCounterpart(for: t) != nil
-                        let wh = Self.dedupByRef(try store.search(
-                            space: siglip.space, kinds: [.photo], query: qw,
-                            limit: topK, minScore: exempt ? 0.04 : 0.08 * gate, among: among))
-                        if bKeys == nil { firstWordTop = wh.first?.score ?? 0 }
-                        let keys = Set(wh.map(\.refKey))
-                        bKeys = bKeys.map { $0.intersection(keys) } ?? keys
-                    }
-                    var result = bKeys ?? []
-                    if !sieve.isEmpty {
-                        result.formIntersection(sieve)
-                        isectSieved = true
-                    }
-                    // SigLIP min 分:结果集上逐词打分(排序+摘要读数;视频
-                    // 多帧同 refKey 保最高,与性别对比同规)
+                    let finalRefs = result ?? []
+                    // 排序分:结果集上逐词 SigLIP 分的 min(证据强度;牌免试
+                    // 但无该词 SigLIP 分的照片按已有分计,全无分者 0 压尾;
+                    // 视频多帧同 refKey 保最高,与性别对比同规)
                     var sigMin: [String: Float] = [:]
-                    if !result.isEmpty {
+                    if !finalRefs.isEmpty {
                         for t in words {
                             guard let qw = try? siglip.embedQuery(
                                 Self.siglipQuery(t, nativeZh: nativeZh)) else { continue }
                             let scored = Self.dedupByRef((try? store.search(
                                 space: siglip.space, kinds: [.photo, .videoFrame], query: qw,
-                                limit: max(topK, result.count * 8), minScore: -1, among: result)) ?? [])
+                                limit: max(topK, finalRefs.count * 8), minScore: -1, among: finalRefs)) ?? [])
                             for s in scored {
                                 sigMin[s.refKey] = min(sigMin[s.refKey] ?? .greatestFiniteMagnitude, s.score)
                             }
                         }
                     }
-                    hits = result.map { ref -> SearchHit in
+                    hits = finalRefs.map { ref -> SearchHit in
                         SearchHit(kind: .photo, refKey: ref, frameIndex: 0,
                                   space: "isect", title: nil, date: nil,
                                   score: sigMin[ref] ?? 0, color: nil)
                     }.sorted { $0.score > $1.score }
-                    // 路径标签:有筛子=高精筛∩语义(免尾线);无=纯语义交集(尾线照切)
+                    // 任何词有牌证据=筛子参与了,免组级尾线(词级关已收口);
+                    // 全部词无牌=纯 SigLIP 词级精选交集,同样词级已收口——
+                    // 交集路径整体免组级尾线
+                    isectSieved = wordEvidence.values.contains { !$0.isEmpty }
                     embedPath = isectSieved ? "高精筛∩语义" : "交集"
                     // 交集空:空态提示用首词最高分(下方空态守卫段按 isectWords
                     // 跳过;不引行号——本段插入会推移下游行号,批107 验收教训)
@@ -815,9 +816,10 @@ final class SearchEngine {
             // 性别词深潜豁免尾线(第六十三批):尾线以最佳分为基准,最佳 0.35 时
             // 85% 线=0.298,下探捞回的低分段真命中会被一刀全砍,深潜白做;
             // 性别词的噪声闸=对比边距(0.010),尾线职责由它接管
-            // 批111:筛子有效免尾线(目的与手段:收口的活已由筛子干了);
-            // 无筛子才尾线;性别词豁免与全局同规(深潜的裁决在对比边距)
-            let tailFactor: Float = genderDive || isectSieved ? 0 : (best >= 0.13 * gate ? 0.85 : 0.95)
+            // 批113:交集路径整体免组级尾线——收口已下沉到词级(每词自己的
+            // 0.85/0.95 线),组级再切会对牌免试照片二次裁剪;性别词豁免同规
+            let tailFactor: Float = genderDive || isectWords != nil
+                ? 0 : (best >= 0.13 * gate ? 0.85 : 0.95)
             // 批104⑤:语义查询摘要行——分数带从「推断」变「读数」:边界项抖动
             // (255 装机 原生语义:阳光 9→10 的 ±0.005 疑云)、档位取舍、尾线
             // 切割,此后全部凭 diag.log 原始分定案,不再靠猜
