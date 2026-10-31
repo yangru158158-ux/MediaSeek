@@ -627,7 +627,7 @@ final class SearchEngine {
                         // R1 精确资格:直译多词短语→不查牌(主观/复合概念)
                         let en = QueryUnderstanding.english(for: t)
                         var h: Set<String> = []
-                        if en == nil || !en.contains(" ") {
+                        if en?.contains(" ") != true {
                             let lt = QueryUnderstanding.labelTokens(t)
                             if !lt.isEmpty {
                                 if imageKinds.contains(.photo), let rows = try? store.allPhotoLabels() {
