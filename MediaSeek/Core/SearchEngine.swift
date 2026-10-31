@@ -619,7 +619,7 @@ final class SearchEngine {
                     var kindByRef: [String: ItemKind] = [:]
                     var hpCount: [String: Int] = [:]
                     for t in words {
-                        var h: Set<String> = [:]
+                        var h: Set<String> = []
                         let lt = QueryUnderstanding.labelTokens(t)
                         if !lt.isEmpty {
                             if imageKinds.contains(.photo), let rows = try? store.allPhotoLabels() {
