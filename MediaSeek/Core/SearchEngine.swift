@@ -611,12 +611,17 @@ final class SearchEngine {
                     // OCR 把无映射词抬成「高精词」后与他集求交(文字出现≠
                     // 画面内容);批110 乘性约束的死因:每词都要牌命中,
                     // 「美女与卢沟桥合影」只有 OCR 一侧证据会被乘性归零。
-                    // 定稿公式:筛子 S=∪(每词的 照片标签∪帧标签∪用户命名∪
-                    // OCR——跨词并集,至少一词有事实证据即过筛,文字证据
-                    // 难得误报);基底 B=∩(每词 SigLIP 宽召回 0.070);结果
-                    // =B∩S(S 非空,免尾线)或 B+尾线(S 空,批108 行为)。
-                    // 语义相关性由 B 保证(每词都过 SigLIP 宽召回),事实
-                    // 证据由 S 保证(至少一词),双高原巧合(无任何证据)被筛掉
+                    // 定稿公式:筛子 S=∪(每词的 照片标签∪帧标签∪用户命名,
+                    // 跨词并集,至少一词有画面事实证据即过筛);基底 B=∩(每词
+                    // SigLIP 宽召回 0.070);结果=B∩S(S 非空,免尾线)或
+                    // B+尾线(S 空,批108 行为)。语义相关性由 B 保证(每词都
+                    // 过 SigLIP 宽召回),事实证据由 S 保证(至少一词),双高
+                    // 原巧合(无任何证据)被筛掉。
+                    // 批112:OCR 剔出筛子(263 装机实锤)——OCR 命中的截图类
+                    // 与 SigLIP 高原交集天然重叠(写着「沙发」的广告截图恰是
+                    // SigLIP 高原分照片),文字证据≠画面证据,筛子只收画面
+                    // 事实(标签牌/帧标签/用户命名);免尾线维持(筛后量级
+                    // 个位数-十几,远不到尾线治的灌屏量级)
                     var sieve: Set<String> = []
                     for t in words {
                         let lt = QueryUnderstanding.labelTokens(t)
@@ -639,8 +644,6 @@ final class SearchEngine {
                         for vt in QueryUnderstanding.scriptVariants(of: t) {
                             for r in ((try? store.searchUserTags(query: vt)) ?? [])
                                 where among?.contains(r) ?? true { sieve.insert(r) }
-                            for r in ((try? store.searchOCR(query: vt)) ?? [])
-                                where among?.contains(r.refKey) ?? true { sieve.insert(r.refKey) }
                         }
                     }
                     // 基底:全部词 SigLIP 宽召回交集(批107 机制)
