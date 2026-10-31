@@ -567,8 +567,10 @@ final class SearchEngine {
             // 短语日志失真;标签只能来自实际执行的分支,平均失败降级也自动正确
             let q: [Float]
             var embedPath: String
-            // 批109:非 nil=语义:多词交集路径(阶梯/视频帧/空态三处按它改道)
+            // 批109:非 nil=语义:多词交集路径(阶梯/视频帧/空态三处按它改道);
+            // sieved=高精筛子生效(免尾线——收口已由筛子完成)
             var isectWords: [String]? = nil
+            var isectSieved = false
             if spec.channel == .native {
                 // 批94:原生向量——唯一规则=官方模板壳+spec.body 原文(未过
                 // core 清洗/时间剥离,也不经词典/桥/平均三道变换);多词语句
@@ -602,40 +604,44 @@ final class SearchEngine {
             var hits: [SearchHit] = []
             if imageKinds.contains(.photo) {
                 if let words = isectWords {
-                    // 批110(用户设计修正):标签牌乘性约束 × SigLIP 交集。
-                    // 批109 分层判定的装机否证(262:四查询全 0)——OCR 维度把
-                    // 「阳光」抬成高精词(文字含"阳光"的截图≠画面是阳光),
-                    // OCR 集合与他集不交→阳光海滩 38 张真海滩全灭;「美女」的
-                    // 标签映射(woman 族,第五十六批剔 person 防灌水)够不着
-                    // 桥上游客照的 person 牌→bridge∩woman=0。修正:OCR/用户
-                    // 命名彻底剔除(独立通道展示,不判画面内容);标签牌只作
-                    // 乘性约束(牌上有该词 token=机器确认画面有它),SigLIP
-                    // 宽召回交集做基底;result=∩(每词SigLIP宽召回)∩∩(有
-                    // 标签命中的词的牌集合),组级尾线收口。预期:桥美女=
-                    // bridge牌∩SigLIP交集≈几十-几百(有人有桥的非零下限),
-                    // 猫沙发=cat∩sofa牌先断根=0,阳光海滩=beach牌∩交集≈30
-                    var labelConstraints: [Set<String>] = []
+                    // 批111(用户设计定稿):高精并集筛子 × SigLIP 交集。
+                    // 目的与手段(用户教义):目的是「符合现实的结果」,高精
+                    // 筛子与尾线都只是手段——筛子有效则免尾线(收口的活已被
+                    // 筛子干了),无筛子才保留尾线。批109 逐词分层的死因:
+                    // OCR 把无映射词抬成「高精词」后与他集求交(文字出现≠
+                    // 画面内容);批110 乘性约束的死因:每词都要牌命中,
+                    // 「美女与卢沟桥合影」只有 OCR 一侧证据会被乘性归零。
+                    // 定稿公式:筛子 S=∪(每词的 照片标签∪帧标签∪用户命名∪
+                    // OCR——跨词并集,至少一词有事实证据即过筛,文字证据
+                    // 难得误报);基底 B=∩(每词 SigLIP 宽召回 0.070);结果
+                    // =B∩S(S 非空,免尾线)或 B+尾线(S 空,批108 行为)。
+                    // 语义相关性由 B 保证(每词都过 SigLIP 宽召回),事实
+                    // 证据由 S 保证(至少一词),双高原巧合(无任何证据)被筛掉
+                    var sieve: Set<String> = []
                     for t in words {
                         let lt = QueryUnderstanding.labelTokens(t)
-                        guard !lt.isEmpty else { continue }
-                        var lab: Set<String> = []
-                        if imageKinds.contains(.photo), let rows = try? store.allPhotoLabels() {
-                            for row in rows where among?.contains(row.refKey) ?? true {
-                                let toks = Set(row.title.lowercased()
-                                    .components(separatedBy: CharacterSet(charactersIn: ", ")))
-                                if !lt.intersection(toks).isEmpty { lab.insert(row.refKey) }
+                        if !lt.isEmpty {
+                            if imageKinds.contains(.photo), let rows = try? store.allPhotoLabels() {
+                                for row in rows where among?.contains(row.refKey) ?? true {
+                                    let toks = Set(row.title.lowercased()
+                                        .components(separatedBy: CharacterSet(charactersIn: ", ")))
+                                    if !lt.intersection(toks).isEmpty { sieve.insert(row.refKey) }
+                                }
+                            }
+                            if scope == .all || scope == .video, let rows = try? store.allVideoFrameLabels() {
+                                for row in rows where among?.contains(row.refKey) ?? true {
+                                    let toks = Set(row.title.lowercased()
+                                        .components(separatedBy: CharacterSet(charactersIn: ", ")))
+                                    if !lt.intersection(toks).isEmpty { sieve.insert(row.refKey) }
+                                }
                             }
                         }
-                        if scope == .all || scope == .video, let rows = try? store.allVideoFrameLabels() {
-                            for row in rows where among?.contains(row.refKey) ?? true {
-                                let toks = Set(row.title.lowercased()
-                                    .components(separatedBy: CharacterSet(charactersIn: ", ")))
-                                if !lt.intersection(toks).isEmpty { lab.insert(row.refKey) }
-                            }
+                        for vt in QueryUnderstanding.scriptVariants(of: t) {
+                            for r in ((try? store.searchUserTags(query: vt)) ?? [])
+                                where among?.contains(r) ?? true { sieve.insert(r) }
+                            for r in ((try? store.searchOCR(query: vt)) ?? [])
+                                where among?.contains(r.refKey) ?? true { sieve.insert(r.refKey) }
                         }
-                        // 空集=该词全库无牌——乘性约束下直接归零(诚实空:
-                        // 库里没有画面同时含两词的照片)
-                        labelConstraints.append(lab)
                     }
                     // 基底:全部词 SigLIP 宽召回交集(批107 机制)
                     var bKeys: Set<String>? = nil
@@ -653,8 +659,9 @@ final class SearchEngine {
                         bKeys = bKeys.map { $0.intersection(keys) } ?? keys
                     }
                     var result = bKeys ?? []
-                    for lab in labelConstraints where !lab.isEmpty {
-                        result.formIntersection(lab)
+                    if !sieve.isEmpty {
+                        result.formIntersection(sieve)
+                        isectSieved = true
                     }
                     // SigLIP min 分:结果集上逐词打分(排序+摘要读数;视频
                     // 多帧同 refKey 保最高,与性别对比同规)
@@ -676,8 +683,8 @@ final class SearchEngine {
                                   space: "isect", title: nil, date: nil,
                                   score: sigMin[ref] ?? 0, color: nil)
                     }.sorted { $0.score > $1.score }
-                    // 路径标签:有牌约束=标签∩语义;无=纯语义交集
-                    embedPath = labelConstraints.contains(where: { !$0.isEmpty }) ? "标签∩语义" : "交集"
+                    // 路径标签:有筛子=高精筛∩语义(免尾线);无=纯语义交集(尾线照切)
+                    embedPath = isectSieved ? "高精筛∩语义" : "交集"
                     // 交集空:空态提示用首词最高分(下方空态守卫段按 isectWords
                     // 跳过;不引行号——本段插入会推移下游行号,批107 验收教训)
                     if hits.isEmpty { lastSemanticTopScore = firstWordTop }
@@ -805,9 +812,9 @@ final class SearchEngine {
             // 性别词深潜豁免尾线(第六十三批):尾线以最佳分为基准,最佳 0.35 时
             // 85% 线=0.298,下探捞回的低分段真命中会被一刀全砍,深潜白做;
             // 性别词的噪声闸=对比边距(0.010),尾线职责由它接管
-            // 批110:交集照常尾线(标签约束已断根杂音,尾线收 SigLIP 侧排序尾;
-            // 性别词豁免与全局同规——深潜的裁决在对比边距)
-            let tailFactor: Float = genderDive ? 0 : (best >= 0.13 * gate ? 0.85 : 0.95)
+            // 批111:筛子有效免尾线(目的与手段:收口的活已由筛子干了);
+            // 无筛子才尾线;性别词豁免与全局同规(深潜的裁决在对比边距)
+            let tailFactor: Float = genderDive || isectSieved ? 0 : (best >= 0.13 * gate ? 0.85 : 0.95)
             // 批104⑤:语义查询摘要行——分数带从「推断」变「读数」:边界项抖动
             // (255 装机 原生语义:阳光 9→10 的 ±0.005 疑云)、档位取舍、尾线
             // 切割,此后全部凭 diag.log 原始分定案,不再靠猜
