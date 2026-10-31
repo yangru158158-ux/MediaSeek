@@ -567,8 +567,10 @@ final class SearchEngine {
             // 短语日志失真;标签只能来自实际执行的分支,平均失败降级也自动正确
             let q: [Float]
             var embedPath: String
-            // 批107:非 nil=语义:多词交集路径(阶梯/视频帧/空态三处按它改道)
+            // 批109:非 nil=语义:多词交集路径(阶梯/视频帧/空态三处按它改道);
+            // allPrecise=全部词都有高精度命中(唯一免组级尾线的交集形态)
             var isectWords: [String]? = nil
+            var isectAllPrecise = false
             if spec.channel == .native {
                 // 批94:原生向量——唯一规则=官方模板壳+spec.body 原文(未过
                 // core 清洗/时间剥离,也不经词典/桥/平均三道变换);多词语句
@@ -664,12 +666,10 @@ final class SearchEngine {
                     }
                     // b:低精词逐词第三档地板宽召回(批107 机制)取交集
                     var bKeys: Set<String>? = nil
-                    var wordCount = 0
                     var firstWordTop: Float = 0
                     for t in lowWords {
                         guard let qw = try? siglip.embedQuery(
                             Self.siglipQuery(t, nativeZh: nativeZh)) else { continue }
-                        wordCount += 1
                         let exempt = QueryUnderstanding.floorExemptWords.contains(t)
                             || QueryUnderstanding.chineseCounterpart(for: t) != nil
                         let wh = Self.dedupByRef(try store.search(
@@ -699,7 +699,7 @@ final class SearchEngine {
                                 Self.siglipQuery(t, nativeZh: nativeZh)) else { continue }
                             let scored = Self.dedupByRef((try? store.search(
                                 space: siglip.space, kinds: [.photo, .videoFrame], query: qw,
-                                limit: max(topK, result.count * 2), minScore: -1, among: result)) ?? [])
+                                limit: max(topK, result.count * 8), minScore: -1, among: result)) ?? [])
                             for s in scored {
                                 sigMin[s.refKey] = min(sigMin[s.refKey] ?? .greatestFiniteMagnitude, s.score)
                             }
@@ -712,13 +712,11 @@ final class SearchEngine {
                     }.sorted {
                         (hpCount[$0.refKey] ?? 0, $0.score) > (hpCount[$1.refKey] ?? 0, $1.score)
                     }
-                    // 全低精场景保留批108 尾线;高精参与的场景免尾线(事实即精度,
-                    // 高精交集的基数由现实共现决定,不由分数分布决定)
-                    if precise.isEmpty, wordCount > 0 {
-                        let best = hits.first?.score ?? 0
-                        let tail = best >= 0.13 * gate ? Float(0.85) : Float(0.95)
-                        hits = hits.filter { $0.score >= best * tail }
-                    }
+                    // 尾线统一在组级执行(摘要行双口径可观测:命中=切割前,
+                    // 尾线后=切割后):全低精/混合场景都切(混合的 b 侧宽召回
+                    // 交集不收敛,批108 实锤灌屏;验收 medium 落实),仅全高精
+                    // 免切(事实即精度,基数由现实共现决定,不由分数分布决定)
+                    isectAllPrecise = !precise.isEmpty && lowWords.isEmpty
                     // 路径标签三态(摘要行可观测:分层走的是哪条)
                     if !precise.isEmpty { embedPath = lowWords.isEmpty ? "高精交集" : "高精∩语义" }
                     // 交集空:空态提示用首词最高分(下方空态守卫段按 isectWords
@@ -848,10 +846,10 @@ final class SearchEngine {
             // 性别词深潜豁免尾线(第六十三批):尾线以最佳分为基准,最佳 0.35 时
             // 85% 线=0.298,下探捞回的低分段真命中会被一刀全砍,深潜白做;
             // 性别词的噪声闸=对比边距(0.010),尾线职责由它接管
-            // 批109:交集路径的尾线在交集块内自治(全低精=批108 尾线,高精
-            // 参与=免切)——组级必须免除,否则高精交集会被 SigLIP best 二次
-            // 错切(高精命中但 SigLIP 低分的真组合照被砍,桥美女几百→剩高分)
-            let tailFactor: Float = genderDive || isectWords != nil
+            // 批109:交集路径的尾线仅在「全高精」形态免除(事实即精度);
+            // 全低精/混合形态照常切——混合场景 b 侧宽召回交集不收敛(批108
+            // 实锤),验收 medium 修正:提交说明本就承诺 b 含尾线,块内漏切
+            let tailFactor: Float = genderDive || isectAllPrecise
                 ? 0 : (best >= 0.13 * gate ? 0.85 : 0.95)
             // 批104⑤:语义查询摘要行——分数带从「推断」变「读数」:边界项抖动
             // (255 装机 原生语义:阳光 9→10 的 ±0.005 疑云)、档位取舍、尾线
