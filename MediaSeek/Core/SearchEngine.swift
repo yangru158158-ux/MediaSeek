@@ -566,7 +566,7 @@ final class SearchEngine {
             // 批96 英文整串与批93 平均分支错标成「模板/条件原生」,标准版英文
             // 短语日志失真;标签只能来自实际执行的分支,平均失败降级也自动正确
             let q: [Float]
-            let embedPath: String
+            var embedPath: String
             // 批107:非 nil=语义:多词交集路径(阶梯/视频帧/空态三处按它改道)
             var isectWords: [String]? = nil
             if spec.channel == .native {
@@ -590,7 +590,7 @@ final class SearchEngine {
                 // q 置空:本路径不消费它,下游三处消费点均按 isectWords 跳过
                 isectWords = semanticTerms
                 q = []
-                embedPath = "交集"
+                embedPath = "交集"   // 批109:分层结果在下方交集块内细化(高精交集/高精∩语义)
             } else {
                 let joined = semanticTerms.joined(separator: " ")
                 q = try siglip.embedQuery(Self.siglipQuery(joined, nativeZh: nativeZh))
@@ -602,19 +602,71 @@ final class SearchEngine {
             var hits: [SearchHit] = []
             if imageKinds.contains(.photo) {
                 if let words = isectWords {
-                    // 批107:逐词第三档地板宽召回(0.08×gate,证件豁免词 0.04
-                    // 固定,与 AND 线批103/批91 同规)取 refKey 交集;综合分
-                    // =min(各词分)——短板语义:广告截图沙发分高猫分低,min
-                    // 压尾,真组合照两词都像而领先。任一词嵌入失败跳过该词,
-                    // 全失败=空交集诚实空。⚠️批108 实测教训:宽召回两词基数
-                    // 都是几千张时交集不收敛(260 装机 2618 张),收口靠下方
-                    // 尾线(min 分排序+尾线切割双精选),不靠交集基数本身
-                    var common: Set<String>? = nil
-                    var perWord: [String: [Float]] = [:]
-                    var template: [String: SearchHit] = [:]
+                    // 批109(用户设计):高精度维度优先分层交集——SigLIP 分数带里
+                    // 「真组合」与「双高分巧合」完全同带(261 装机:猫沙发真值 0 张
+                    // 但 226 张 min∈[0.102,0.146],桥美女真值几百张 min∈[0.105,0.142],
+                    // 任何分数线无法同时给出 0 与几百),判「现实同框」只能靠事实性
+                    // 通道。每词先取高精度命中 H(t)=照片Vision标签∪视频帧标签∪
+                    // 用户命名∪OCR(标签牌 token 级比对零幻觉;scriptVariants 简繁
+                    // 并查);分层合成:
+                    //   全部词有 H → ∩H(t),免尾线(事实即精度)
+                    //   部分词有 H → a=∩H(高精词) ∩ b=低精词 SigLIP 交集+尾线
+                    //   全部词无 H → ∩S+尾线(=批108 行为,阳光 海滩 38 张保持)
+                    // 排序:高精度命中词数降序(事实多者前)→SigLIP min 分降序;
+                    // 空交集诚实空(猫沙发=cat∩couch=0,符合现实)
+                    var precise: [(word: String, keys: Set<String>)] = []
+                    var lowWords: [String] = []
+                    var kindByRef: [String: ItemKind] = [:]
+                    var hpCount: [String: Int] = [:]
+                    for t in words {
+                        var h: Set<String> = [:]
+                        let lt = QueryUnderstanding.labelTokens(t)
+                        if !lt.isEmpty {
+                            if imageKinds.contains(.photo), let rows = try? store.allPhotoLabels() {
+                                for row in rows where among?.contains(row.refKey) ?? true {
+                                    let toks = Set(row.title.lowercased()
+                                        .components(separatedBy: CharacterSet(charactersIn: ", ")))
+                                    if !lt.intersection(toks).isEmpty {
+                                        h.insert(row.refKey)
+                                        kindByRef[row.refKey] = .photo
+                                    }
+                                }
+                            }
+                            if scope == .all || scope == .video, let rows = try? store.allVideoFrameLabels() {
+                                for row in rows where among?.contains(row.refKey) ?? true {
+                                    let toks = Set(row.title.lowercased()
+                                        .components(separatedBy: CharacterSet(charactersIn: ", ")))
+                                    if !lt.intersection(toks).isEmpty {
+                                        h.insert(row.refKey)
+                                        if kindByRef[row.refKey] == nil { kindByRef[row.refKey] = .videoFrameLabel }
+                                    }
+                                }
+                            }
+                        }
+                        for vt in QueryUnderstanding.scriptVariants(of: t) {
+                            for r in ((try? store.searchUserTags(query: vt)) ?? [])
+                                where among?.contains(r) ?? true {
+                                h.insert(r)
+                                if kindByRef[r] == nil { kindByRef[r] = .photo }
+                            }
+                            for r in ((try? store.searchOCR(query: vt)) ?? [])
+                                where among?.contains(r.refKey) ?? true {
+                                h.insert(r.refKey)
+                                if kindByRef[r.refKey] == nil { kindByRef[r.refKey] = .photo }
+                            }
+                        }
+                        if h.isEmpty {
+                            lowWords.append(t)
+                        } else {
+                            for k in h { hpCount[k, default: 0] += 1 }
+                            precise.append((t, h))
+                        }
+                    }
+                    // b:低精词逐词第三档地板宽召回(批107 机制)取交集
+                    var bKeys: Set<String>? = nil
                     var wordCount = 0
                     var firstWordTop: Float = 0
-                    for t in words {
+                    for t in lowWords {
                         guard let qw = try? siglip.embedQuery(
                             Self.siglipQuery(t, nativeZh: nativeZh)) else { continue }
                         wordCount += 1
@@ -623,26 +675,55 @@ final class SearchEngine {
                         let wh = Self.dedupByRef(try store.search(
                             space: siglip.space, kinds: [.photo], query: qw,
                             limit: topK, minScore: exempt ? 0.04 : 0.08 * gate, among: among))
-                        if common == nil { firstWordTop = wh.first?.score ?? 0 }
+                        if bKeys == nil { firstWordTop = wh.first?.score ?? 0 }
                         let keys = Set(wh.map(\.refKey))
-                        common = common.map { $0.intersection(keys) } ?? keys
-                        for h in wh {
-                            perWord[h.refKey, default: []].append(h.score)
-                            if template[h.refKey] == nil { template[h.refKey] = h }
+                        bKeys = bKeys.map { $0.intersection(keys) } ?? keys
+                    }
+                    // 分层合成:全高精=∩H;混合=∩H ∩ b;全低精=∩S(∩b 集合)
+                    var result: Set<String>
+                    if precise.isEmpty {
+                        result = bKeys ?? []
+                    } else if let first = precise.first {
+                        var a = first.keys
+                        for p in precise.dropFirst() { a.formIntersection(p.keys) }
+                        result = lowWords.isEmpty ? a : a.intersection(bKeys ?? [])
+                    } else {
+                        result = []
+                    }
+                    // SigLIP min 分:结果集上逐词打分(排序次键+摘要读数;视频
+                    // 多帧同 refKey 保最高,与性别对比同规)
+                    var sigMin: [String: Float] = [:]
+                    if !result.isEmpty {
+                        for t in words {
+                            guard let qw = try? siglip.embedQuery(
+                                Self.siglipQuery(t, nativeZh: nativeZh)) else { continue }
+                            let scored = Self.dedupByRef((try? store.search(
+                                space: siglip.space, kinds: [.photo, .videoFrame], query: qw,
+                                limit: max(topK, result.count * 2), minScore: -1, among: result)) ?? [])
+                            for s in scored {
+                                sigMin[s.refKey] = min(sigMin[s.refKey] ?? .greatestFiniteMagnitude, s.score)
+                            }
                         }
                     }
-                    hits = (common ?? []).compactMap { ref -> SearchHit? in
-                        guard wordCount > 0, let base = template[ref],
-                              let scores = perWord[ref], scores.count == wordCount
-                        else { return nil }
-                        return SearchHit(kind: base.kind, refKey: ref,
-                                         frameIndex: base.frameIndex, space: base.space,
-                                         title: base.title, date: base.date,
-                                         score: scores.min() ?? 0, color: base.color)
-                    }.sorted { $0.score > $1.score }
-                    // 交集空:空态提示用首词最高分(下方空态守卫段按 isectWords 跳过;
-                    // 不引行号——本段插入会推移下游行号,批107 验收 low 教训)
-                    if hits.isEmpty { lastSemanticTopScore = firstWordTop }
+                    hits = result.map { ref -> SearchHit in
+                        SearchHit(kind: kindByRef[ref] ?? .photo, refKey: ref, frameIndex: 0,
+                                  space: "isect", title: nil, date: nil,
+                                  score: sigMin[ref] ?? 0, color: nil)
+                    }.sorted {
+                        (hpCount[$0.refKey] ?? 0, $0.score) > (hpCount[$1.refKey] ?? 0, $1.score)
+                    }
+                    // 全低精场景保留批108 尾线;高精参与的场景免尾线(事实即精度,
+                    // 高精交集的基数由现实共现决定,不由分数分布决定)
+                    if precise.isEmpty, wordCount > 0 {
+                        let best = hits.first?.score ?? 0
+                        let tail = best >= 0.13 * gate ? Float(0.85) : Float(0.95)
+                        hits = hits.filter { $0.score >= best * tail }
+                    }
+                    // 路径标签三态(摘要行可观测:分层走的是哪条)
+                    if !precise.isEmpty { embedPath = lowWords.isEmpty ? "高精交集" : "高精∩语义" }
+                    // 交集空:空态提示用首词最高分(下方空态守卫段按 isectWords
+                    // 跳过;不引行号——本段插入会推移下游行号,批107 验收教训)
+                    if hits.isEmpty, precise.isEmpty { lastSemanticTopScore = firstWordTop }
                 } else if genderDive {
                     // 深潜:第三档地板直取(阶梯与薄判都不适用——品类词要的是
                     // 全量召回,质量裁决交给下方性别对比线)
@@ -767,12 +848,11 @@ final class SearchEngine {
             // 性别词深潜豁免尾线(第六十三批):尾线以最佳分为基准,最佳 0.35 时
             // 85% 线=0.298,下探捞回的低分段真命中会被一刀全砍,深潜白做;
             // 性别词的噪声闸=对比边距(0.010),尾线职责由它接管
-            // 批108:交集恢复尾线——批107 曾免(「交集即精度」),260 装机实锤
-            // 该教义不成立:两词宽召回基数都是几千张(截图类对任何词都有
-            // 0.07-0.11 基础相似度),交集不收敛(阳光海滩 2618 张灌屏);min
-            // 短板分把杂音(两词都只有基础相似度)压在 0.09-0.11 带,尾线
-            // 0.85×best 恰好收口,「两词都像」的排前且幸存
-            let tailFactor: Float = genderDive ? 0 : (best >= 0.13 * gate ? 0.85 : 0.95)
+            // 批109:交集路径的尾线在交集块内自治(全低精=批108 尾线,高精
+            // 参与=免切)——组级必须免除,否则高精交集会被 SigLIP best 二次
+            // 错切(高精命中但 SigLIP 低分的真组合照被砍,桥美女几百→剩高分)
+            let tailFactor: Float = genderDive || isectWords != nil
+                ? 0 : (best >= 0.13 * gate ? 0.85 : 0.95)
             // 批104⑤:语义查询摘要行——分数带从「推断」变「读数」:边界项抖动
             // (255 装机 原生语义:阳光 9→10 的 ±0.005 疑云)、档位取舍、尾线
             // 切割,此后全部凭 diag.log 原始分定案,不再靠猜
