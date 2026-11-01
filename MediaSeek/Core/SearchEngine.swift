@@ -1032,6 +1032,43 @@ final class SearchEngine {
         // (220 用户实测:全部范围搜得到月结单,文件范围 0)。放行后
         // scopeAllowedKinds(.file)=[.file] 天然只出文件,照片/视频不会泄
         if !semanticOnly || (spec.channel == .semantic && visualTerms.count >= 2) {
+            // 批120:语义:多词的文字命中=词间交集——用户原话「多词**都**命中
+            // OCR 的直接显示文字栏目」("都"=全部词的文字都在);批119 误用本
+            // 通道既有的「或」规则(每词独立并集),271 装机实锤「猫 沙发」
+            // 文字 tab=68 张购物截图(天猫的猫∪商品页沙发)灌屏;AND 化后
+            // =同时含两词文字的(269 实测≈2 张)。单词/裸搜照旧或语义
+            if spec.channel == .semantic && visualTerms.count >= 2 {
+                var ocrSets: [Set<String>] = []
+                for t in terms where !t.isEmpty {
+                    var keys = Set<String>()
+                    for term in [t] + (QueryUnderstanding.ocrAliases[t] ?? [])
+                        + QueryUnderstanding.bridgedVariants(for: t)
+                        + (QueryUnderstanding.simplified(t) != t
+                           ? [QueryUnderstanding.simplified(t)]
+                               + (QueryUnderstanding.ocrAliases[QueryUnderstanding.simplified(t)] ?? []) : []) {
+                        for r in ((try? store.searchOCR(query: term)) ?? [])
+                            where among?.contains(r.refKey) ?? true { keys.insert(r.refKey) }
+                    }
+                    ocrSets.append(keys)
+                }
+                if let first = ocrSets.first, !first.isEmpty {
+                    var common = first
+                    for s in ocrSets.dropFirst() { common.formIntersection(s) }
+                    let andClassifier = OCRRefClassifier(store: store)
+                    let kinds = andClassifier.classify(Array(common))
+                    let rows = ((try? store.searchOCR(query: terms.joined(separator: " "))) ?? [])
+                    var snippets: [String: String] = [:]
+                    for r in rows { snippets[r.refKey] = Self.ocrSnippet(r.text, terms.first ?? "") }
+                    var andHits: [SearchHit] = []
+                    for ref in common {
+                        guard let k = kinds[ref] else { continue }
+                        andHits.append(SearchHit(kind: k, refKey: ref, frameIndex: 0,
+                                                 space: "ocr", title: "含「\(terms.joined(separator: " "))」:\(snippets[ref] ?? "")",
+                                                 date: nil, score: 1.0, color: nil))
+                    }
+                    if !andHits.isEmpty { channels.append((8.0, andHits)) }
+                }
+            } else {
             let allowedKinds = Self.scopeAllowedKinds(scope)
             let classifier = OCRRefClassifier(store: store)
             var seen = Set<String>()
@@ -1082,6 +1119,7 @@ final class SearchEngine {
                 // 崩坏。现在无分隔长词只做整词完整子串匹配(上方 searchOCR);
                 // 语序记反/说法不同的模糊召回改用 语义: 或拆多词空格
             }
+            }   // 批120:else(非语义:多词)的原逐词并集通道闭合
         }
 
         for ch in channels {
