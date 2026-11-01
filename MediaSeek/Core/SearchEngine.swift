@@ -384,9 +384,11 @@ final class SearchEngine {
                                topK: Int, siglip: SigLIPEmbedder?, dateRange: QueryDateRange?,
                                placeRegion: CLCircularRegion?, placeLabel: String?,
                                among: Set<String>? = nil) async throws -> SearchOutcome {
-        // 只对裸搜(channel == .any)生效:语义: 前缀必须保持排他(只要语义
-        // 命中),不得被改道 and: 并入 OCR——验收 medium 实锤(此前只看
-        // scope 和词数,语义:多词被误改道且未在提交说明声明)
+        // 只对裸搜(channel == .any)生效:语义: 前缀排他(只要语义命中),
+        // 不得被改道 and: 并入 OCR——验收 medium 实锤(此前只看 scope 和
+        // 词数,语义:多词被误改道且未在提交说明声明)。批119 起 OCR 文字
+        // 通道对语义:多词放行(分流定稿:文字证据归文字 tab),此注释的
+        // 「排他」指本函数的 AND 改道,与通道放行不冲突
         // 批96:纯 ASCII 多词(英文短语/描述句)不改道——整串概念走主管线
         if spec.channel == .any, Self.splitTerms(query).count >= 2,
            !Self.isAsciiPhrase(query) {
@@ -1061,12 +1063,17 @@ final class SearchEngine {
                     for s in ocrSets.dropFirst() { common.formIntersection(s) }
                     let andClassifier = OCRRefClassifier(store: store)
                     let kinds = andClassifier.classify(Array(common))
-                    let rows = ((try? store.searchOCR(query: terms.joined(separator: " "))) ?? [])
+                    // 批120修(验收 medium):范围过滤同规——批43(视频 OCR 泄
+                    // 照片)/批71(文件范围)两次教训都挂在这,AND 分支不得豁免
+                    let allowedKinds = Self.scopeAllowedKinds(scope)
+                    // 批120修(验收 low):片段用第一词查(整串 LIKE 连续子串
+                    // 在两词分散命中的照片上大多落空,标题退化为无片段不可核对)
+                    let rows = ((try? store.searchOCR(query: terms.first ?? "")) ?? [])
                     var snippets: [String: String] = [:]
                     for r in rows { snippets[r.refKey] = Self.ocrSnippet(r.text, terms.first ?? "") }
                     var andHits: [SearchHit] = []
                     for ref in common {
-                        guard let k = kinds[ref] else { continue }
+                        guard let k = kinds[ref], allowedKinds.contains(k) else { continue }
                         andHits.append(SearchHit(kind: k, refKey: ref, frameIndex: 0,
                                                  space: "ocr", title: "含「\(terms.joined(separator: " "))」:\(snippets[ref] ?? "")",
                                                  date: nil, score: 1.0, color: nil))
