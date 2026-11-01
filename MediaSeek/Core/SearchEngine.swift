@@ -646,13 +646,12 @@ final class SearchEngine {
                     var wordDiag: [String] = []
                     var labelCount = 0
                     var namingCount = 0
-                    var ocrCount = 0
                     for t in words {
                         let en = QueryUnderstanding.english(for: t)
                         var h: Set<String> = []
                         labelCount = 0
                         namingCount = 0
-                        ocrCount = 0
+
                         var isPlace = false
                         // 批118修2:地名维度——城市名无视觉特征(教义),SigLIP 是
                         // 死路(269 实锤 上海=SigLIP·R1拦:2 张噪声∩女孩 OCR=2 张
@@ -690,21 +689,14 @@ final class SearchEngine {
                                     }
                                 }
                             }
+                            // 批119(用户分流定稿):OCR 不参与语义交集——文字
+                            // 证据归文字栏目(下方 OCR 通道在语义:多词时放行),
+                            // 语义 tab 只收画面证据(牌∪命名∪地名GPS∩SigLIP)。
+                            // 批117 曾并入 a(杨如电脑 8 张)+批118 曾丢弃——
+                            // 都不如分流干净:每张照片去它该去的栏
                             for vt in QueryUnderstanding.scriptVariants(of: t) {
                                 for r in ((try? store.searchUserTags(query: vt)) ?? [])
                                     where among?.contains(r) ?? true { namingCount += h.insert(r).inserted ? 1 : 0 }
-                            }
-                            // 批118修1:OCR 降级为证据增强——只有已有牌/命名证据
-                            // (已精确)的词才并入 OCR,不单独抬词成精确词。269 实锤:
-                            // 阳光(抽象词,词典未收)被 OCR 23 张截图抬成精确→全精确
-                            // 交集形态翻转,beach 牌 17 张真海滩照无文字证据全灭,
-                            // 2 张双词文字截图(含自指的搜索结果截图)上位。杨如
-                            // (命名473)/桥(牌11)类已精确词照常增强不受影响
-                            if !h.isEmpty {
-                                for vt in QueryUnderstanding.scriptVariants(of: t) {
-                                    for r in ((try? store.searchOCR(query: vt)) ?? [])
-                                        where among?.contains(r.refKey) ?? true { ocrCount += h.insert(r.refKey).inserted ? 1 : 0 }
-                                }
                             }
                         }
                         if h.isEmpty {
@@ -714,7 +706,7 @@ final class SearchEngine {
                             preciseSets.append(h)
                             wordDiag.append(isPlace
                                 ? "\(t)=精确·地名∪名\(namingCount):\(h.count)"
-                                : "\(t)=精确·牌\(labelCount)∪名\(namingCount)∪字\(ocrCount):\(h.count)")
+                                : "\(t)=精确·牌\(labelCount)∪名\(namingCount):\(h.count)")
                         }
                     }
                     // a 的词间运算按形态分流(用户定规):
@@ -1023,7 +1015,10 @@ final class SearchEngine {
 
         // OCR 文字精确通道:「或」语义——每个词独立命中"含该文字"的照片,
         // 与视觉通道取并集;标题附命中片段,方便核对为什么命中(小字/页脚也会算)
-        // 语义: 前缀模式下跳过(只要语义命中)
+        // 语义: 单词前缀模式下跳过(只要语义命中);批119:语义:多词放行——
+        // 文字证据归文字栏目(用户分流定稿:语义 tab=画面证据[牌∪命名∪GPS∩
+        // SigLIP],文字 tab=OCR 文字命中,互不掺和——「都命中 OCR 的直接显示
+        // 文字栏目,不用进行下一步」;批111 用户原话的落地)
         // 第四十三批:视频范围放行 + 命中按范围过滤(与 searchScoped 的
         // d04d122 同规)。此前通道只在 全部/照片 范围跑:视频范围裸搜单词
         // 恒空——转写文字在 ocr_text 里,文字: 前缀与多词 AND 走 searchScoped
@@ -1036,7 +1031,7 @@ final class SearchEngine {
         // 单通道顶替,两字词(美團)埋在长文里相似度过不了离群闸 → 恒 0
         // (220 用户实测:全部范围搜得到月结单,文件范围 0)。放行后
         // scopeAllowedKinds(.file)=[.file] 天然只出文件,照片/视频不会泄
-        if !semanticOnly {
+        if !semanticOnly || (spec.channel == .semantic && visualTerms.count >= 2) {
             let allowedKinds = Self.scopeAllowedKinds(scope)
             let classifier = OCRRefClassifier(store: store)
             var seen = Set<String>()
