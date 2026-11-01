@@ -497,7 +497,13 @@ final class SearchEngine {
         let tokens = QueryUnderstanding.labelTokens(concept)
         // 有标签实据的视频 refKey(查询词∩帧标签非空)——视觉通道放行视频帧的唯一证据
         var videoLabelRefs: Set<String> = []
-        if !tokens.isEmpty, spec.channel != .text {
+        // 批115:语义:多词改道标志——仅照片范围(交集块包在 contains(.photo)
+        // 内,视频页签交集块不执行,抑制即恒空=验收 medium;视频页签保留
+        // 旧通道照常显示帧标签命中)。改道时牌/命名证据只进交集块 a 侧,
+        // 本通道整体跳过(含计算,验收 low:全量算完丢弃纯浪费)
+        let isectDivert = spec.channel == .semantic && semanticTerms.count >= 2
+            && imageKinds.contains(.photo)
+        if !tokens.isEmpty, spec.channel != .text, !isectDivert {
             // 照片标签行(视频范围不得参与,否则照片漏进视频结果)
             if imageKinds.contains(.photo), let rows = try? store.allPhotoLabels() {
                 var scored: [(refKey: String, matches: Int, title: String)] = []
@@ -534,17 +540,9 @@ final class SearchEngine {
                 }
             }
         }
-        // 批115:语义:多词时牌证据只进交集(下方交集块逐词查牌→a∩b),
-        // 不再直显——本通道是单词时代的 OR 直显设计(labelTokens 整串
-        // 并集命中直接上展示柜),266 装机实锤:交集通道正确给 0(猫沙发
-        // 精确交集),界面却被本通道的 cat牌∪sofa牌 15 张 OR 填充淹没。
-        // 仅命中「语义:」前缀多词(channel==.semantic 精确匹配——
-        // 原生语义:/.native、单词、裸搜、and:/or:/文字: 全不受影响;
-        // 裸搜多词本就不走本函数,批41 起走 searchScoped 独立 AND 执行器)
-        if !labelHits.isEmpty,
-           !(spec.channel == .semantic && semanticTerms.count >= 2) {
-            channels.append((1.6, labelHits))
-        }
+        // 批115:isectDivert 时上方已整体跳过计算(labelHits 恒空),
+        // 此处自然不 append;视频页签/单词/裸搜照旧
+        if !labelHits.isEmpty { channels.append((1.6, labelHits)) }
 
         // 视觉通道:SigLIP2 原生多语言(分词实验已证),中文原文直接查;
         // 不再用语义路由——泛化标签(document/screenshot)会被几乎任何词
@@ -880,7 +878,10 @@ final class SearchEngine {
         }
 
         // 用户标签通道:中文子串精确匹配(文字: 排他,不参与)
-        if spec.channel != .text, imageKinds.contains(.photo) {
+        // 批115:语义:多词改道同步——命名证据已在交集块 a 侧(searchUserTags
+        // 逐词并入 h),此处不再 OR 直显(验收 low:残留缺口,有匹配命名时
+        // 「猫沙发=0」会被此通道打破);视频页签/单词/裸搜照旧
+        if spec.channel != .text, imageKinds.contains(.photo), !isectDivert {
             // 第二十一批:多词按「或」逐词命中标签——整串「杨如 男」永远匹配
             // 不到标签「杨如」,他本人的照片在裸搜多词下一张出不来
             var tagRefs = Set<String>()
