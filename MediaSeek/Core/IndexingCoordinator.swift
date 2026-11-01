@@ -1402,9 +1402,14 @@ final class IndexingCoordinator: ObservableObject {
         let handler = VNImageRequestHandler(cgImage: cg, options: [:])
         do {
             try handler.perform([request])
+            // 批121:名额 6→12——人像照前 6 名被 person/adult/outdoor 等主体
+            // 标签占满,背景物(bridge/beach/railing)排 7+ 被截断:272 装机
+            // 实锤全库 bridge 牌仅 11 张(纯风景桥),用户几十张「有桥有人」
+            // 照全没牌;扩到 12 让背景物进榜(连带 beach/猫牌同涨)。置信度
+            // 0.3 门槛不动(以下属瞎猜)。改后需全量重建索引重发牌
             let labels = (request.results ?? [])
                 .filter { $0.confidence >= 0.3 }
-                .prefix(6)
+                .prefix(12)
                 .map { $0.identifier }
             return labels.isEmpty ? nil : labels.joined(separator: ", ")
         } catch {

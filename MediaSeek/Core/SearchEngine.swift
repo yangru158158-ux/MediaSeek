@@ -894,7 +894,12 @@ final class SearchEngine {
             // 视频多帧行数可超 limit;×8 覆盖后仍截断者按 0 放行=与旧行为同,不劣化);
             // ③正反向都用性别单词嵌入打分——hits.score 是整串 concept 的分,
             // 多词查询下与单词反向分做差不符 0.012 的单词-单词标定口径,边距一律对称
-            if let oppTerm = terms.first(where: { QueryUnderstanding.genderOpposite(of: $0) != nil }),
+            // 批121:交集路径豁免性别对比——第五十批的对比闸为「单词性别
+            // 搜索」设计(SigLIP 分不清男女,靠正反向边距);交集场景照片
+            // 已过牌+SigLIP 双重关,再砍边距把 272 的桥美女 7→1(合影/侧脸/
+            // 远景的边距普遍 <0.010)。单词径照旧用对比闸,女人搜索不受影响
+            if isectWords == nil,
+               let oppTerm = terms.first(where: { QueryUnderstanding.genderOpposite(of: $0) != nil }),
                let pair = QueryUnderstanding.genderContrast(of: oppTerm),
                let qFwd = try? siglip.embedQuery(pair.fwd),
                let qOpp = try? siglip.embedQuery(pair.opp) {
