@@ -646,12 +646,14 @@ final class SearchEngine {
                     var wordDiag: [String] = []
                     var labelCount = 0
                     var namingCount = 0
+                    var ocrCount = 0
                     for t in words {
                         // R1 精确资格:直译多词短语→不查牌(主观/复合概念)
                         let en = QueryUnderstanding.english(for: t)
                         var h: Set<String> = []
                         labelCount = 0
                         namingCount = 0
+                        ocrCount = 0
                         if en?.contains(" ") != true {
                             let lt = QueryUnderstanding.labelTokens(t)
                             if !lt.isEmpty {
@@ -673,6 +675,12 @@ final class SearchEngine {
                             for vt in QueryUnderstanding.scriptVariants(of: t) {
                                 for r in ((try? store.searchUserTags(query: vt)) ?? [])
                                     where among?.contains(r) ?? true { namingCount += h.insert(r).inserted ? 1 : 0 }
+                                // 批117(用户拍板):OCR 启用进 a——文字证据难得
+                                // 误报(用户判例:杨如电脑工作照屏幕含文字/卢沟桥
+                                // 合影靠 OCR 过桥关);复合词仍被 R1 闸住(闸门外
+                                // 的 SigLIP 词不查,美女性别语义交给 b 主筛)
+                                for r in ((try? store.searchOCR(query: vt)) ?? [])
+                                    where among?.contains(r.refKey) ?? true { ocrCount += h.insert(r.refKey).inserted ? 1 : 0 }
                             }
                         }
                         if h.isEmpty {
@@ -680,7 +688,7 @@ final class SearchEngine {
                             wordDiag.append("\(t)=SigLIP·\(en?.contains(" ") == true ? "R1拦" : "无命中")")
                         } else {
                             preciseSets.append(h)
-                            wordDiag.append("\(t)=精确·牌\(labelCount)∪名\(namingCount):\(h.count)")
+                            wordDiag.append("\(t)=精确·牌\(labelCount)∪名\(namingCount)∪字\(ocrCount):\(h.count)")
                         }
                     }
                     // a 的词间运算按形态分流(用户定规):
@@ -701,16 +709,25 @@ final class SearchEngine {
                             aKeys = a
                         }
                     }
-                    // b:SigLIP 词宽召回交集(批107 机制);仪器记每词召回数
+                    // b:SigLIP 词命中(仪器记每词命中数)。
+                    // 批117修(topK 截断):有 a(精确证据池)时对 a 集合逐词
+                    // 打分而非全库宽召回再交——268 装机实锤「阳光 沙滩」:
+                    // beach牌17张∩阳光宽召回4000(topK 截断在 0.110)=1,
+                    // 16 张阳光分∈[0.070,0.110) 的海滩照被截断线挡在 b 外;
+                    // among(a) 打分数学等价(∩a 的命中=a 内≥地板)且小集合
+                    // 全量无截断。全 SigLIP 形态(a 空)保持批107 全库宽召回
                     var bKeys: Set<String>? = nil
                     for t in sigWords {
                         guard let qw = try? siglip.embedQuery(
                             Self.siglipQuery(t, nativeZh: nativeZh)) else { continue }
                         let exempt = QueryUnderstanding.floorExemptWords.contains(t)
                             || QueryUnderstanding.chineseCounterpart(for: t) != nil
+                        let floor: Float = exempt ? 0.04 : 0.08 * gate
+                        let amongSet = aKeys ?? among
                         let wh = Self.dedupByRef(try store.search(
                             space: siglip.space, kinds: [.photo], query: qw,
-                            limit: topK, minScore: exempt ? 0.04 : 0.08 * gate, among: among))
+                            limit: max(topK, (amongSet?.count ?? 0) * 8),
+                            minScore: floor, among: amongSet))
                         if bKeys == nil { firstWordTop = wh.first?.score ?? 0 }
                         let keys = Set(wh.map(\.refKey))
                         bKeys = bKeys.map { $0.intersection(keys) } ?? keys

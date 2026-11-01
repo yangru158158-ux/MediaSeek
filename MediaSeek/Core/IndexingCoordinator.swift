@@ -59,6 +59,8 @@ final class IndexingCoordinator: ObservableObject {
         static let shared = DiagLog()
         private let lock = NSLock()
         private var ring: [String] = []
+        // 批117:落盘串行队列(防并发写覆盖/FIFO 保序)
+        private let ioQueue = DispatchQueue(label: "mediaseek.diaglog.io")
         private let df: DateFormatter = {
             let f = DateFormatter(); f.dateFormat = "HH:mm:ss.SSS"; return f
         }()
@@ -75,9 +77,13 @@ final class IndexingCoordinator: ObservableObject {
             if ring.count > 300 { ring.removeFirst(ring.count - 300) }
             lock.unlock()
             // 批81一修(验收):磁盘 I/O 移出调用线程——resign 热路径在主线程
-            // 同步开文件/追加是给看门狗递刀,落盘全部转后台任务
+            // 同步开文件/追加是给看门狗递刀,落盘全部转后台
+            // 批117修(装机实锤乱码):Task.detached 每 event 一个任务,调度
+            // 不保证 FIFO 且并发 seekToEnd+write 互相覆盖(明细行被摘要行
+            // 劈断覆盖,UTF-8 断点成 �)——改 DispatchSerialQueue:串行=
+            // FIFO+互斥,仍不阻塞调用线程
             let out = line
-            Task.detached(priority: .utility) {
+            ioQueue.async {
                 // 批82一修(用户点名):Application Support 在沙盒深处文件 App 看不见;
                 // Documents=文件 App「我的 iPhone → MediaSeek → diag.log」直达
                 let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
