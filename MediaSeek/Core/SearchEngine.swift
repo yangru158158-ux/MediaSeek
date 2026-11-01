@@ -534,7 +534,17 @@ final class SearchEngine {
                 }
             }
         }
-        if !labelHits.isEmpty { channels.append((1.6, labelHits)) }
+        // 批115:语义:多词时牌证据只进交集(下方交集块逐词查牌→a∩b),
+        // 不再直显——本通道是单词时代的 OR 直显设计(labelTokens 整串
+        // 并集命中直接上展示柜),266 装机实锤:交集通道正确给 0(猫沙发
+        // 精确交集),界面却被本通道的 cat牌∪sofa牌 15 张 OR 填充淹没。
+        // 仅命中「语义:」前缀多词(channel==.semantic 精确匹配——
+        // 原生语义:/.native、单词、裸搜、and:/or:/文字: 全不受影响;
+        // 裸搜多词本就不走本函数,批41 起走 searchScoped 独立 AND 执行器)
+        if !labelHits.isEmpty,
+           !(spec.channel == .semantic && semanticTerms.count >= 2) {
+            channels.append((1.6, labelHits))
+        }
 
         // 视觉通道:SigLIP2 原生多语言(分词实验已证),中文原文直接查;
         // 不再用语义路由——泛化标签(document/screenshot)会被几乎任何词
@@ -620,7 +630,7 @@ final class SearchEngine {
                     // 预期:桥美女=bridge牌(a)∩美女SigLIP+尾线(b)≈几百;
                     // 猫沙发=cat牌∩sofa牌(a)=0(真值0);阳光海滩=beach牌(a)
                     // ∩阳光SigLIP(b)≈几十
-                    var aKeys: Set<String>? = nil
+                    var preciseSets: [Set<String>] = []
                     var sigWords: [String] = []
                     var firstWordTop: Float = 0
                     for t in words {
@@ -653,7 +663,25 @@ final class SearchEngine {
                         if h.isEmpty {
                             sigWords.append(t)
                         } else {
-                            aKeys = aKeys.map { $0.intersection(h) } ?? h
+                            preciseSets.append(h)
+                        }
+                    }
+                    // a 的词间运算按形态分流(用户定规):
+                    //   全精确(无 SigLIP 词)→词间交集——所有词都要有牌证据,
+                    //     AND 语义(cat牌∩sofa牌,猫沙发=0,266 装机验证);
+                    //   有 SigLIP 词→精确词并集=证据池,SigLIP 词做主筛
+                    //     (桥猫美女=(bridge牌∪cat牌)∩美女SigLIP=「桥上或
+                    //     猫旁的美女」——精确词之间不互筛,证据池∪主筛∩)
+                    var aKeys: Set<String>? = nil
+                    if !preciseSets.isEmpty {
+                        if sigWords.isEmpty {
+                            var a = preciseSets[0]
+                            for s in preciseSets.dropFirst() { a.formIntersection(s) }
+                            aKeys = a
+                        } else {
+                            var a = Set<String>()
+                            for s in preciseSets { a.formUnion(s) }
+                            aKeys = a
                         }
                     }
                     // b:SigLIP 词宽召回交集(批107 机制)
