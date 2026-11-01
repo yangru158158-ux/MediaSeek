@@ -659,20 +659,20 @@ final class SearchEngine {
                                     for row in rows where among?.contains(row.refKey) ?? true {
                                         let toks = Set(row.title.lowercased()
                                             .components(separatedBy: CharacterSet(charactersIn: ", ")))
-                                        if !lt.intersection(toks).isEmpty { labelCount += h.insert(row.refKey) ? 1 : 0 }
+                                        if !lt.intersection(toks).isEmpty { labelCount += h.insert(row.refKey).inserted ? 1 : 0 }
                                     }
                                 }
                                 if scope == .all || scope == .video, let rows = try? store.allVideoFrameLabels() {
                                     for row in rows where among?.contains(row.refKey) ?? true {
                                         let toks = Set(row.title.lowercased()
                                             .components(separatedBy: CharacterSet(charactersIn: ", ")))
-                                        if !lt.intersection(toks).isEmpty { labelCount += h.insert(row.refKey) ? 1 : 0 }
+                                        if !lt.intersection(toks).isEmpty { labelCount += h.insert(row.refKey).inserted ? 1 : 0 }
                                     }
                                 }
                             }
                             for vt in QueryUnderstanding.scriptVariants(of: t) {
                                 for r in ((try? store.searchUserTags(query: vt)) ?? [])
-                                    where among?.contains(r) ?? true { namingCount += h.insert(r) ? 1 : 0 }
+                                    where among?.contains(r) ?? true { namingCount += h.insert(r).inserted ? 1 : 0 }
                             }
                         }
                         if h.isEmpty {
