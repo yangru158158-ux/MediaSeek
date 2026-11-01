@@ -497,11 +497,17 @@ final class SearchEngine {
         let tokens = QueryUnderstanding.labelTokens(concept)
         // 有标签实据的视频 refKey(查询词∩帧标签非空)——视觉通道放行视频帧的唯一证据
         var videoLabelRefs: Set<String> = []
-        // 批115:语义:多词改道标志——仅照片范围(交集块包在 contains(.photo)
-        // 内,视频页签交集块不执行,抑制即恒空=验收 medium;视频页签保留
-        // 旧通道照常显示帧标签命中)。改道时牌/命名证据只进交集块 a 侧,
-        // 本通道整体跳过(含计算,验收 low:全量算完丢弃纯浪费)
-        let isectDivert = spec.channel == .semantic && semanticTerms.count >= 2
+        // 批115:改道标志——仅照片范围(交集块包在 contains(.photo) 内,
+        // 视频页签交集块不执行,抑制即恒空=验收 medium;视频页签保留旧通道
+        // 照常显示帧标签命中)。改道时牌/命名证据只进交集块 a 侧,本通道
+        // 整体跳过(含计算,验收 low:全量算完丢弃纯浪费)
+        // 批116:词表换 visualTerms(不剔专名/人名)——267 装机实锤「杨如
+        // 电脑」:人名被批62/64 旧闸剔除后 semanticTerms 只剩 1 词,整对词
+        // 没进交集,走旧整串+双通道 OR 直显 1263 张(杨如照+电脑照各自进门
+        // 从未相遇)。人名的精确证据=用户命名(a 侧正查它),交集架构下人名
+        // 是天然精确词;旧闸防的「人名走 SigLIP 添乱」不会发生(SigLIP 只
+        // 对无精确命中的词跑)。与 isectWords 分支/视觉通道守卫三处同步
+        let isectDivert = spec.channel == .semantic && visualTerms.count >= 2
             && imageKinds.contains(.photo)
         if !tokens.isEmpty, spec.channel != .text, !isectDivert {
             // 照片标签行(视频范围不得参与,否则照片漏进视频结果)
@@ -551,8 +557,11 @@ final class SearchEngine {
         // 文字: 前缀排他:视觉通道(照片/视频帧)不参与
         // 批94:原生语义: 不看 semanticTerms(其逐词过滤闸对整句向量无意义,
         // 专名/纯数字句也会空表直接跳过通道)——判 .native 即跑
+        // 批116:语义:多词用 visualTerms 收词(人名不剔)——全人名词对
+        // (杨如 管雯)的 semanticTerms 为空,无此放行则交集块永不执行
         if !imageKinds.isEmpty, spec.channel != .text,
-           (!semanticTerms.isEmpty || spec.channel == .native), let siglip {
+           (!semanticTerms.isEmpty || spec.channel == .native
+            || (spec.channel == .semantic && visualTerms.count >= 2)), let siglip {
             // so400m 校准(第六十一批):SigLIP 绝对门槛按激活模型缩放
             // (so400m 命中带 = base × 0.87,CI 双模型分布实测,详见
             // ModelManager.siglipGateScale 注释)
@@ -590,15 +599,16 @@ final class SearchEngine {
                 // 剥离后的 query)套原生模板壳,与 原生语义: 同款构造
                 q = try siglip.embedQuery(QueryUnderstanding.nativeSiglipQuery(query))
                 embedPath = "英文整串"
-            } else if semanticOnly, semanticTerms.count >= 2 {
+            } else if spec.channel == .semantic, visualTerms.count >= 2 {
                 // 批107:语义:多词 = AND 意图(「猫 沙发」=有猫且有沙发)。
                 // 批93/批106 的平均向量是概念熔合:共现词对(阳光 海滩)碰巧
                 // 熔出风景照,异质词对(猫 沙发)熔出「毛绒室内质感」——259
                 // 装机实测原生「沙发」邻域的房产广告截图 best 抬到 0.151、
                 // 尾线 0.128 切完仍 594 张灌屏(258 模板系 84 张)。改逐词宽
                 // 召回取交集(与裸搜 AND 线批103 同规),综合分=min(各词分)。
-                // q 置空:本路径不消费它,下游三处消费点均按 isectWords 跳过
-                isectWords = semanticTerms
+                // 批116:词表=visualTerms(人名不剔,与 isectDivert/视觉守卫
+                // 三处同步);q 置空:本路径不消费它,下游消费点按 isectWords 跳过
+                isectWords = visualTerms
                 q = []
                 embedPath = "交集"   // 批110:是否有牌约束在下方交集块内细化(标签∩语义)
             } else {
@@ -631,10 +641,17 @@ final class SearchEngine {
                     var preciseSets: [Set<String>] = []
                     var sigWords: [String] = []
                     var firstWordTop: Float = 0
+                    // 批116仪器:逐词类型+命中数(用户要求:词是什么类型、
+                    // 中间过程各命中几个、最后交集几个——中间过程透明化)
+                    var wordDiag: [String] = []
+                    var labelCount = 0
+                    var namingCount = 0
                     for t in words {
                         // R1 精确资格:直译多词短语→不查牌(主观/复合概念)
                         let en = QueryUnderstanding.english(for: t)
                         var h: Set<String> = []
+                        labelCount = 0
+                        namingCount = 0
                         if en?.contains(" ") != true {
                             let lt = QueryUnderstanding.labelTokens(t)
                             if !lt.isEmpty {
@@ -642,26 +659,28 @@ final class SearchEngine {
                                     for row in rows where among?.contains(row.refKey) ?? true {
                                         let toks = Set(row.title.lowercased()
                                             .components(separatedBy: CharacterSet(charactersIn: ", ")))
-                                        if !lt.intersection(toks).isEmpty { h.insert(row.refKey) }
+                                        if !lt.intersection(toks).isEmpty { labelCount += h.insert(row.refKey) ? 1 : 0 }
                                     }
                                 }
                                 if scope == .all || scope == .video, let rows = try? store.allVideoFrameLabels() {
                                     for row in rows where among?.contains(row.refKey) ?? true {
                                         let toks = Set(row.title.lowercased()
                                             .components(separatedBy: CharacterSet(charactersIn: ", ")))
-                                        if !lt.intersection(toks).isEmpty { h.insert(row.refKey) }
+                                        if !lt.intersection(toks).isEmpty { labelCount += h.insert(row.refKey) ? 1 : 0 }
                                     }
                                 }
                             }
                             for vt in QueryUnderstanding.scriptVariants(of: t) {
                                 for r in ((try? store.searchUserTags(query: vt)) ?? [])
-                                    where among?.contains(r) ?? true { h.insert(r) }
+                                    where among?.contains(r) ?? true { namingCount += h.insert(r) ? 1 : 0 }
                             }
                         }
                         if h.isEmpty {
                             sigWords.append(t)
+                            wordDiag.append("\(t)=SigLIP·\(en?.contains(" ") == true ? "R1拦" : "无命中")")
                         } else {
                             preciseSets.append(h)
+                            wordDiag.append("\(t)=精确·牌\(labelCount)∪名\(namingCount):\(h.count)")
                         }
                     }
                     // a 的词间运算按形态分流(用户定规):
@@ -682,7 +701,7 @@ final class SearchEngine {
                             aKeys = a
                         }
                     }
-                    // b:SigLIP 词宽召回交集(批107 机制)
+                    // b:SigLIP 词宽召回交集(批107 机制);仪器记每词召回数
                     var bKeys: Set<String>? = nil
                     for t in sigWords {
                         guard let qw = try? siglip.embedQuery(
@@ -695,6 +714,9 @@ final class SearchEngine {
                         if bKeys == nil { firstWordTop = wh.first?.score ?? 0 }
                         let keys = Set(wh.map(\.refKey))
                         bKeys = bKeys.map { $0.intersection(keys) } ?? keys
+                        if let i = wordDiag.firstIndex(where: { $0.hasPrefix("\(t)=") }) {
+                            wordDiag[i] += ":\(wh.count)"
+                        }
                     }
                     // 结果=a∩b(一组空时=另一组);精确参与即定型,尾线只在
                     // 全 SigLIP 形态由组级施加(下方 tailFactor 按 isectPureSig)
@@ -728,6 +750,11 @@ final class SearchEngine {
                     }.sorted { $0.score > $1.score }
                     embedPath = aKeys == nil ? "交集"
                         : (sigWords.isEmpty ? "精确交集" : "精确∩语义")
+                    // 批116仪器:逐词类型/命中数+a/b/交集,与组级摘要行配合
+                    // (词=精确·牌X∪名Y:总数 | 词=SigLIP·原因:召回数)
+                    IndexingCoordinator.DiagLog.shared.event(
+                        "语义明细[\(query)] " + wordDiag.joined(separator: " ")
+                        + " a=\(aKeys?.count ?? 0) b=\(bKeys?.count ?? 0) 交集=\(result.count)")
                     // 交集空:空态提示用首个 SigLIP 词最高分(下方空态守卫段
                     // 按 isectWords 跳过;不引行号——批107 验收教训)
                     if hits.isEmpty, !sigWords.isEmpty { lastSemanticTopScore = firstWordTop }
