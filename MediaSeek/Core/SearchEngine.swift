@@ -1041,11 +1041,16 @@ final class SearchEngine {
                 var ocrSets: [Set<String>] = []
                 for t in terms where !t.isEmpty {
                     var keys = Set<String>()
-                    for term in [t] + (QueryUnderstanding.ocrAliases[t] ?? [])
-                        + QueryUnderstanding.bridgedVariants(for: t)
-                        + (QueryUnderstanding.simplified(t) != t
-                           ? [QueryUnderstanding.simplified(t)]
-                               + (QueryUnderstanding.ocrAliases[QueryUnderstanding.simplified(t)] ?? []) : []) {
+                    // 拆步构造(1058 行老教训:链式 + 数组拼接类型推断爆炸)
+                    var variants: [String] = [t]
+                    variants += QueryUnderstanding.ocrAliases[t] ?? []
+                    variants += QueryUnderstanding.bridgedVariants(for: t)
+                    let conv = QueryUnderstanding.simplified(t)
+                    if conv != t {
+                        variants.append(conv)
+                        variants += QueryUnderstanding.ocrAliases[conv] ?? []
+                    }
+                    for term in variants {
                         for r in ((try? store.searchOCR(query: term)) ?? [])
                             where among?.contains(r.refKey) ?? true { keys.insert(r.refKey) }
                     }
