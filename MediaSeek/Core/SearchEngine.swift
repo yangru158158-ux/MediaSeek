@@ -648,13 +648,31 @@ final class SearchEngine {
                     var namingCount = 0
                     var ocrCount = 0
                     for t in words {
-                        // R1 精确资格:直译多词短语→不查牌(主观/复合概念)
                         let en = QueryUnderstanding.english(for: t)
                         var h: Set<String> = []
                         labelCount = 0
                         namingCount = 0
                         ocrCount = 0
-                        if en?.contains(" ") != true {
+                        var isPlace = false
+                        // 批118修2:地名维度——城市名无视觉特征(教义),SigLIP 是
+                        // 死路(269 实锤 上海=SigLIP·R1拦:2 张噪声∩女孩 OCR=2 张
+                        // 订单/文章截图);正确证据=GPS 拍摄地∪用户命名(批103 契约,
+                        // 不含 OCR——文字含地名的截图不是「在该地拍摄」)
+                        if let p = QueryUnderstanding.barePlace(t),
+                           let region = await PlaceGeocoder.region(for: p, radius: 50_000) {
+                            isPlace = true
+                            photo.fetchAllAssets().enumerateObjects { asset, _, _ in
+                                if (among?.contains(asset.localIdentifier) ?? true),
+                                   Self.assetPasses(asset, dateRange: nil, place: region) {
+                                    h.insert(asset.localIdentifier)
+                                }
+                            }
+                            for vt in QueryUnderstanding.scriptVariants(of: p) {
+                                for r in ((try? store.searchUserTags(query: vt)) ?? [])
+                                    where among?.contains(r) ?? true { namingCount += h.insert(r).inserted ? 1 : 0 }
+                            }
+                        }
+                        if !isPlace, en?.contains(" ") != true {
                             let lt = QueryUnderstanding.labelTokens(t)
                             if !lt.isEmpty {
                                 if imageKinds.contains(.photo), let rows = try? store.allPhotoLabels() {
@@ -675,12 +693,18 @@ final class SearchEngine {
                             for vt in QueryUnderstanding.scriptVariants(of: t) {
                                 for r in ((try? store.searchUserTags(query: vt)) ?? [])
                                     where among?.contains(r) ?? true { namingCount += h.insert(r).inserted ? 1 : 0 }
-                                // 批117(用户拍板):OCR 启用进 a——文字证据难得
-                                // 误报(用户判例:杨如电脑工作照屏幕含文字/卢沟桥
-                                // 合影靠 OCR 过桥关);复合词仍被 R1 闸住(闸门外
-                                // 的 SigLIP 词不查,美女性别语义交给 b 主筛)
-                                for r in ((try? store.searchOCR(query: vt)) ?? [])
-                                    where among?.contains(r.refKey) ?? true { ocrCount += h.insert(r.refKey).inserted ? 1 : 0 }
+                            }
+                            // 批118修1:OCR 降级为证据增强——只有已有牌/命名证据
+                            // (已精确)的词才并入 OCR,不单独抬词成精确词。269 实锤:
+                            // 阳光(抽象词,词典未收)被 OCR 23 张截图抬成精确→全精确
+                            // 交集形态翻转,beach 牌 17 张真海滩照无文字证据全灭,
+                            // 2 张双词文字截图(含自指的搜索结果截图)上位。杨如
+                            // (命名473)/桥(牌11)类已精确词照常增强不受影响
+                            if !h.isEmpty {
+                                for vt in QueryUnderstanding.scriptVariants(of: t) {
+                                    for r in ((try? store.searchOCR(query: vt)) ?? [])
+                                        where among?.contains(r.refKey) ?? true { ocrCount += h.insert(r.refKey).inserted ? 1 : 0 }
+                                }
                             }
                         }
                         if h.isEmpty {
@@ -688,7 +712,9 @@ final class SearchEngine {
                             wordDiag.append("\(t)=SigLIP·\(en?.contains(" ") == true ? "R1拦" : "无命中")")
                         } else {
                             preciseSets.append(h)
-                            wordDiag.append("\(t)=精确·牌\(labelCount)∪名\(namingCount)∪字\(ocrCount):\(h.count)")
+                            wordDiag.append(isPlace
+                                ? "\(t)=精确·地名∪名\(namingCount):\(h.count)"
+                                : "\(t)=精确·牌\(labelCount)∪名\(namingCount)∪字\(ocrCount):\(h.count)")
                         }
                     }
                     // a 的词间运算按形态分流(用户定规):
