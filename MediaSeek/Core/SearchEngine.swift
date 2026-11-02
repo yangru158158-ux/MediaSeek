@@ -705,10 +705,31 @@ final class SearchEngine {
                             sigWords.append(t)
                             wordDiag.append("\(t)=SigLIP·\(en?.contains(" ") == true ? "R1拦" : "无命中")")
                         } else {
+                            // 批122(用户拍板):已精确词补 SigLIP 词级精选——牌覆盖
+                            // 极低的词(猫牌2,273 重建后仍 2:猫娃娃/猫妆/人怀猫
+                            // Vision 置信度<0.3 不发牌,名额扩容治不了)的真值通道,
+                            // "视觉上确实像"该词(宽召回 best×0.85/0.95 线,批113
+                            // 配方回归);⚠️精选只并入已精确词(牌/命名/GPS 先命中),
+                            // 不单独抬词——批118 OCR 教训:无牌词并入会形态翻转
+                            // (阳光沙滩 a∩b→全精确交集,数量骤变)
+                            var refineCount = 0
+                            if let qw = try? siglip.embedQuery(
+                                Self.siglipQuery(t, nativeZh: nativeZh)) {
+                                let exempt = QueryUnderstanding.floorExemptWords.contains(t)
+                                    || QueryUnderstanding.chineseCounterpart(for: t) != nil
+                                let wh = Self.dedupByRef(try store.search(
+                                    space: siglip.space, kinds: [.photo], query: qw,
+                                    limit: topK, minScore: exempt ? 0.04 : 0.08 * gate, among: among))
+                                let wb = wh.first?.score ?? 0
+                                let line = wb >= 0.13 * gate ? wb * 0.85 : wb * 0.95
+                                for hh in wh where hh.score >= line {
+                                    refineCount += h.insert(hh.refKey).inserted ? 1 : 0
+                                }
+                            }
                             preciseSets.append(h)
                             wordDiag.append(isPlace
-                                ? "\(t)=精确·地名∪名\(namingCount):\(h.count)"
-                                : "\(t)=精确·牌\(labelCount)∪名\(namingCount):\(h.count)")
+                                ? "\(t)=精确·地名∪名\(namingCount)∪精\(refineCount):\(h.count)"
+                                : "\(t)=精确·牌\(labelCount)∪名\(namingCount)∪精\(refineCount):\(h.count)")
                         }
                     }
                     // a 的词间运算按形态分流(用户定规):
