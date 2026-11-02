@@ -520,7 +520,7 @@ final class SearchEngine {
                 var scored: [(refKey: String, matches: Int, title: String)] = []
                 for row in rows where among?.contains(row.refKey) ?? true {
                     let labelTokens = Set(row.title.lowercased()
-                        .components(separatedBy: CharacterSet(charactersIn: ", ")))
+                        .components(separatedBy: CharacterSet(charactersIn: ", ")).flatMap { $0.components(separatedBy: "_") })
                     let m = tokens.intersection(labelTokens).count
                     if m > 0 { scored.append((row.refKey, m, row.title)) }
                 }
@@ -537,7 +537,7 @@ final class SearchEngine {
                 var scored: [(refKey: String, matches: Int, title: String)] = []
                 for row in rows where among?.contains(row.refKey) ?? true {
                     let labelTokens = Set(row.title.lowercased()
-                        .components(separatedBy: CharacterSet(charactersIn: ", ")))
+                        .components(separatedBy: CharacterSet(charactersIn: ", ")).flatMap { $0.components(separatedBy: "_") })
                     let m = tokens.intersection(labelTokens).count
                     if m > 0 {
                         scored.append((row.refKey, m, row.title))
@@ -682,14 +682,14 @@ final class SearchEngine {
                                 if imageKinds.contains(.photo), let rows = try? store.allPhotoLabels() {
                                     for row in rows where among?.contains(row.refKey) ?? true {
                                         let toks = Set(row.title.lowercased()
-                                            .components(separatedBy: CharacterSet(charactersIn: ", ")))
+                                            .components(separatedBy: CharacterSet(charactersIn: ", ")).flatMap { $0.components(separatedBy: "_") })
                                         if !lt.intersection(toks).isEmpty { labelCount += h.insert(row.refKey).inserted ? 1 : 0 }
                                     }
                                 }
                                 if scope == .all || scope == .video, let rows = try? store.allVideoFrameLabels() {
                                     for row in rows where among?.contains(row.refKey) ?? true {
                                         let toks = Set(row.title.lowercased()
-                                            .components(separatedBy: CharacterSet(charactersIn: ", ")))
+                                            .components(separatedBy: CharacterSet(charactersIn: ", ")).flatMap { $0.components(separatedBy: "_") })
                                         if !lt.intersection(toks).isEmpty { labelCount += h.insert(row.refKey).inserted ? 1 : 0 }
                                     }
                                 }
@@ -1356,7 +1356,7 @@ final class SearchEngine {
                         var scored: [(refKey: String, title: String, matches: Int)] = []
                         for row in rows where (within?.contains(row.refKey) ?? true) {
                             let rowTokens = Set(row.title.lowercased()
-                                .components(separatedBy: CharacterSet(charactersIn: ", ")))
+                                .components(separatedBy: CharacterSet(charactersIn: ", ")).flatMap { $0.components(separatedBy: "_") })
                             let m = tokens.intersection(rowTokens).count
                             if m > 0 { scored.append((row.refKey, row.title, m)) }
                         }
@@ -1760,7 +1760,7 @@ final class SearchEngine {
         if !tokens.isEmpty, let rows = try? store.allVideoFrameLabels() {
             for row in rows {
                 let labelTokens = Set(row.title.lowercased()
-                    .components(separatedBy: CharacterSet(charactersIn: ", ")))
+                    .components(separatedBy: CharacterSet(charactersIn: ", ")).flatMap { $0.components(separatedBy: "_") })
                 if !tokens.intersection(labelTokens).isEmpty { labelRefs.insert(row.refKey) }
             }
         }
