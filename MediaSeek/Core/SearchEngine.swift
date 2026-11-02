@@ -496,6 +496,9 @@ final class SearchEngine {
         // 文字: 前缀 = 排他文字通道,标签/视觉/用户标签一概不参与(用户 2026-10-11:
         // 「结果内搜指定了文字,视频还出现就不对」——111 重构后主管线漏了这层排他)
         var labelHits: [SearchHit] = []
+        // 批124仪器:分通道命中计数(裸搜身份证杂音案用户拍板 C)——裸搜/
+        // 单词此前无任何通道拆分日志,405=190语义+215文字 只见总数不见构成
+        var chLabel = 0, chOcr = 0, chTag = 0, chVisual = 0
         let tokens = QueryUnderstanding.labelTokens(concept)
         // 有标签实据的视频 refKey(查询词∩帧标签非空)——视觉通道放行视频帧的唯一证据
         var videoLabelRefs: Set<String> = []
@@ -550,7 +553,7 @@ final class SearchEngine {
         }
         // 批115:isectDivert 时上方已整体跳过计算(labelHits 恒空),
         // 此处自然不 append;视频页签/单词/裸搜照旧
-        if !labelHits.isEmpty { channels.append((1.6, labelHits)) }
+        if !labelHits.isEmpty { channels.append((1.6, labelHits)); chLabel = labelHits.count }
 
         // 视觉通道:SigLIP2 原生多语言(分词实验已证),中文原文直接查;
         // 不再用语义路由——泛化标签(document/screenshot)会被几乎任何词
@@ -968,6 +971,7 @@ final class SearchEngine {
                        query,
                        embedPath,
                        hits.count, best, hits.map(\.score).min() ?? 0, survivors.count))
+            chVisual = survivors.count
             channels.append((1.0, survivors))
         }
 
@@ -986,6 +990,7 @@ final class SearchEngine {
                 where among?.contains(r) ?? true { tagRefs.insert(r) }
             }
             if !tagRefs.isEmpty {
+                chTag = tagRefs.count
                 channels.append((1.6, tagRefs.map {
                     SearchHit(kind: .photo, refKey: $0, frameIndex: 0,
                               space: "userTag", title: nil, date: nil, score: 1.0, color: nil)
@@ -1108,7 +1113,7 @@ final class SearchEngine {
                                                  space: "ocr", title: "含「\(terms.joined(separator: " "))」:\(snippets[ref] ?? "")",
                                                  date: nil, score: 1.0, color: nil))
                     }
-                    if !andHits.isEmpty { channels.append((8.0, andHits)) }
+                    if !andHits.isEmpty { channels.append((8.0, andHits)); chOcr = andHits.count }
                 }
             } else {
             let allowedKinds = Self.scopeAllowedKinds(scope)
@@ -1147,6 +1152,7 @@ final class SearchEngine {
                           !seen.contains(ref.refKey),
                           among?.contains(ref.refKey) ?? true else { continue }
                     seen.insert(ref.refKey)
+                    chOcr += 1
                     add(SearchHit(kind: k, refKey: ref.refKey, frameIndex: 0,
                                   space: "ocr", title: "含「\(term)」:\(Self.ocrSnippet(ref.text, term))",
                                   date: nil, score: 1.0, color: nil),
@@ -1166,6 +1172,13 @@ final class SearchEngine {
 
         for ch in channels {
             for (rank, hit) in ch.hits.enumerated() { add(hit, weight: ch.weight, rank: rank) }
+        }
+        // 批124仪器:分通道摘要(裸搜身份证杂音案用户拍板 C)——裸搜/单词
+        // 此前只有界面总数(405=190语义+215文字),构成全靠猜;现四通道各记
+        // 命中数,与语义摘要行/明细行同属 diag 可观测层
+        if chLabel + chOcr + chTag + chVisual > 0 {
+            IndexingCoordinator.DiagLog.shared.event(
+                "通道[\(query)] 标签=\(chLabel) 文字=\(chOcr) 视觉=\(chVisual) 命名=\(chTag)")
         }
         guard !fused.isEmpty else { return .empty }
 
