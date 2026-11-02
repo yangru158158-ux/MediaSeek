@@ -919,7 +919,11 @@ final class SearchEngine {
             // 搜索」设计(SigLIP 分不清男女,靠正反向边距);交集场景照片
             // 已过牌+SigLIP 双重关,再砍边距把 272 的桥美女 7→1(合影/侧脸/
             // 远景的边距普遍 <0.010)。单词径照旧用对比闸,女人搜索不受影响
-            if isectWords == nil,
+            // 批123(用户拍板)收窄:全 SigLIP 形态(isectPureSig,两词均无
+            // 牌/命名/GPS,如 美女+阳光)不豁免——该形态无牌关,豁免理由
+            // 「已过双重关」不成立,且性别词同时免尾线=两闸齐开;收窄后与
+            // 单词径同款裁决(对比把关)。车道②(有精确证据,桥美女)豁免保持
+            if isectWords == nil || isectPureSig,
                let oppTerm = terms.first(where: { QueryUnderstanding.genderOpposite(of: $0) != nil }),
                let pair = QueryUnderstanding.genderContrast(of: oppTerm),
                let qFwd = try? siglip.embedQuery(pair.fwd),
