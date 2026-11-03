@@ -1145,7 +1145,12 @@ final class SearchEngine {
                     variants.append(contentsOf: QueryUnderstanding.ocrAliases[conv] ?? [])
                 }
                 for term in variants {
-                let rows = (try? store.searchOCR(query: term)) ?? []
+                // 批127 F(用户确认):OCR 命中按文本密度排序——短文本=证件本体
+                // (卡上几行字 30-50 字)排前,长文本=聊天/表单截图(几百~几千字
+                // 提及该词)沉底;278 装机实锤身份证 222 张文字命中里真证件被
+                // 200 张聊天截图淹没
+                let rows = ((try? store.searchOCR(query: term)) ?? [])
+                    .sorted { $0.text.count < $1.text.count }
                 let kinds = classifier.classify(rows.map(\.refKey))
                 for ref in rows {
                     guard let k = kinds[ref.refKey], allowedKinds.contains(k),
@@ -1528,7 +1533,11 @@ final class SearchEngine {
             // ⚠️ 复核修正:词典含少量 ASCII 键(pdf→document/qq),「词典命中
             // 必是中文」不成立——nativeZh 只对含非 ASCII 字符的词生效,
             // ASCII 键保持英译(document 泛词是文档截图的刻意选择)
-            if nativeZh, !concept.unicodeScalars.allSatisfy(\.isASCII) {
+            // 批127:身份证例外——nativeZh 的中文嵌入「This is a photo of 身份证.」
+            // 不匹配证件照(278 装机实锤视觉全是扑克,0 证件);英文 license 嵌入
+            // 匹配卡形照(用户确认 licence 搜出的全是身份证)——强制走英文模板
+            if nativeZh, !concept.unicodeScalars.allSatisfy(\.isASCII),
+               concept != "身份证" {
                 return QueryUnderstanding.nativeSiglipQuery(concept)
             }
             return "This is a photo of \(en)."

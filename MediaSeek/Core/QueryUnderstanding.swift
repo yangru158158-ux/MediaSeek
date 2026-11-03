@@ -554,7 +554,10 @@ enum QueryUnderstanding {
         ("吃的", "food"), ("好吃的", "food"), ("饮品", "drink"),
         // 证件/文书(同时带上 document 词,便于命中文档类标签)
         ("证件", "id card"), ("证件照", "id portrait"),
-        ("身份证", "id card"), ("驾照", "driver license card"),
+        // 批127(用户确认):身份证英译 id card→license——Apple Vision 无 id_card
+        // 标签(1000+词表核实),SigLIP 的 id card 中文嵌入不匹配证件照;
+        // license 英文嵌入匹配卡形照(用户确认 licence 搜出的全是身份证)
+        ("身份证", "license"), ("驾照", "driver license card"),
         // 第七十二批:驾驶证此前无词典对(只有驾照有)——繁体「駕駛證」归一到
         // 驾驶证后若查不到英文,模板还是会退回裸多语言嵌入,补齐与驾照同款
         // 第八十三批:document→card。232 装机实测搜「驾驶证」语义 4,023——
