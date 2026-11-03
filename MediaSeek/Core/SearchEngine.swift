@@ -1145,12 +1145,16 @@ final class SearchEngine {
                     variants.append(contentsOf: QueryUnderstanding.ocrAliases[conv] ?? [])
                 }
                 for term in variants {
-                // 批127 F(用户确认):OCR 命中按文本密度排序——短文本=证件本体
-                // (卡上几行字 30-50 字)排前,长文本=聊天/表单截图(几百~几千字
-                // 提及该词)沉底;278 装机实锤身份证 222 张文字命中里真证件被
-                // 200 张聊天截图淹没
+                // 批128(升级批127F):OCR 排序信号从「文本长度」改为「证件字段命中数」
+                // —长度不完美(真证件卡周围可能拍到桌面文字拉长;短提及截图仍浮顶);
+                // 字段判定:「居民身份证/公民身份/签发机关/出生/有效期/性别/民族」
+                // 结构化字段只在卡上同时出现多个,聊天提及最多命中 1-2 个;
+                // 排序=字段命中数降序→文本长度升序(字段同分时短文优先)
                 let rows = ((try? store.searchOCR(query: term)) ?? [])
-                    .sorted { $0.text.count < $1.text.count }
+                    .sorted { a, b in
+                        let fa = Self.certFieldCount(a.text), fb = Self.certFieldCount(b.text)
+                        return fa == fb ? a.text.count < b.text.count : fa > fb
+                    }
                 let kinds = classifier.classify(rows.map(\.refKey))
                 for ref in rows {
                     guard let k = kinds[ref.refKey], allowedKinds.contains(k),
@@ -1816,6 +1820,15 @@ final class SearchEngine {
     }
 
     /// 通道内按 refKey 去重(视频多帧/文件多块),供 RRF 按名次计分
+    /// 批128:证件结构化字段计数——身份证/驾驶证等证件本体上会同时出现多个
+    /// 字段(「居民身份证」「公民身份」「签发机关」「出生」「有效期」等),
+    /// 聊天/表单提及最多命中 1-2 个;用于 OCR 排序(字段多的排前=证件本体)
+    static let certFields = ["居民身份证", "公民身份", "签发机关", "出生日期",
+                              "有效期", "性别", "民族", "住址", "准驾车型"]
+    static func certFieldCount(_ text: String) -> Int {
+        Self.certFields.reduce(0) { $0 + (text.contains($1) ? 1 : 0) }
+    }
+
     /// 批126:复合牌精确匹配——下划线复合词(id_card/play_card/credit_card)
     /// 要求全部片段都被查询 tokens 命中才算匹配,防止单个泛词片段(card)
     /// 串门(277 装机实锤:「身份证」tokens 含 card → play_card 拆出 card

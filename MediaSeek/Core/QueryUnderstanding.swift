@@ -351,10 +351,13 @@ enum QueryUnderstanding {
         chineseCounterparts[term.lowercased().trimmingCharacters(in: .whitespaces)]
     }
 
-    /// 桥接追加的文字变体 = [中文对应词] + 其 OCR 别名;表外词返回空(原匹配零改动)
+    /// 桥接追加的文字变体 = [中文对应词];表外词返回空(原匹配零改动)
+    /// 批128(用户确认):去掉 ocrAliases 扩展—— Licence 搜 OCR 后半部出现
+    /// 中文"准驾车型/机动车驾驶证"命中(驾照字段出现在所有提及驾照的文档里,
+    /// 不只在驾照本体);桥到中文对应词本身即可,字段别名不再拉入英文查询
     static func bridgedVariants(for term: String) -> [String] {
         guard let zh = chineseCounterpart(for: term) else { return [] }
-        return [zh] + (ocrAliases[zh] ?? [])
+        return [zh]
     }
 
     /// 第九十四批:原生语义: 前缀的模板构造——唯一规则:官方零样本模板壳 +
@@ -554,10 +557,10 @@ enum QueryUnderstanding {
         ("吃的", "food"), ("好吃的", "food"), ("饮品", "drink"),
         // 证件/文书(同时带上 document 词,便于命中文档类标签)
         ("证件", "id card"), ("证件照", "id portrait"),
-        // 批127(用户确认):身份证英译 id card→license——Apple Vision 无 id_card
-        // 标签(1000+词表核实),SigLIP 的 id card 中文嵌入不匹配证件照;
-        // license 英文嵌入匹配卡形照(用户确认 licence 搜出的全是身份证)
-        ("身份证", "license"), ("驾照", "driver license card"),
+        // 批127→128(用户确认):身份证英译 license→driver license card——
+        // Apple Vision 无 id_card 标签;license 单词嵌入弱(284 装机视觉仅 4 张);
+        // driver license card 三词嵌入强(licence 经桥用此模板→视觉 64 张,用户确认)
+        ("身份证", "driver license card"), ("驾照", "driver license card"),
         // 第七十二批:驾驶证此前无词典对(只有驾照有)——繁体「駕駛證」归一到
         // 驾驶证后若查不到英文,模板还是会退回裸多语言嵌入,补齐与驾照同款
         // 第八十三批:document→card。232 装机实测搜「驾驶证」语义 4,023——

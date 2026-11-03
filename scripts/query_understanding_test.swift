@@ -222,15 +222,13 @@ enum QueryUnderstandingTest {
             && QueryUnderstanding.chineseCounterpart(for: "card") == nil,
                "driving/card 泛词不入表(桥了会把各种证件窄化成驾照)")
         let idv = QueryUnderstanding.bridgedVariants(for: "identity")
-        expect(!idv.filter { ["身份证", "公民身份", "居民身份证", "签发机关", "身份證"].contains($0) }.isEmpty
-            && idv.count == 5,
-               "bridgedVariants(identity)=[身份证]+全部别名(含繁体身份證,港证中文侧)")
+        expect(idv == ["身份证"],
+               "bridgedVariants(identity)=[身份证](批128收缩:只桥中文对应词,不再追加 ocrAliases)")
         expect(QueryUnderstanding.bridgedVariants(for: "beach") == []
-            && QueryUnderstanding.bridgedVariants(for: "id card").count == 5,
-               "表外词返回空(原匹配零改动);表内短语同样拿到身份证别名")
-        expect(QueryUnderstanding.bridgedVariants(for: "licence")
-                    == ["驾照", "准驾车型", "机动车驾驶证"],
-               "licence 桥接变体=驾照+别名(第七十一批;原 %licence% 匹配不动,纯追加)")
+            && QueryUnderstanding.bridgedVariants(for: "id card") == ["身份证"],
+               "表外词返回空(原匹配零改动);表内短语同样只桥对应词")
+        expect(QueryUnderstanding.bridgedVariants(for: "licence") == ["驾照"],
+               "licence 桥接变体=驾照(批128收缩:去准驾车型/机动车驾驶证——字段别名出现在所有提及驾照的文档,284 装机 licence OCR 后半部中文杂音)")
 
         // —— 第九十四批:原生语义: 模板构造(唯一规则,零转换) ——
         expect(QueryUnderstanding.nativeSiglipQuery("license") == "This is a photo of license.",
