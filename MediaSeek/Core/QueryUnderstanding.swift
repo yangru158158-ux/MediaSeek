@@ -221,6 +221,15 @@ enum QueryUnderstanding {
                 dictTokens.insert(s)
             }
         }
+        // 批130:查询端下划线复合词拆分(play_card→{play_card,play,card})
+        // —批125/126 拆了照片标签端(id_card→{id,card})但没拆查询端,
+        // 英文复合词标签搜索全灭(play_card 标签=0,286 装机实锤);
+        // 拆后与照片端对齐:整词+片段都进 tokens,匹配两端任一命中
+        for t in raw where t.contains("_") {
+            for frag in t.components(separatedBy: "_") where !frag.isEmpty {
+                tokens.insert(frag)
+            }
+        }
         if query.count >= 3 {
             let typed = raw.filter { $0.allSatisfy(\.isASCII) }
             let typedAllGeneric = !typed.isEmpty && typed.subtracting(genericTokens).isEmpty

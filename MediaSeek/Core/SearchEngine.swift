@@ -1149,13 +1149,20 @@ final class SearchEngine {
                 // rank 跨变体递增)永远排在背面(变体"身份证"搜到,rank 0-10)后面;
                 // 全局合并后按字数排:背面(15-20字)最前/正面(80-120字)中前/
                 // 聊天截图(几百字)沉底——简单方案胜过字段表(批128 certFields 弃用)
+                // 批130:护照 MRZ 强信号——长度对护照失效(信息页100-300字与
+                // 申请表截图同量级,286 装机实锤混排);护照信息页底部有 MRZ 机读
+                // 区(P<CHN/YANG<<RU 格式两行),表单截图没有——含"P<"的排最前
                 var allRows: [(refKey: String, text: String, term: String)] = []
                 for term in variants {
                     for r in ((try? store.searchOCR(query: term)) ?? []) {
                         allRows.append((r.refKey, r.text, term))
                     }
                 }
-                let rows = allRows.sorted { $0.text.count < $1.text.count }
+                let rows = allRows.sorted { a, b in
+                    let ma = a.text.contains("P<"), mb = b.text.contains("P<")
+                    if ma != mb { return ma }
+                    return a.text.count < b.text.count
+                }
                 let kinds = classifier.classify(rows.map(\.refKey))
                 for ref in rows {
                     guard let k = kinds[ref.refKey], allowedKinds.contains(k),
@@ -1487,7 +1494,10 @@ final class SearchEngine {
                 out.append((kinds[r.0] ?? .photo, r.0, r.1))
             }
         }
-        return out
+        // 批130(验收 low 同规):全变体结果按文本长度升序——证件本体(短)
+        // 浮顶,聊天/表单截图(长)沉底;主管线批129 已改,此处(文字:/and:/or:
+        // 前缀路径)同规,正面照不再因变体顺序 rank 靠后
+        return out.sorted { $0.text.count < $1.text.count }
     }
 
     /// OCR 命中身份归类器(第四十三批):文件表→.file;有帧向量行→.videoFrame;
@@ -1897,6 +1907,13 @@ final class SearchEngine {
         let colorMap = store.colors(for: hits.filter {
             $0.kind != .face && $0.kind != .file && $0.kind != .fileChunk
         }.map { $0.refKey })
+        // 批130仪器:颜色缺失计数——用户实锤截图搜索 4033 张标签命中颜色条
+        // 只有「白22」,大面积 color=nil 待量化(色数据空洞定位入口)
+        let colorMissing = colorMap.values.filter { $0.isEmpty }.count
+        if colorMap.count < 50 || colorMissing > 0 {
+            IndexingCoordinator.DiagLog.shared.event(
+                "颜色[\(colorMap.count)命中] 缺失=\(colorMissing)")
+        }
         for hit in hits {
             switch hit.kind {
             case .face:
