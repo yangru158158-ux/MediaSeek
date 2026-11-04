@@ -239,12 +239,14 @@ expect(COUNTERPARTS.get("licence") == "驾照" and COUNTERPARTS.get("license") =
 expect("driving" not in COUNTERPARTS and "card" not in COUNTERPARTS,
        "driving/card 泛词不入表")
 def bridged_variants(term):
+    # 批128收缩(用户确认):只桥中文对应词,不再追加 ocrAliases——
+    # 驾照字段出现在所有提及驾照的文档,不只在驾照本体
     zh = COUNTERPARTS.get(term.lower().strip())
-    return [zh] + OCR_ALIASES.get(zh, []) if zh else []
-expect(bridged_variants("identity") == ["身份证", "公民身份", "居民身份证", "签发机关", "身份證"],
-       "bridgedVariants(identity)=身份证+全部别名(含繁体)")
-expect(bridged_variants("licence") == ["驾照", "准驾车型", "机动车驾驶证"],
-       "licence 桥接变体=驾照+别名(第七十一批)")
+    return [zh] if zh else []
+expect(bridged_variants("identity") == ["身份证"],
+       "bridgedVariants(identity)=[身份证](批128收缩:只桥对应词)")
+expect(bridged_variants("licence") == ["驾照"],
+       "licence 桥接变体=驾照(批128收缩:去准驾车型/机动车驾驶证)")
 expect(bridged_variants("beach") == [], "表外词零追加")
 expect(OCR_ALIASES.get("驾照") == OCR_ALIASES.get("驾驶证"),
        "驾照/驾驶证别名同表(兄弟缺口已补)")

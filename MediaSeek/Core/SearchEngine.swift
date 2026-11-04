@@ -1144,17 +1144,18 @@ final class SearchEngine {
                     variants.append(conv)
                     variants.append(contentsOf: QueryUnderstanding.ocrAliases[conv] ?? [])
                 }
+                // 批129(用户拍板):全部变体结果收集→去重→全局按文本长度升序
+                // —批127/128 的排序只在单个变体内做,正面照(变体"公民身份"搜到,
+                // rank 跨变体递增)永远排在背面(变体"身份证"搜到,rank 0-10)后面;
+                // 全局合并后按字数排:背面(15-20字)最前/正面(80-120字)中前/
+                // 聊天截图(几百字)沉底——简单方案胜过字段表(批128 certFields 弃用)
+                var allRows: [(refKey: String, text: String, term: String)] = []
                 for term in variants {
-                // 批128(升级批127F):OCR 排序信号从「文本长度」改为「证件字段命中数」
-                // —长度不完美(真证件卡周围可能拍到桌面文字拉长;短提及截图仍浮顶);
-                // 字段判定:「居民身份证/公民身份/签发机关/出生/有效期/性别/民族」
-                // 结构化字段只在卡上同时出现多个,聊天提及最多命中 1-2 个;
-                // 排序=字段命中数降序→文本长度升序(字段同分时短文优先)
-                let rows = ((try? store.searchOCR(query: term)) ?? [])
-                    .sorted { a, b in
-                        let fa = Self.certFieldCount(a.text), fb = Self.certFieldCount(b.text)
-                        return fa == fb ? a.text.count < b.text.count : fa > fb
+                    for r in ((try? store.searchOCR(query: term)) ?? []) {
+                        allRows.append((r.refKey, r.text, term))
                     }
+                }
+                let rows = allRows.sorted { $0.text.count < $1.text.count }
                 let kinds = classifier.classify(rows.map(\.refKey))
                 for ref in rows {
                     guard let k = kinds[ref.refKey], allowedKinds.contains(k),
@@ -1163,11 +1164,10 @@ final class SearchEngine {
                     seen.insert(ref.refKey)
                     chOcr += 1
                     add(SearchHit(kind: k, refKey: ref.refKey, frameIndex: 0,
-                                  space: "ocr", title: "含「\(term)」:\(Self.ocrSnippet(ref.text, term))",
+                                  space: "ocr", title: "含「\(ref.term)」:\(Self.ocrSnippet(ref.text, ref.term))",
                                   date: nil, score: 1.0, color: nil),
                         weight: 8.0, rank: rank)
                     rank += 1
-                }
                 }
 
                 // 二字滑窗已废除(第三十五批,用户点名「无分隔符请使用完整匹配,
@@ -1820,15 +1820,6 @@ final class SearchEngine {
     }
 
     /// 通道内按 refKey 去重(视频多帧/文件多块),供 RRF 按名次计分
-    /// 批128:证件结构化字段计数——身份证/驾驶证等证件本体上会同时出现多个
-    /// 字段(「居民身份证」「公民身份」「签发机关」「出生」「有效期」等),
-    /// 聊天/表单提及最多命中 1-2 个;用于 OCR 排序(字段多的排前=证件本体)
-    static let certFields = ["居民身份证", "公民身份", "签发机关", "出生日期",
-                              "有效期", "性别", "民族", "住址", "准驾车型"]
-    static func certFieldCount(_ text: String) -> Int {
-        Self.certFields.reduce(0) { $0 + (text.contains($1) ? 1 : 0) }
-    }
-
     /// 批126:复合牌精确匹配——下划线复合词(id_card/play_card/credit_card)
     /// 要求全部片段都被查询 tokens 命中才算匹配,防止单个泛词片段(card)
     /// 串门(277 装机实锤:「身份证」tokens 含 card → play_card 拆出 card
