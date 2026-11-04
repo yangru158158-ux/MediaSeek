@@ -143,6 +143,13 @@ def label_tokens(query):
             if t:
                 tokens.add(t)
                 dict_tokens.add(t)
+    # 批131(批130验收 medium 同步):查询端下划线复合词拆分
+    # —Swift 批130 加了(play_card→{play_card,play,card}),镜像同步
+    for t in raw:
+        if "_" in t:
+            for frag in t.split("_"):
+                if frag:
+                    tokens.add(frag)
     if len(query) >= 3:
         typed = {t for t in raw if all(ord(c) < 128 for c in t)}
         typed_all_generic = bool(typed) and typed.issubset(GENERIC)

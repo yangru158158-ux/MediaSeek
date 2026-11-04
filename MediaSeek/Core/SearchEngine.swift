@@ -1482,11 +1482,18 @@ final class SearchEngine {
         for term in variantTerms {
             let rows: [(String, String)]
             if let among = within {
-                rows = ((try? store.searchOCR(query: term, among: Array(among))) ?? [])
-                    .map { ($0, "") }
-            } else {
+                // 批131修(验收 low):结果内分支 text 恒空导致排序 no-op——
+                // searchOCR(among:) 返回 [String] 无文本,改用非 among 版
+                // + among 过滤,保留文本供排序
                 rows = ((try? store.searchOCR(query: term)) ?? [])
-                    .prefix(topK).map { ($0.refKey, $0.text) }
+                    .filter { among.contains($0.refKey) }
+                    .map { ($0.refKey, $0.text) }
+            } else {
+                // 批131修(验收 low):去掉 per-variant prefix(topK) 截断——
+                // 与主管线批129 全量收集同构,全局排序后由调用方限量;
+                // per-variant 截断会在排序前丢掉全局最短行
+                rows = ((try? store.searchOCR(query: term)) ?? [])
+                    .map { ($0.refKey, $0.text) }
             }
             let kinds = classifier.classify(rows.map(\.0))
             for r in rows where !seen.contains(r.0) {
@@ -1494,10 +1501,15 @@ final class SearchEngine {
                 out.append((kinds[r.0] ?? .photo, r.0, r.1))
             }
         }
-        // 批130(验收 low 同规):全变体结果按文本长度升序——证件本体(短)
-        // 浮顶,聊天/表单截图(长)沉底;主管线批129 已改,此处(文字:/and:/or:
-        // 前缀路径)同规,正面照不再因变体顺序 rank 靠后
-        return out.sorted { $0.text.count < $1.text.count }
+        // 批131:排序同主管线(MRZ P< 优先→文本长度)+ 全局排序后限 topK
+        // —批130 只加了长度,MRZ 和 prefix 截断未同规(验收 low);
+        // prefix 移到排序后:全局最短行不再被 per-variant 截断丢掉
+        let sorted = out.sorted { a, b in
+            let ma = a.text.contains("P<"), mb = b.text.contains("P<")
+            if ma != mb { return ma }
+            return a.text.count < b.text.count
+        }
+        return Array(sorted.prefix(topK * 2))
     }
 
     /// OCR 命中身份归类器(第四十三批):文件表→.file;有帧向量行→.videoFrame;
@@ -1907,12 +1919,17 @@ final class SearchEngine {
         let colorMap = store.colors(for: hits.filter {
             $0.kind != .face && $0.kind != .file && $0.kind != .fileChunk
         }.map { $0.refKey })
-        // 批130仪器:颜色缺失计数——用户实锤截图搜索 4033 张标签命中颜色条
-        // 只有「白22」,大面积 color=nil 待量化(色数据空洞定位入口)
-        let colorMissing = colorMap.values.filter { $0.isEmpty }.count
-        if colorMap.count < 50 || colorMissing > 0 {
+        // 批130仪器/批131修(验收 medium):颜色缺失=请求数-colorMap.count
+        // —colorMap 的 SQL 带 color IS NOT NULL,values 里永远没有空串,
+        // 旧写法 values.filter{isEmpty} 恒为 0;正确口径:请求了色的照片中
+        // 有多少没查回来(色数据空洞)
+        let colorEligible = hits.filter {
+            $0.kind != .face && $0.kind != .file && $0.kind != .fileChunk
+        }.count
+        let colorMissing = colorEligible - colorMap.count
+        if colorMissing > 0 {
             IndexingCoordinator.DiagLog.shared.event(
-                "颜色[\(colorMap.count)命中] 缺失=\(colorMissing)")
+                "颜色[\(colorMap.count)/\(colorEligible)命中] 缺失=\(colorMissing)")
         }
         for hit in hits {
             switch hit.kind {
