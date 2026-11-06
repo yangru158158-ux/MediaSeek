@@ -1138,8 +1138,11 @@ final class SearchEngine {
                 let conv = QueryUnderstanding.simplified(t)
                 // 拆步构造(不用三目嵌链式 +,类型推断会爆炸——CI 实测 688 行
                 // unable to type-check in reasonable time)
+                // 批132(用户确认):OCR 通道去掉 bridgedVariants——搜 licence 时
+                // 文字栏只搜"licence"原文,不再通过桥接拉入"驾照"(287 装机
+                // 实锤:中文驾校评价/司机评分截图含"驾照"两字全灌进文字栏);
+                // 桥接保留两个作用:SigLIP 视觉嵌入+floor 豁免,不进 OCR 搜索
                 var variants: [String] = [t] + (QueryUnderstanding.ocrAliases[t] ?? [])
-                    + QueryUnderstanding.bridgedVariants(for: t)
                 if conv != t {
                     variants.append(conv)
                     variants.append(contentsOf: QueryUnderstanding.ocrAliases[conv] ?? [])
@@ -1149,9 +1152,10 @@ final class SearchEngine {
                 // rank 跨变体递增)永远排在背面(变体"身份证"搜到,rank 0-10)后面;
                 // 全局合并后按字数排:背面(15-20字)最前/正面(80-120字)中前/
                 // 聊天截图(几百字)沉底——简单方案胜过字段表(批128 certFields 弃用)
-                // 批130:护照 MRZ 强信号——长度对护照失效(信息页100-300字与
-                // 申请表截图同量级,286 装机实锤混排);护照信息页底部有 MRZ 机读
-                // 区(P<CHN/YANG<<RU 格式两行),表单截图没有——含"P<"的排最前
+                // 批130→132:护照优先信号 MRZ P<→PASSPORT 大写——287 装机
+                // 实锤 Vision OCR 对 MRZ 机读区(OCR-B 字体)识别不稳定;
+                // 改用 PASSPORT 大写(护照信息页/封面都印着,表单截图极少
+                // 全大写 PASSPORT)作为浮顶信号,大小写不敏感
                 var allRows: [(refKey: String, text: String, term: String)] = []
                 for term in variants {
                     for r in ((try? store.searchOCR(query: term)) ?? []) {
@@ -1159,7 +1163,7 @@ final class SearchEngine {
                     }
                 }
                 let rows = allRows.sorted { a, b in
-                    let ma = a.text.contains("P<"), mb = b.text.contains("P<")
+                    let ma = a.text.uppercased().contains("PASSPORT"), mb = b.text.uppercased().contains("PASSPORT")
                     if ma != mb { return ma }
                     return a.text.count < b.text.count
                 }
@@ -1472,9 +1476,9 @@ final class SearchEngine {
         // 第六十九批:英文证件桥同规(主管线 OCR 通道注释)——纯加法
         // 第七十二批:繁→简转换词同规追加(与主管线一致,文字:/and:/or: 共用此处);
         // 拆步构造防类型推断爆炸(同主管线注释)
+        // 批132(用户确认):OCR 通道去掉 bridgedVariants(与主管线同改)
         let conv = QueryUnderstanding.simplified(t)
         var variantTerms: [String] = [t] + (QueryUnderstanding.ocrAliases[t] ?? [])
-            + QueryUnderstanding.bridgedVariants(for: t)
         if conv != t {
             variantTerms.append(conv)
             variantTerms.append(contentsOf: QueryUnderstanding.ocrAliases[conv] ?? [])
@@ -1501,11 +1505,9 @@ final class SearchEngine {
                 out.append((kinds[r.0] ?? .photo, r.0, r.1))
             }
         }
-        // 批131:排序同主管线(MRZ P< 优先→文本长度)+ 全局排序后限 topK
-        // —批130 只加了长度,MRZ 和 prefix 截断未同规(验收 low);
-        // prefix 移到排序后:全局最短行不再被 per-variant 截断丢掉
+        // 批132:排序同主管线(PASSPORT 优先→文本长度)+ 全局排序后限 topK
         let sorted = out.sorted { a, b in
-            let ma = a.text.contains("P<"), mb = b.text.contains("P<")
+            let ma = a.text.uppercased().contains("PASSPORT"), mb = b.text.uppercased().contains("PASSPORT")
             if ma != mb { return ma }
             return a.text.count < b.text.count
         }

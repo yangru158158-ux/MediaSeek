@@ -957,11 +957,14 @@ final class VectorStore {
     /// 无字照片有 "" 占位行,不会因缺行反复重处理
     func photoRefKeysNeedingEnrichment() throws -> Set<String> { try serialized {
         guard let db else { return [] }
+        // 批132:加「色缺失」判据——287 装机实锤颜色全灭(0/109,0/67,0/250),
+        // 索引重建后色列可能被重置为 NULL;缺色的照片与缺 OCR 一样需要富集自愈
         let stmt = try prepare("""
         SELECT ref_key FROM items
         WHERE kind = 'photo' AND space = 'clip'
           AND (frame_index = -1
-               OR ref_key NOT IN (SELECT ref_key FROM ocr_text))
+               OR ref_key NOT IN (SELECT ref_key FROM ocr_text)
+               OR color IS NULL)
         """)
         defer { sqlite3_finalize(stmt) }
         var out = Set<String>()
