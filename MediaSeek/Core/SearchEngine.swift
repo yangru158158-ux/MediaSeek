@@ -1081,7 +1081,9 @@ final class SearchEngine {
                     // 拆步构造(1058 行老教训:链式 + 数组拼接类型推断爆炸)
                     var variants: [String] = [t]
                     variants += QueryUnderstanding.ocrAliases[t] ?? []
-                    variants += QueryUnderstanding.bridgedVariants(for: t)
+                    // 批132补修(验收 medium):AND 分支同去桥——批132 只改了
+                    // 逐词分支(1141)与 ocrUnionHits(1479),此处漏改致多词语义
+                    // 查询仍经桥接拉入"驾照"中文命中(130 漏改 ocrUnionHits 同型)
                     let conv = QueryUnderstanding.simplified(t)
                     if conv != t {
                         variants.append(conv)
@@ -1155,7 +1157,10 @@ final class SearchEngine {
                 // 批130→132:护照优先信号 MRZ P<→PASSPORT 大写——287 装机
                 // 实锤 Vision OCR 对 MRZ 机读区(OCR-B 字体)识别不稳定;
                 // 改用 PASSPORT 大写(护照信息页/封面都印着,表单截图极少
-                // 全大写 PASSPORT)作为浮顶信号,大小写不敏感
+                // 全大写 PASSPORT)作为浮顶信号。
+                // 批132补修(验收 medium):大小写**敏感**——判别力恰来自"表单
+                // 截图极少全大写";原 uppercased() 归一使表单里混合大小写的
+                // "Passport No." 同样浮顶,信号失效
                 var allRows: [(refKey: String, text: String, term: String)] = []
                 for term in variants {
                     for r in ((try? store.searchOCR(query: term)) ?? []) {
@@ -1163,7 +1168,7 @@ final class SearchEngine {
                     }
                 }
                 let rows = allRows.sorted { a, b in
-                    let ma = a.text.uppercased().contains("PASSPORT"), mb = b.text.uppercased().contains("PASSPORT")
+                    let ma = a.text.contains("PASSPORT"), mb = b.text.contains("PASSPORT")
                     if ma != mb { return ma }
                     return a.text.count < b.text.count
                 }
@@ -1506,8 +1511,9 @@ final class SearchEngine {
             }
         }
         // 批132:排序同主管线(PASSPORT 优先→文本长度)+ 全局排序后限 topK
+        // 批132补修(验收 medium):PASSPORT 大小写敏感(与主管线同改,原 uppercased() 抵消判别力)
         let sorted = out.sorted { a, b in
-            let ma = a.text.uppercased().contains("PASSPORT"), mb = b.text.uppercased().contains("PASSPORT")
+            let ma = a.text.contains("PASSPORT"), mb = b.text.contains("PASSPORT")
             if ma != mb { return ma }
             return a.text.count < b.text.count
         }
