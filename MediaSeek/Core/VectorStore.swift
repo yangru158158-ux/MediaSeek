@@ -575,10 +575,19 @@ final class VectorStore {
         // 900/块:留在 SQLite 变量数上限(999)之内,跨版本安全
         for start in stride(from: 0, to: unique.count, by: 900) {
             let chunk = Array(unique[start..<min(start + 900, unique.count)])
-            let placeholders = String(repeating: ",?", count: chunk.count - 1) + "?"
+            // 批133修(291 装机实锤):占位符拼接 ",?"×(n-1)+"?" 在 n≥2 时产出
+            // "IN (,??)" 语法错,try? prepare 静默吞掉→本函数批68 以来对任何
+            // ≥2 张的查询恒返回空表(颜色诊断永远 缺失=总数、DisplayHit 色恒空)
+            // —色数据一直在库里,读端瞎了;291 日记反证:OR color IS NULL 自愈
+            // 一张都没拉(处理6+0/3.8s),色列非空。改全库既有正确写法(819/1131 同款)
+            let placeholders = Array(repeating: "?", count: chunk.count).joined(separator: ",")
             guard let stmt = try? prepare(
                 "SELECT ref_key, color FROM items WHERE color IS NOT NULL AND ref_key IN (\(placeholders))")
-            else { continue }
+            else {
+                // 批133:prepare 失败不再静默——SQL 拼错类缺陷必须第一时间上日记
+                IndexingCoordinator.DiagLog.shared.event("颜色批量查询 prepare 失败(块=\(chunk.count),占位符=\(placeholders))")
+                continue
+            }
             defer { sqlite3_finalize(stmt) }
             for (i, r) in chunk.enumerated() {
                 sqlite3_bind_text(stmt, Int32(i + 1), r, -1, Self.transient)
