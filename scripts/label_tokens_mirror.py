@@ -275,4 +275,10 @@ expect(dict(DICTIONARY).get("驾驶证") == "driver license card",
        "驾驶证词典对补齐(批83 已 document→card,镜像滞后三批实锤)")
 print(f"证件桥: 表 {len(COUNTERPARTS)} 键 / 别名 {len(OCR_ALIASES)} 组 对拍一致")
 
+# ---- 批134:查询端下划线拆分护栏(批130验收余账;与 Swift 断言同集) ----
+# 批131 同步了拆分逻辑但没断言它——误删时镜像照跑全绿,双侧共守才闭环
+pc = label_tokens("play_card")
+expect("play_card" in pc and "play" in pc and "card" in pc,
+       "play_card 拆分三形并存(整词+片段,与照片标签端 id_card 拆分对齐)")
+
 print("PASS: 镜像全绿(词典", len(DICTIONARY), "条/标签", len(ZH), "词/泛化", len(GENERIC), "个)")

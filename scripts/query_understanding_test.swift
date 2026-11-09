@@ -304,6 +304,14 @@ enum QueryUnderstandingTest {
             }
         }
 
+        // —— 批134:查询端下划线拆分护栏(批130验收余账) ——
+        // 批130 加了拆分逻辑但两侧测试都没断言它——误删拆分时 CI 全绿,
+        // 286 装机「play_card 标签=0 全灭」的事故会静默回潮;Python 镜像
+        // 同批(批131 已同步逻辑)补同集断言,双侧共守
+        let pcTokens = QueryUnderstanding.labelTokens("play_card")
+        expect(pcTokens.contains("play_card") && pcTokens.contains("play") && pcTokens.contains("card"),
+               "play_card 拆分三形并存(整词+片段,与照片标签端 id_card 拆分对齐)")
+
         // —— 全量标签词典回归(第四十七批):词典里每一个词都必须能工作 ——
         // 不是逐词救火:全部标签词(≈1566)做两个方向的穷尽断言——
         //   ①英文标签直搜不被任何逻辑剔除(含 12 个泛化词,守卫后本尊保留)
@@ -327,7 +335,7 @@ enum QueryUnderstandingTest {
         expect(passCn == zhToEns.count,
                "全量 \(zhToEns.count) 个中文词反查全部命中标签通道")
 
-        // 断言数口径:全文 expect 调用 95 项(另含 1 行函数定义,批94 增 5 批98 增 3)
-        print("PASS: 查询理解 95 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词穷尽)")
+        // 断言数口径:全文 expect 调用 96 项(另含 1 行函数定义,批94 增 5 批98 增 3 批134 增 1)
+        print("PASS: 查询理解 96 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词穷尽)")
     }
 }
