@@ -188,13 +188,21 @@ final class SearchEngine {
                     }
                 }
                 // 裸地名(整个查询就是「南京」「马尔代夫」):城市名无视觉特征,
-                // 语义通道认不出;挂 GPS 地点过滤,后面与地点浏览(全量拍摄记录)取并集。
+                // 语义通道认不出;清空 query 落入下方纯地点浏览分支
+                // (GPS 全量拍摄记录 ∪ 用户命名——加法,不是过滤)。
                 // 地理编码失败则原地降级为普通内容搜索,不误伤
+                // 批135(293 装机实锤):批103 删并集分支换交集门时,分支条件
+                // 「query 非空」把裸地名一起捕进去——裸地名变成 语义(城市名)
+                // ∩(GPS∪命名),城市名无视觉特征→语义名单≈噪声,交集≈0
+                // (南京 0/杭州 大减,293 截图+日记实锤);e13a4c9 教义「裸地名
+                // 是加法不是过滤」自此复活。「在X+内容词」走上方 extract 路径
+                // remaining 非空,批103 交集语义不变
                 if placeRegion == nil, !query.isEmpty,
                    let p = QueryUnderstanding.barePlace(query),
                    let region = await PlaceGeocoder.region(for: p, radius: 50_000) {
                     placeRegion = region
                     placeLabel = p
+                    query = ""
                 }
                 if query.isEmpty, dateRange == nil, placeRegion == nil {
                     query = QueryUnderstanding.core(spec.body)   // 时间词没能构成区间,回退原查询
@@ -213,6 +221,9 @@ final class SearchEngine {
         // 参数上限,排序继承内容通道全局名次)
         if let placeRegion, let pl = placeLabel, !query.isEmpty,
            spec.channel == .any, spec.connector == .none, within == nil {
+            // 批135仪器:地点路由行——交集(在X+内容词)与纯浏览(裸地名)
+            // 分道后在 diag.log 一眼可辨,批103 类静默换门不再可能
+            IndexingCoordinator.DiagLog.shared.event("地点[\(pl)] 路径=交集(在X+内容词)")
             var base = Set<String>()
             photo.fetchAllAssets().enumerateObjects { asset, _, _ in
                 if scope == .file { return }   // 文件无 GPS
@@ -243,6 +254,10 @@ final class SearchEngine {
 
         // 纯时间/地点浏览:无内容词,按拍摄时间倒序列出该时段的照片/视频/文件
         if query.isEmpty, dateRange != nil || placeRegion != nil {
+            // 批135仪器:裸地名路由行(纯时间浏览无 placeLabel,不打,防刷屏)
+            if let pl = placeLabel {
+                IndexingCoordinator.DiagLog.shared.event("地点[\(pl)] 路径=纯浏览(GPS∪命名,批135复原)")
+            }
             var hits: [SearchHit] = []
             photo.fetchAllAssets().enumerateObjects { asset, _, _ in
                 guard hits.count < topK else { return }
@@ -262,7 +277,11 @@ final class SearchEngine {
                     hits.append(h)
                 }
             }
-            if let allFiles = try? imports.allFiles() {
+            // 批135:文件无 GPS——凡带地点的浏览不列文件(恢复 f219edf 原设计
+            // 「文件无 GPS,地点浏览只列相册内容」);旧代码 placeRegion 非空时
+            // fileMatchesFilters(dateRange:nil)=true,「在南京」与裸地名同病全量
+            // 灌入文件。纯时间浏览照常按时间列文件
+            if placeRegion == nil, let allFiles = try? imports.allFiles() {
                 for f in allFiles where hits.count < topK {
                     if fileMatchesFilters(f, dateRange: dateRange) {
                         hits.append(SearchHit(kind: .file, refKey: f.id, frameIndex: 0,
