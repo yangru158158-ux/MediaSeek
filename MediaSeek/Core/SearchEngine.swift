@@ -261,6 +261,13 @@ final class SearchEngine {
             var hits: [SearchHit] = []
             photo.fetchAllAssets().enumerateObjects { asset, _, _ in
                 guard hits.count < topK else { return }
+                // 批135二修(验收发现):页签守卫——批103 交集分支有(L218-220
+                // 同款),浏览分支一直漏;裸地名改走本分支后暴露面放大(照片
+                // 页签混视频/文件页签混照片)。文件页签不列相册资产,该页签
+                // 的地点查询由下方内容兜底接管(文件无 GPS,GPS 结构性为空)
+                if scope == .file { return }
+                if scope == .photo, asset.mediaType != .image { return }
+                if scope == .video, asset.mediaType != .video { return }
                 guard Self.assetPasses(asset, dateRange: dateRange, place: placeRegion) else { return }
                 hits.append(SearchHit(kind: asset.mediaType == .video ? .videoFrame : .photo,
                                       refKey: asset.localIdentifier, frameIndex: 0,
@@ -289,6 +296,17 @@ final class SearchEngine {
                                               date: f.addedAt, score: 1.0, color: nil))
                     }
                 }
+            }
+            // 批135二修(用户拍板):SigLIP 对地名误报多(城市名无视觉特征教义)
+            // ——主从分明:GPS∪命名 有结果时语义完全不参与;空了才交给内容
+            // 搜索兜底(该地确无拍摄时,「马尔代夫」类查询还能捞回含该地名
+            // 的截图/文章)。兜底=完整内容搜索(SigLIP 视觉∪标签∪OCR∪命名),
+            // 不带 📍 地点标(结果非 GPS 圈选,挂标误导)
+            if let pl = placeLabel, hits.isEmpty {
+                IndexingCoordinator.DiagLog.shared.event("地点[\(pl)] 路径=纯浏览空→内容兜底")
+                return try await runBareSearch(query: pl, spec: spec, scope: scope, topK: topK,
+                                               siglip: siglip, dateRange: dateRange,
+                                               placeRegion: nil, placeLabel: nil, among: nil)
             }
             // 批102:纯浏览 resolve 补 dateRange(GPS 侧已 assetPasses 预滤,
             // 此处为 userTag 侧的照片真实日期裁决补闸)
