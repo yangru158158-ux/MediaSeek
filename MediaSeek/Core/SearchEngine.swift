@@ -284,6 +284,34 @@ final class SearchEngine {
                     hits.append(h)
                 }
             }
+            // 批136(294 装机实锤:地名文字栏全空):裸地名补跑 OCR 文字通道
+            // ——批99 四通道定稿(用户三轮纠正):「GPS 拍摄(语义侧)+ OCR 文字
+            // 命中(文字侧,杭州上海既是地址也是文字)+ 用户标签」;批135 只搬
+            // 了 GPS∪命名,文字栏被一起丢掉(293 走交集时内容搜索在跑,通道
+            // [南京] 文字=8)。SigLIP 视觉仍按批135二修主从不参与(误报教义),
+            // Vision 标签照旧出局(机器物体标签,批99)。全部页签不收文字命中
+            // 的文件(与批135「地点浏览不列文件」同口径),文件页签照收(文件
+            // 无 GPS,文字是其唯一可达通道)
+            var textIDs: Set<String> = []
+            if let pl = placeLabel {
+                let classifier = OCRRefClassifier(store: store)
+                let allowed = Self.scopeAllowedKinds(scope)
+                var seenT = Set(hits.map(\.refKey))
+                var ocrCount = 0
+                for r in ocrUnionHits(pl, scope: scope, within: nil, topK: topK, classifier: classifier)
+                where allowed.contains(r.kind)
+                    && (scope == .file || (r.kind != .file && r.kind != .fileChunk))
+                    && !seenT.contains(r.refKey) {
+                    seenT.insert(r.refKey)
+                    hits.append(SearchHit(kind: r.kind, refKey: r.refKey, frameIndex: 0,
+                                          space: "ocr",
+                                          title: "含「\(pl)」:\(Self.ocrSnippet(r.text, pl))",
+                                          date: nil, score: 0.9, color: nil))
+                    textIDs.insert("\(r.kind.rawValue)-\(r.refKey)")
+                    ocrCount += 1
+                }
+                IndexingCoordinator.DiagLog.shared.event("地点[\(pl)] 文字栏=\(ocrCount)")
+            }
             // 批135:文件无 GPS——凡带地点的浏览不列文件(恢复 f219edf 原设计
             // 「文件无 GPS,地点浏览只列相册内容」);旧代码 placeRegion 非空时
             // fileMatchesFilters(dateRange:nil)=true,「在南京」与裸地名同病全量
@@ -297,11 +325,12 @@ final class SearchEngine {
                     }
                 }
             }
-            // 批135二修(用户拍板):SigLIP 对地名误报多(城市名无视觉特征教义)
-            // ——主从分明:GPS∪命名 有结果时语义完全不参与;空了才交给内容
-            // 搜索兜底(该地确无拍摄时,「马尔代夫」类查询还能捞回含该地名
-            // 的截图/文章)。兜底=完整内容搜索(SigLIP 视觉∪标签∪OCR∪命名),
-            // 不带 📍 地点标(结果非 GPS 圈选,挂标误导)
+            // 批135二修(用户拍板)/批136 顺延:SigLIP 对地名误报多(城市名无
+            // 视觉特征教义)——主从分明:GPS∪命名∪文字(批136 补)有结果时
+            // 语义完全不参与;全空才交给内容搜索兜底(该地确无拍摄且无文字
+            // 命中时,「马尔代夫」类查询还能捞回含该地名的截图/文章)。
+            // 兜底=完整内容搜索(SigLIP 视觉∪标签∪OCR∪命名),不带 📍 地点标
+            // (结果非 GPS 圈选,挂标误导)
             if let pl = placeLabel, hits.isEmpty {
                 IndexingCoordinator.DiagLog.shared.event("地点[\(pl)] 路径=纯浏览空→内容兜底")
                 return try await runBareSearch(query: pl, spec: spec, scope: scope, topK: topK,
@@ -309,8 +338,9 @@ final class SearchEngine {
                                                placeRegion: nil, placeLabel: nil, among: nil)
             }
             // 批102:纯浏览 resolve 补 dateRange(GPS 侧已 assetPasses 预滤,
-            // 此处为 userTag 侧的照片真实日期裁决补闸)
-            return SearchOutcome(hits: resolve(hits, dateRange: dateRange), textIDs: [],
+            // 此处为 userTag 侧的照片真实日期裁决补闸);批136:文字栏命中集
+            // 随行(纯时间浏览 textIDs 恒空,行为不变)
+            return SearchOutcome(hits: resolve(hits, dateRange: dateRange), textIDs: textIDs,
                                  timeLabel: dateRange?.label, placeLabel: placeLabel)
         }
 
