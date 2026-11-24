@@ -1,7 +1,8 @@
 name: Export Models
 # 在 GitHub 免费提供的 macOS 机器上运行模型转换
 # (coremltools 完整运行库仅 macOS 可用;Windows 上转换会缺库)
-# 产出:models.zip 工件(含 TextEmbedder + ImageEmbedder),下载后导入 App 即可
+# 产出:models.zip(基础包)+ models-so400m.zip(图像模型),App 内
+# 设置→模型在线更新 下载导入(App 的 IPA 本身不含任何模型)
 #
 # 单环境 transformers 5(2026-10-12 定案):
 #   Gemma wrapper 自管掩码,不经 masking_utils;
@@ -10,6 +11,15 @@ name: Export Models
 #
 # 2026-10-13 增加:so400m 增强图像模型包 + GitHub Release(models tag)托管,
 # App 内 设置→模型在线更新 直接下载导入(manifest.json 描述各包版本/大小)
+#
+# 2026-11-24 2.0(用户拍板:Base 不再使用,数据源删掉以降低新用户下载量):
+#   ① 完整包不再含 Base 图像模型(主导出加 --skip-siglip),只剩文本+人脸。
+#      旧完整包 1,204,084,539 字节里 Base(ImageEmbedder)占 0.707GB/58.7%,
+#      新用户合计下载 3.320GB → 2.613GB
+#   ② so400m 成唯一图像模型、必装:导出失败不再 continue-on-error(缺它新装
+#      用户装不了),失败即本次不发布任何包
+#   ③ 发布不再 delete+create,改覆盖上传(见发布步骤注释)
+#   ④ 指纹:完整包去掉 I 段(2.0 客户端 ModelManager.installedFingerprint 同规)
 on:
   workflow_dispatch:
   push:
@@ -52,10 +62,13 @@ jobs:
           curl -sL -o "$RUNNER_TEMP/buffalo_l.zip" https://github.com/deepinsight/insightface/releases/download/v0.7/buffalo_l.zip
           unzip -o -j "$RUNNER_TEMP/buffalo_l.zip" w600k_r50.onnx -d "$RUNNER_TEMP/face"
 
-      - name: 导出文本/图文模型(coremltools 9)
+      - name: 导出文本模型(coremltools 9;2.0 起 Base 图像模型不再导出)
+        # --skip-siglip:输出目录不留 ImageEmbedder/,下一步 export_face.py 全量
+        # 打包时 models.zip 自然只剩 TextEmbedder + FaceEmbedder
         run: |
           python scripts/export_models.py \
-            --outdir MediaSeek/Resources/Models
+            --outdir MediaSeek/Resources/Models \
+            --skip-siglip
 
       - name: 导出人脸模型并打包(onnx2torch→trace→ct,同环境)
         run: |
@@ -63,9 +76,11 @@ jobs:
             --onnx "$RUNNER_TEMP/face/w600k_r50.onnx" \
             --outdir MediaSeek/Resources/Models
 
-      - name: 导出增强图像模型(so400m,可在线更新切换)
-        # 877M 参数在 7GB 内存 runner 上偏紧,失败不阻塞主包发布(continue-on-error)
-        continue-on-error: true
+      - name: 导出图像模型(so400m,2.0 起唯一图像模型,必装)
+        # 2.0 前是可选增强包,失败不阻塞主包发布(continue-on-error)。现在它是
+        # 唯一的图像模型,缺包=新装用户装不了,所以失败即整个 job 失败、本次
+        # 不发布(在线源保留上一次完整的一组)。877M 参数在 7GB 内存 runner 上
+        # 偏紧,失败时重跑本 workflow 即可
         env:
           SIGLIP_MODEL: google/siglip2-so400m-patch14-384
         run: |
@@ -105,6 +120,9 @@ jobs:
           # CI 重发同一批模型(版本字符串必变)指纹不变,App 端比对后明示
           # 「与服务端一致,无需重装」,不再诱导用户重下未变化的 1.2GB/2.1GB。
           # 拼法与 ModelManager.installedFingerprint 同规,改一处须同步另一处
+          # 2.0:完整包指纹去掉 I 段(包内已无 Base 图像模型);so400m 仍是 P:dim,
+          # 客户端 2.0 改从唯一图像槽位 ImageEmbedder 取。已装 1.0 全套模型的设备
+          # 升级后两段指纹预期逐段相等——两个包都显示「与服务端一致,无需重装」
           def slot_meta(zpath, dirname):
               try:
                   with zipfile.ZipFile(zpath) as z:
@@ -116,21 +134,19 @@ jobs:
               return {}
           def fp_full():
               t = slot_meta("models.zip", "TextEmbedder")
-              i = slot_meta("models.zip", "ImageEmbedder")
               f = slot_meta("models.zip", "FaceEmbedder")
-              return "T:%d|I:%d|F:%d:%d" % (
-                  t.get("dim", 0), i.get("dim", 0),
-                  f.get("dim", 0), f.get("model_size", 0))
+              return "T:%d|F:%d:%d" % (
+                  t.get("dim", 0), f.get("dim", 0), f.get("model_size", 0))
           def fp_pro():
               i = slot_meta("models-so400m.zip", "ImageEmbedder")
               return "P:%d" % i.get("dim", 0)
-          add("full", "标准完整包(文本+图文+人脸)", "models.zip",
-              "三个模型全量;首次安装或一次到位用这个", fingerprint=fp_full())
+          add("full", "基础模型包(文本+人脸)", "models.zip",
+              "文本+人脸;与图像模型包配套,首次安装两个都要装", fingerprint=fp_full())
           # 第八十四批:人脸增量包②下架——完整包①自 10-13 起已内置 r50 人脸,
           # ②只对更旧的①有用,新装走不到(客户端 ModelUpdateView 已同步过滤
           # key=face;face-only.zip 仍随 Release 上传,仅不再进 manifest)
-          add("so400m", "增强图像模型(so400m)", "models-so400m.zip",
-              "识别更强、导入后需全量重建图像向量(约1-2小时,可中断续跑)", fingerprint=fp_pro())
+          add("so400m", "图像模型(SigLIP2 so400m)", "models-so400m.zip",
+              "唯一图像模型,必装;图像向量若需重建会自动开始(约1-2小时)", fingerprint=fp_pro())
           m = {
               "version": (os.environ.get("GITHUB_SHA", "")[:7] or "dev")
                          + "-" + datetime.datetime.utcnow().strftime("%Y%m%d%H%M"),
@@ -147,11 +163,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          assets=(manifest.json)
           for f in models.zip face-only.zip models-so400m.zip; do
-            [ -f "$f" ] && assets+=("$f")
+            [ -f "$f" ] || { echo "::error::缺少 $f,本次不发布(在线源保持原样)"; exit 1; }
           done
-          gh release delete models -y --cleanup-tag || true
-          gh release create models "${assets[@]}" \
-            --title "模型包(在线更新源)" \
-            --notes "CI 自动发布;App 内 设置→模型在线更新 读取 manifest.json。仅限本人设备使用。"
+          # 2.0:不再 delete + create。先删后建会让在线源在整段重发期间缺席,
+          # 且上传中途失败会留下残缺的一组(缺任何一个包新用户都装不了)。改为
+          # 覆盖上传:旧资产在被新文件替换前始终可下载;清单最后传,保证清单
+          # 指向的包都已就位
+          if gh release view models >/dev/null 2>&1; then
+            gh release upload models models.zip face-only.zip models-so400m.zip --clobber
+            gh release upload models manifest.json --clobber
+          else
+            gh release create models manifest.json models.zip face-only.zip models-so400m.zip \
+              --title "模型包(在线更新源)" \
+              --notes "CI 自动发布;App 内 设置→模型在线更新 读取 manifest.json。仅限本人设备使用。"
+          fi
