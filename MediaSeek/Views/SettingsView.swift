@@ -375,7 +375,7 @@ struct SettingsView: View {
     /// 排查问题时对不上构建;改读 Bundle(短版本+构建号,与 TestFlight
     /// 页一致,报问题截图即可定位构建)
     private var appVersionText: String {
-        let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2.0"
+        let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "2"
         let b = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "?"
         return "\(v)(\(b))"
     }

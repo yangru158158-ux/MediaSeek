@@ -64,7 +64,12 @@ jobs:
       - name: 归档(手动签名)
         env:
           TEAM_ID: ${{ secrets.DEVELOPMENT_TEAM_ID }}
-          BUILD_NUM: ${{ github.run_number }}
+          # 批138:构建号从 1 重新起算(用户要求把大版本 2 定位成全新的版本)。
+          # 此前直接用 run_number,一路累积到 298(298=版本名「2.0」下最后一次上传,
+          # run 45414065702)。构建号只在同一版本名内要求递增,换版本名后可从头数。
+          # 减去 298 后下一次发版(run_number 299)= 构建号 1,此后随 run_number 递增;
+          # 失败的 run 也占 run_number,所以构建号可能跳号,只要递增 Apple 就接受
+          BUILD_NUM: ${{ github.run_number - 298 }}
         run: |
           xcodebuild archive             CURRENT_PROJECT_VERSION="$BUILD_NUM" \
             -project MediaSeek.xcodeproj \
