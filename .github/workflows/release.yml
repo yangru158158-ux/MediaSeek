@@ -109,18 +109,30 @@ jobs:
             -exportPath build/ipa
           echo "=== 打包自检:实际 Info.plist ==="
           unzip -o -q build/ipa/*.ipa -d build/ipa_x
-          plutil -p "build/ipa_x/Payload/MediaSeek.app/Info.plist" | grep -E "Orientation|Icon|Encryption|BundleIdentifier" || true
+          # 批137三修:把版本号与构建号也打出来,日志里就能核对进包的到底是哪个版本
+          plutil -p "build/ipa_x/Payload/MediaSeek.app/Info.plist" | grep -E "Orientation|Icon|Encryption|BundleIdentifier|ShortVersion|\"CFBundleVersion\"" || true
 
       - name: 上传 TestFlight
         env:
           ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
         run: |
+          # 批137三修:不能只看退出码。2026-11-24 实锤——上传被 App Store Connect
+          # 以 403 拒绝(altool 打了 ERROR 行),altool 退出码仍是 0,本步骤照样
+          # success、流水线打出「已上传」,实际 TestFlight 上没有这个构建。
+          # 以输出为准:必须有成功确认,且没有任何 ERROR 行
+          set +e
           xcrun altool --upload-app \
             -f build/ipa/*.ipa \
             -t ios \
             --apiKey "$ASC_KEY_ID" \
-            --apiIssuer "$ASC_ISSUER_ID"
+            --apiIssuer "$ASC_ISSUER_ID" 2>&1 | tee altool.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          if [ "$rc" -ne 0 ] || grep -q "ERROR:" altool.log || ! grep -q "UPLOAD SUCCEEDED" altool.log; then
+            echo "::error::上传 TestFlight 失败(退出码 $rc,或输出里没有 altool 的成功确认)。上面带 ERROR 的行是 App Store Connect 给出的原因"
+            exit 1
+          fi
 
       - name: 存档 dSYM 与原始二进制(本地解析 .ips 崩溃用)
         uses: actions/upload-artifact@v4
