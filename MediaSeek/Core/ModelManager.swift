@@ -13,23 +13,22 @@ extension Notification.Name {
     /// 还是混人」:指纹链路本身是通的,缺的就是导入后的这次触发)
     static let faceModelChanged = Notification.Name("faceModelChanged")
 
-    /// 图像模型切换(so400m ↔ 标准,第四十六批):维度变了旧视觉向量作废,
-    /// 广播触发自动同步——同步开始处的维度比对会清空 clip 向量并全量重嵌,
-    /// 不用等用户手动点同步或重启 App
+    /// 图像模型变更:维度变了旧视觉向量作废,广播触发自动同步——同步开始处的
+    /// 维度比对会清空 clip 向量并全量重嵌,不用等用户手动点同步或重启 App。
+    /// 第四十六批由 setImageModel(标准 ↔ so400m 切换)发出;2.0 起切换逻辑随
+    /// Base 停用删除,改由 loadSlot 在维度变化时发出(导入新图像模型包同样触发)
     static let clipModelChanged = Notification.Name("clipModelChanged")
 }
 
 enum ModelSlot: String {
     case text = "TextEmbedder"
     case image = "ImageEmbedder"
-    case imagePro = "ImageEmbedderPro"
     case face = "FaceEmbedder"
 
     var displayName: String {
         switch self {
         case .text: return "文本模型(EmbeddingGemma)"
-        case .image: return "图文模型(SigLIP)"
-        case .imagePro: return "图文模型·高精度(SigLIP so400m)"
+        case .image: return "图文模型(SigLIP2 so400m)"
         case .face: return "人脸模型(ArcFace r50)"
         }
     }
@@ -60,11 +59,17 @@ final class ModelManager: ObservableObject {
     /// 「未安装」以为模型被删了(2026-10-16 用户实测截图),实际在排队
     @Published private(set) var loadPassRunning = false
 
-    // MARK: 图像模型切换(第四十六批:标准 ↔ so400m)
-    /// so400m 增强包是否已导入(ImageEmbedderPro 槽位有 meta.json)
-    @Published private(set) var proInstalled = false
-    /// 切换进行中(设置页禁用交互,防双击并发双加载)
-    @Published private(set) var imageSwitching = false
+    // MARK: 图像模型(2.0:唯一模型 so400m)
+    /// 2.0 起 Base 标准模型停用,图像模型只有 so400m(用户拍板:so400m 效果更好,
+    /// 且删掉 Base 数据源可让新用户少下 0.707GB)。1.0 的双槽位切换(第四十六批)
+    /// 与「so400m 加载失败退回 Base」的降级一并删除——门槛系数与中文原生查询都
+    /// 按 so400m 标定,拿 Base 顶上是未标定行为。图像模型加载失败时语义搜索不可用,
+    /// 文字/标签/人脸不受影响。
+    /// 停用判据:图像模型 meta.dim 低于此值即视为 Base(so400m=1152,Base=768;
+    /// 沿用 1.0 导入器「dim ≥ 1024 视为增强包」的同一条线,将来换更大的模型仍满足)
+    static let minImageModelDim = 1024
+    /// 2.0 槽位迁移结果(设置页模型区显示;nil=无迁移发生)
+    @Published private(set) var migrationNote: String?
 
     private(set) var gemma: GemmaTextEmbedder?
     private(set) var siglip: SigLIPEmbedder?
@@ -73,25 +78,18 @@ final class ModelManager: ObservableObject {
     var bothReady: Bool { textState == .ready && imageState == .ready }
     var anyReady: Bool { textState == .ready || imageState == .ready }
 
-    /// 当前是否用 so400m 高精度图像模型(默认标准)
-    var useProImage: Bool {
-        UserDefaults.standard.bool(forKey: "imageModelUsePro")
-    }
-    /// 实际参与加载的图像槽位:选了 pro 但没导入 → 自动退回标准,
-    /// 保证 App 永远有可用的图像模型
-    var activeImageSlot: ModelSlot {
-        useProImage && proInstalled ? .imagePro : .image
-    }
-
     /// SigLIP 分数门槛缩放系数(so400m 校准,2026-10-22 CI 双模型分布实测):
     /// so400m 命中带均值 = base × 0.87(0.0838 vs 0.0963),噪声带同向下移
     /// (0.0635 vs 0.0731)——绝对门槛不可跨模型迁移,按激活槽位整体缩放。
     /// 性别对比线 0.010 是边距制且 so400m 实测边距 女照+0.039/男照-0.047
     /// 余量充足,不缩。搜索侧 SigLIP 门槛全部乘此系数;Gemma 文件门槛
-    /// 与图像模型无关,不缩
-    var siglipGateScale: Float {
-        activeImageSlot == .imagePro ? 0.87 : 1.0
-    }
+    /// 与图像模型无关,不缩。
+    /// 2.0:恒为 0.87——此前按激活槽位在 0.87/1.0 间二选一,1.0 那档属于 Base。
+    /// ⚠️ 未决疑点:model_validation.yml 的校准矩阵写的 so400m 是 patch16-384,
+    /// 产线导出用的是 patch14-384,系数可能是在另一个模型的分布上测的;
+    /// 其后的装机调参都基于现行组合(用户一直在 so400m 上验收),系数不动,
+    /// 留体检切换批次核实
+    var siglipGateScale: Float { 0.87 }
 
     /// 批95:视觉查询向量按模型分流。依据=2026-10-28 A/B 矩阵(build 248,
     /// so400m 上三族 3:0:海边日落召回+67%且增量恰为最相关橙桶/猫族多真猫
@@ -102,49 +100,84 @@ final class ModelManager: ObservableObject {
     /// 原配行为(nativeZh=false 逐字不变)。范围=单词语径与 语义:多词交集径
     /// (runMainSearch;批106 曾扩到平均径,批107 平均退役改交集,原料沿用);
     /// AND 线逐词/英文桥维持模板——各待独立 A/B 后再动。
-    /// 原生语义: 前缀不受此条件约束(显式实验意图,任何模型无条件直通)
-    var preferNativeZhQuery: Bool {
-        activeImageSlot == .imagePro
-    }
+    /// 原生语义: 前缀不受此条件约束(显式实验意图,任何模型无条件直通)。
+    /// 2.0:恒为 true——「标准版保持词典英译」那一半随 Base 停用而消失。siglipQuery
+    /// 的 nativeZh 形参与各调用点原样不动:其中一处默认 false(英文桥维持模板)
+    /// 是批95 的既有边界,不是遗漏
+    var preferNativeZhQuery: Bool { true }
 
     init() {
-        refreshProInstalled()
+        migrateImageSlot()
     }
 
-    func refreshProInstalled() {
-        let meta = supportRoot.appendingPathComponent(ModelSlot.imagePro.rawValue)
-            .appendingPathComponent("meta.json")
-        proInstalled = FileManager.default.fileExists(atPath: meta.path)
-    }
+    /// 2.0 图像模型槽位迁移(纯目录状态驱动,幂等,中途被杀下次启动按现状续做)。
+    /// 1.0 有两个图像槽位:ImageEmbedder(Base,768 维)与 ImageEmbedderPro
+    /// (so400m,1152 维);2.0 只留 so400m,且唯一槽位名=ImageEmbedder(与
+    /// so400m 包 zip 内的目录名一致)。按磁盘现状分三种(下方分支顺序为
+    /// ①、③、②:先判 Pro 目录在不在,再判 Pro 可不可用):
+    ///   ① 两个都在(装过 so400m 的 1.0 设备):删 Base,把 Pro 目录改名为
+    ///      ImageEmbedder。此前就在用 so400m 的设备向量库已是 1152 维,维度
+    ///      比对不触发,零重嵌;此前选的是标准(库里 768 维)则照常全量重嵌
+    ///   ② 只有 Base(只装过 1.0 完整包):Base 停用,删除;图像模型显示未安装,
+    ///      提示去下载 so400m。不保留 Base 当降级(理由见 minImageModelDim)
+    ///   ③ Pro 目录在但 meta 缺失/损坏(1.0 里会静默退回 Base):Pro 不可用,
+    ///      删除;Base 照②处理,用户重下 so400m
+    /// 本函数只负责清理,「不用 Base」的最终防线在 loadSlot 的 dim 守卫——
+    /// 这里删除失败时下次启动再试,期间也不会加载 Base
+    private func migrateImageSlot() {
+        let fm = FileManager.default
+        let root = supportRoot
+        let baseDir = root.appendingPathComponent(ModelSlot.image.rawValue)
+        let proDir = root.appendingPathComponent("ImageEmbedderPro")
 
-    /// 切换图像模型(标准 ↔ so400m)。切换 = 换视觉「眼睛」:
-    /// 释放旧模型内存(两者不可共存,so400m 明显更大)→ 加载新槽位 →
-    /// 维度变化时广播 clipModelChanged,AppModel 收到后自动开同步清旧向量全量重嵌
-    func setImageModel(pro: Bool) async {
-        guard !imageSwitching else { return }
-        guard pro != useProImage else { return }
-        guard !pro || proInstalled else {
-            detailText = "so400m 增强包未导入(设置→模型在线更新)"
-            return
+        func storedDim(_ dir: URL) -> Int? {
+            guard let data = try? Data(contentsOf: dir.appendingPathComponent("meta.json")) else { return nil }
+            return (try? JSONDecoder().decode(ModelMeta.self, from: data))?.dim
         }
-        imageSwitching = true
-        defer { imageSwitching = false }
-        let prevDim = UserDefaults.standard.object(forKey: "clipModelDim") as? Int
-        UserDefaults.standard.set(pro, forKey: "imageModelUsePro")
-        // 先释放旧 SigLIP 实例再加载新槽位,避免两个图像模型短时同驻内存
-        siglip = nil
-        setState(.loading, for: .image)
-        await loadSlot(activeImageSlot)
-        // so400m 加载失败(包损坏/内存不足等):退回标准,保证语义搜索可用
-        if siglip == nil, pro {
-            UserDefaults.standard.set(false, forKey: "imageModelUsePro")
-            await loadSlot(.image)
+        // 目录不存在视为已清;删除失败只记日志,由 loadSlot 守卫兜底
+        func wipe(_ dir: URL) -> Bool {
+            guard fm.fileExists(atPath: dir.path) else { return true }
+            do {
+                try fm.removeItem(at: dir)
+                return true
+            } catch {
+                IndexingCoordinator.DiagLog.shared.event(
+                    "模型槽位迁移(2.0):删除 \(dir.lastPathComponent) 失败(\(error.localizedDescription))")
+                return false
+            }
         }
-        if siglip != nil,
-           let nowDim = UserDefaults.standard.object(forKey: "clipModelDim") as? Int,
-           nowDim != prevDim {
-            NotificationCenter.default.post(name: .clipModelChanged, object: nil)
+
+        if fm.fileExists(atPath: proDir.path), let dim = storedDim(proDir),
+           dim >= Self.minImageModelDim {
+            // ① Pro 可用:先删 Base(删不掉就原样不动,下次再试),再把 Pro 改名
+            if wipe(baseDir) {
+                do {
+                    try fm.moveItem(at: proDir, to: baseDir)
+                    migrationNote = "已升级到 2.0:图像模型统一为 so400m,旧的标准模型已移除"
+                    IndexingCoordinator.DiagLog.shared.event(
+                        "模型槽位迁移(2.0):Pro(dim=\(dim))已改名为 ImageEmbedder,Base 已删")
+                } catch {
+                    migrationNote = "已升级到 2.0:图像模型目录迁移失败,请在「模型在线更新」重装 so400m"
+                    IndexingCoordinator.DiagLog.shared.event(
+                        "模型槽位迁移(2.0):改名失败(\(error.localizedDescription))")
+                }
+            }
+        } else if fm.fileExists(atPath: proDir.path) {
+            // ③ Pro 不可用
+            _ = wipe(proDir)
+            if wipe(baseDir) {
+                migrationNote = "已升级到 2.0:原有图像模型不可用,请在「模型在线更新」下载 so400m"
+            }
+            IndexingCoordinator.DiagLog.shared.event("模型槽位迁移(2.0):Pro 不可用,已清两个图像目录")
+        } else if let dim = storedDim(baseDir), dim < Self.minImageModelDim {
+            // ② 只有 Base
+            if wipe(baseDir) {
+                migrationNote = "已升级到 2.0:标准图像模型已停用并移除,请在「模型在线更新」下载 so400m"
+            }
+            IndexingCoordinator.DiagLog.shared.event("模型槽位迁移(2.0):仅 Base(dim=\(dim)),已删")
         }
+        // 1.0 的槽位选择记账,2.0 无意义
+        UserDefaults.standard.removeObject(forKey: "imageModelUsePro")
     }
 
     private var supportRoot: URL {
@@ -157,7 +190,7 @@ final class ModelManager: ObservableObject {
     func state(for slot: ModelSlot) -> ModelState {
         switch slot {
         case .text: return textState
-        case .image, .imagePro: return imageState
+        case .image: return imageState
         case .face: return faceState
         }
     }
@@ -165,7 +198,7 @@ final class ModelManager: ObservableObject {
     private func setState(_ s: ModelState, for slot: ModelSlot) {
         switch slot {
         case .text: textState = s
-        case .image, .imagePro: imageState = s
+        case .image: imageState = s
         case .face: faceState = s
         }
     }
@@ -181,10 +214,9 @@ final class ModelManager: ObservableObject {
         defer { loadPassRunning = false }
         await withTaskGroup(of: Void.self) { group in
             if textState != .ready { group.addTask { await self.loadSlot(.text) } }
-            // 只加载「当前选中」的图像模型(标准/so400m 二选一,第四十六批):
-            // so400m 体积数倍于标准,两者不可同时驻内存;选了 pro 没导入时
-            // activeImageSlot 已自动退回 .image
-            if imageState != .ready { group.addTask { await self.loadSlot(self.activeImageSlot) } }
+            // 图像模型只有一个槽位(2.0:so400m;第四十六批曾按选中项在标准/
+            // so400m 两个槽位间二选一加载)
+            if imageState != .ready { group.addTask { await self.loadSlot(.image) } }
             group.addTask { await self.loadSlot(.face) }   // 人脸模型可选,缺时静默降级
         }
     }
@@ -202,10 +234,8 @@ final class ModelManager: ObservableObject {
                 if !FileManager.default.fileExists(atPath: dir.appendingPathComponent("meta.json").path) {
                     // 2) 从随包模型目录编译一次
                     guard let bundled = bundleDir,
-                          FileManager.default.fileExists(atPath: bundled.appendingPathComponent("meta.json").path) else {
-                        throw MSError(slot == .imagePro
-                            ? "so400m 增强包未导入(设置→模型在线更新 下载后可切换)"
-                            : "未安装模型包 \(slot.rawValue)")
+                            FileManager.default.fileExists(atPath: bundled.appendingPathComponent("meta.json").path) else {
+                        throw MSError("未安装模型包 \(slot.rawValue)")
                     }
                     dir = root.appendingPathComponent(slot.rawValue)
                     try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -265,6 +295,15 @@ final class ModelManager: ObservableObject {
                     setState(.ready, for: slot)
                     if textState == .ready && imageState == .ready { detailText = "" }
                 case "clip":
+                    // 2.0 守卫(「不用 Base」的最终防线):迁移没删掉/塞进了旧包时,
+                    // 宁可图像模型停在未安装,也不拿 Base 配 so400m 的门槛系数与
+                    // 中文原生查询跑搜索
+                    guard meta.dim >= Self.minImageModelDim else {
+                        siglip = nil
+                        setState(.missing, for: slot)
+                        detailText = "标准图像模型(Base)已停用:请在 设置→模型在线更新 下载 so400m"
+                        return
+                    }
                     let imgURL = dir.appendingPathComponent("SiglipImage.mlmodelc")
                     let txtURL = dir.appendingPathComponent("SiglipText.mlmodelc")
                     guard let tokURL else { throw MSError("缺少 tokenizer.json") }
@@ -277,7 +316,15 @@ final class ModelManager: ObservableObject {
                     if textState == .ready && imageState == .ready { detailText = "" }
                     // 记录当前图像模型维度;IndexingCoordinator 同步前与库内向量维度
                     // 比对,不一致即清空旧 clip 向量全量重建(so400m 等在线升级换模型)
+                    let prevDim = UserDefaults.standard.object(forKey: "clipModelDim") as? Int
                     UserDefaults.standard.set(meta.dim, forKey: "clipModelDim")
+                    // 维度变了=换了图像模型:广播触发自动同步清旧向量全量重嵌。
+                    // 1.0 由 setImageModel 发(标准↔so400m 切换);2.0 切换逻辑已删,
+                    // 导入新的图像模型包后在这里发。同模型重装维度不变,不广播
+                    // (从未记录过维度=0 也算变化,与 1.0 setImageModel 的判定等价)
+                    if (prevDim ?? 0) != meta.dim {
+                        NotificationCenter.default.post(name: .clipModelChanged, object: nil)
+                    }
                 case "face":
                     let modelURL = dir.appendingPathComponent("Face.mlmodelc")
                     face = try FaceEmbedder(modelURL: modelURL,
@@ -314,9 +361,11 @@ final class ModelManager: ObservableObject {
     /// 才成立;真换模型至少 dim/model_size 会变(mbf→r50 字节变,标准→so400m
     /// 维度变,均被覆盖)。字段只用历代包必有的(不用 image_size 等后加字段,
     /// 旧包不错杀);任一槽位缺失(没装全)返回 nil = 需要安装。
-    /// 与 export_models 生成 manifest.fingerprint 的拼法同规,改一处须同步另一处
+    /// 与 export_models 生成 manifest.fingerprint 的拼法同规,改一处须同步另一处。
+    /// 2.0:基础包(full)只含文本+人脸,指纹去掉 I 段(T|F);图像模型包
+    /// (key 仍为 so400m)的 P 段改从唯一图像槽位取
     func installedFingerprint(forPackage key: String) -> String? {
-        let slots: [ModelSlot] = key == "so400m" ? [.imagePro] : [.text, .image, .face]
+        let slots: [ModelSlot] = key == "so400m" ? [.image] : [.text, .face]
         var parts: [String] = []
         for slot in slots {
             let metaURL = supportRoot.appendingPathComponent(slot.rawValue)
@@ -325,8 +374,7 @@ final class ModelManager: ObservableObject {
                   let meta = try? JSONDecoder().decode(ModelMeta.self, from: data) else { return nil }
             switch slot {
             case .text: parts.append("T:\(meta.dim)")
-            case .image: parts.append("I:\(meta.dim)")
-            case .imagePro: parts.append("P:\(meta.dim)")
+            case .image: parts.append("P:\(meta.dim)")
             case .face: parts.append("F:\(meta.dim):\(meta.model_size ?? 0)")
             }
         }
@@ -335,12 +383,12 @@ final class ModelManager: ObservableObject {
 
     // MARK: - 从 zip 导入模型包
 
-    /// zip 根目录应包含 TextEmbedder/ 与 ImageEmbedder/(各含 .mlpackage、tokenizer.json、meta.json)
-    /// - Parameter imageTarget: 显式指定图像包落位槽位(so400m 在线更新传 .imagePro,
-    ///   与随包标准模型并存实现切换);nil 时按 meta 维度启发式路由:
-    ///   dim ≥ 1024(so400m=1152)视为增强包进 .imagePro,防止手动导入增强包
-    ///   覆盖掉标准槽位
-    func importModelZip(at url: URL, imageTarget: ModelSlot? = nil) async throws {
+    /// zip 根目录应包含 TextEmbedder/ ImageEmbedder/ FaceEmbedder/(各含
+    /// .mlpackage、tokenizer.json、meta.json),目录名即槽位名。2.0 起图像模型
+    /// 只有 so400m 一种:含 Base(dim 低于 minImageModelDim)的 ImageEmbedder
+    /// 目录一律跳过不导入——塞进 1.0 时代的旧完整包时,同包的文本/人脸照常导入,
+    /// 不整包报错
+    func importModelZip(at url: URL) async throws {
         // 文件选择器给的是安全域 URL,必须先申请访问权
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
@@ -354,22 +402,21 @@ final class ModelManager: ObservableObject {
         try FileManager.default.unzipItem(at: url, to: extractDir)
 
         var found = 0
+        var skippedBase = false
         for name in try FileManager.default.contentsOfDirectory(atPath: extractDir.path) {
-            guard var slot = ModelSlot(rawValue: name) else { continue }
+            guard let slot = ModelSlot(rawValue: name) else { continue }
             let src = extractDir.appendingPathComponent(name)
-            guard FileManager.default.fileExists(atPath: src.appendingPathComponent("meta.json").path) else { continue }
+            let metaURL = src.appendingPathComponent("meta.json")
+            guard FileManager.default.fileExists(atPath: metaURL.path) else { continue }
 
-            // 图像包路由(第四十六批):显式指定优先;否则读 meta.json 的 dim,
-            // 高维包(so400m=1152)自动落 .imagePro,不覆盖标准槽
-            if slot == .image {
-                if imageTarget == .imagePro {
-                    slot = .imagePro
-                } else if imageTarget == nil,
-                          let data = try? Data(contentsOf: src.appendingPathComponent("meta.json")),
-                          let meta = try? JSONDecoder().decode(ModelMeta.self, from: data),
-                          meta.dim >= 1024 {
-                    slot = .imagePro
-                }
+            // 2.0:停用的 Base 图像模型不导入(1.0 在此按 dim 把高维包路由到
+            // .imagePro 槽;2.0 只有一个图像槽,目录名即槽位,不再需要路由)
+            if slot == .image,
+               let data = try? Data(contentsOf: metaURL),
+               let meta = try? JSONDecoder().decode(ModelMeta.self, from: data),
+               meta.dim < Self.minImageModelDim {
+                skippedBase = true
+                continue
             }
 
             let dest = supportRoot.appendingPathComponent(slot.rawValue)
@@ -388,9 +435,13 @@ final class ModelManager: ObservableObject {
             found += 1
             setState(.loading, for: slot)
         }
-        guard found > 0 else { throw MSError("压缩包里没有找到 TextEmbedder / ImageEmbedder 模型目录") }
+        guard found > 0 else {
+            throw MSError(skippedBase
+                ? "压缩包里只有已停用的标准图像模型(Base);请在「模型在线更新」下载 so400m"
+                : "压缩包里没有找到 TextEmbedder / ImageEmbedder / FaceEmbedder 模型目录")
+        }
+        if skippedBase { detailText = "已跳过停用的标准图像模型(Base)" }
 
-        refreshProInstalled()
         textState = .loading
         imageState = .loading
         await loadAll()
@@ -402,6 +453,9 @@ final class ModelManager: ObservableObject {
         while !bothReady {
             if Task.isCancelled { return false }
             if case .failed = textState, case .failed = imageState { return false }
+            // 2.0:图像模型可能确实没装(Base 停用后尚未下载 so400m;1.0 有 Base
+            // 兜底,图像模型总在)。加载轮次已结束仍是「未安装」就不必干等满超时
+            if !loadPassRunning, imageState == .missing { return textState == .ready }
             if Date().timeIntervalSince(start) > timeout { return anyReady }
             try? await Task.sleep(nanoseconds: 500_000_000)
         }

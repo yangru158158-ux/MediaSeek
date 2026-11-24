@@ -17,7 +17,10 @@ settings:
   base:
     SWIFT_VERSION: "5.9"
     TARGETED_DEVICE_FAMILY: "1"
-    MARKETING_VERSION: "1.0"
+    # 2.0(2026-11-24):图像模型只剩 so400m,Base 停用并从在线数据源删除——
+    # 新装流程与模型包结构不兼容 1.0,主版本号升 2。构建号(CURRENT_PROJECT_VERSION)
+    # 由 release.yml 用 github.run_number 覆盖,继续递增不重置
+    MARKETING_VERSION: "2.0"
     CURRENT_PROJECT_VERSION: "1"
     GENERATE_INFOPLIST_FILE: NO
   configs:
@@ -51,7 +54,7 @@ targets:
       path: MediaSeek/Info.plist
       properties:
         CFBundleDisplayName: 智搜
-        CFBundleShortVersionString: "1.0"
+        CFBundleShortVersionString: "2.0"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         UILaunchScreen: {}
         UIFileSharingEnabled: true

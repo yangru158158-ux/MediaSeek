@@ -640,6 +640,10 @@ final class SearchEngine {
             // 实证);标准版 false=词典英译原配。批107 起单词径与 语义:多词
             // 交集径同用此原料(批106 先扩到平均径,批107 平均退役改交集)
             let nativeZh = await MainActor.run { models.preferNativeZhQuery }
+            // 2.0:Base 停用后唯一图像模型是 so400m,上面两个值恒为 0.87 / true
+            // (「标准版 false=词典英译」那一半已不存在,见 ModelManager)。本文件
+            // 代码零改动,只在此标注——siglipQuery 的 nativeZh 形参与其各调用点
+            // 原样保留(其中默认 false 的一处是批95 既有边界,不是遗漏)
             // 批93:语义: 多词=组合概念——各词模板向量「归一化→平均→再归一化」
             // (CLIP 论文 80 模板 ensemble 同款配方)。整串拼嵌的落点由文本塔
             // 注意力决定、不可控(词袋效应:license certificate document 拼串
@@ -1307,6 +1311,7 @@ final class SearchEngine {
         // 骑车」恒空:落空词(词典未收)裸嵌入弱带全灭。so400m 下逐词也走
         // 原生模板壳(与单词径批95 同源);标准版 false=原行为
         let nativeZh = await MainActor.run { models.preferNativeZhQuery }
+        // 2.0:唯一图像模型 so400m,gate/nativeZh 恒为 0.87 / true(同主管线注释)
         // 第五十批:归类器一次搜索共用一个实例——逐词各建一套会把 files/
         // videoFrame 全表查询与 PHAsset 批查放大数倍(多词×别名×常见词数千命中)
         let classifier = OCRRefClassifier(store: store)
@@ -1631,6 +1636,8 @@ final class SearchEngine {
         if let en = QueryUnderstanding.english(for: concept) {
             // 批95:so400m 激活时中文词直用原文模板壳(原生路径,依据与边界
             // 见 ModelManager.preferNativeZhQuery);标准版仍走词典英译。
+            // 2.0:标准版已停用,唯一模型 so400m 下 nativeZh 恒为 true(ASCII 键
+            // 与下方「身份证」例外照旧);形参与各调用点原样保留
             // ⚠️ 复核修正:词典含少量 ASCII 键(pdf→document/qq),「词典命中
             // 必是中文」不成立——nativeZh 只对含非 ASCII 字符的词生效,
             // ASCII 键保持英译(document 泛词是文档截图的刻意选择)

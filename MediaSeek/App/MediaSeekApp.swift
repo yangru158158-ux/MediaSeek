@@ -60,8 +60,9 @@ final class AppModel: ObservableObject {
             }
             .store(in: &bag)
 
-        // 图像模型切换(so400m ↔ 标准,第四十六批)→ 同一模式:同步开始处的
-        // 维度比对自动清空旧 clip 向量并全量重嵌,切换完不用重启也不用手动点同步
+        // 图像模型变更(第四十六批:标准 ↔ so400m 切换;2.0 起切换逻辑已删,改由
+        // 导入新的图像模型包后的维度变化触发)→ 同一模式:同步开始处的维度比对
+        // 自动清空旧 clip 向量并全量重嵌,不用重启也不用手动点同步
         NotificationCenter.default.publisher(for: .clipModelChanged)
             .sink { [weak self] _ in
                 Task { @MainActor in self?.indexing.startAutoSyncIfAuthorized() }

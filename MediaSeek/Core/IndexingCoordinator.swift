@@ -344,9 +344,10 @@ final class IndexingCoordinator: ObservableObject {
         guard photo.isAuthorized else { return }
         // 批77:首索引用户门控——第一次全库索引开始前,一切自动同步静默
         // (App 启动/模型变更通知都不开跑),唯一入口=资料库三步卡的
-        // 「开始索引」。否则装完①就自动用标准向量开跑,用户想先装③
-        // so400m 的窗口被吞,切换=全部重嵌(装机点名)。已有索引的设备
-        // (升级用户)不受影响,自动增量照旧
+        // 「开始索引」。已有索引的设备(升级用户)不受影响,自动增量照旧。
+        // 2.0 更新理由:原文是「装完①就自动用标准向量开跑,用户想先装③
+        // so400m 的窗口被吞,切换=全部重嵌」。2.0 已无标准模型,但两个模型包
+        // 仍可能只装了基础包——那时自动开跑会建出没有视觉向量的索引,门控照留
         let firstStarted = UserDefaults.standard.bool(forKey: "firstIndexStarted")
         guard firstStarted || store.countPhotos() > 0 else { return }
         runIncremental()
@@ -425,7 +426,7 @@ final class IndexingCoordinator: ObservableObject {
                 if Task.isCancelled {
                     phase = .idle
                 } else {
-                    phase = .failed("先完成「首次使用」第②步:设置 → 模型在线更新,下载①标准完整包")
+                    phase = .failed("先完成「首次使用」第②步:设置 → 模型在线更新,装好基础模型包与图像模型(so400m)")
                 }
                 return
             }

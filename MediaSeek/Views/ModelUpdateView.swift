@@ -317,7 +317,7 @@ struct ModelUpdateSection: View {
         } header: {
             Text("模型在线更新")
         } footer: {
-            Text("从 GitHub Release 下载模型包并自动导入,建议 Wi-Fi 且保持 App 前台。增强图像模型(so400m)识别更强,导入后自动切换并全量重建视觉向量(约 1-2 小时,可中断续跑);之后可在上方「图像模型切换」随时切回标准模型对比效果。")
+            Text("从 GitHub Release 下载模型包并自动导入,建议 Wi-Fi 且保持 App 前台。首次安装两个包都要装:「基础模型包」(文本+人脸)与「图像模型」(so400m)。图像向量需要重建时会自动开始(约 1-2 小时,可中断续跑)。")
         }
         // 批91:指纹一致=已装内容就是该服务端版本,记账自动对齐(不下载)——
         // 顶行「已装版本」不再停在旧字符串,与绿字判定自相矛盾(用户点名)
@@ -347,11 +347,14 @@ struct ModelUpdateSection: View {
         let installed = UserDefaults.standard.string(forKey: "pkg_\(f.key)")
         // 批87:按钮语义按「槽位是否已有模型」判,不只看版本记账——服务端
         // 每次重发清单版本必变,按旧记账所有已装包都显示「下载」,用户实锤
-        // 「so400m 已装却提示下载」(上次成功安装早于服务端重发)。so400m
-        // 槽位=proInstalled;标准完整包槽位=人脸模型已装(文本/图像随 App
-        // 包内置,人脸才是①独有内容)
+        // 「so400m 已装却提示下载」(上次成功安装早于服务端重发)。
+        // 2.0:图像模型包(key 仍为 so400m)槽位=图像模型已装;基础包槽位=
+        // 人脸模型已装(文本+人脸同在一个包里)。
+        // 更正旧注释「文本/图像随 App 包内置,人脸才是①独有内容」:IPA 从来
+        // 不含模型(模型目录自首个提交即 gitignore,构建 workflow 无模型步骤),
+        // 四个模型全都靠这里下载
         let slotPresent = f.key == "so400m"
-            ? app.models.proInstalled
+            ? app.models.imageState != .missing
             : (f.key == "full" && app.models.faceState != .missing)
         // 批89:内容指纹裁决。版本字符串随 CI 重发必变(内容没变也提示「有更
         // 新」,用户被诱导重下 1.2GB/2.1GB 未变化的模型——多次点名);指纹按
@@ -407,19 +410,15 @@ struct ModelUpdateSection: View {
             do {
                 let zipURL = try await loader.download(f, version: version)
                 loader.importing = true
-                // so400m 增强包落独立槽位 ImageEmbedderPro(第四十六批):
-                // 与随包标准模型并存,导入后自动切到 so400m,设置页可随时切回
-                let isPro = f.key == "so400m"
-                try await app.models.importModelZip(at: zipURL, imageTarget: isPro ? .imagePro : nil)
+                // 2.0:zip 内目录名即槽位名,不再按 key 指定落位槽(第四十六批
+                // so400m 曾落独立槽位 ImageEmbedderPro 与标准模型并存,导入后再
+                // 切换)。维度变化触发的重嵌由 ModelManager.loadSlot 广播
+                // clipModelChanged,这里不用再管
+                try await app.models.importModelZip(at: zipURL)
                 try? FileManager.default.removeItem(at: zipURL)
                 loader.importing = false
                 loader.finish(key: f.key, version: version)
-                if isPro {
-                    await app.models.setImageModel(pro: true)
-                    app.notify("so400m 已导入并切换;视觉向量开始全量重嵌(约 1-2 小时,可中断续跑)")
-                } else {
-                    app.notify("「\(f.name)」已导入并生效")
-                }
+                app.notify("「\(f.name)」已导入并生效")
             } catch {
                 loader.importing = false
                 loader.abortWith(error: error)

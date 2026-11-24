@@ -112,7 +112,7 @@ struct LibraryView: View {
                 setupRow(no: "②", title: "下载模型",
                          detail: modelsReady
                             ? "模型已就绪"
-                            : "到「设置」页 → 模型在线更新:先装①标准完整包;想用 so400m 增强再装③,装完再开索引(先索引后切换会全部重嵌一遍)",
+                            : "到「设置」页 → 模型在线更新:两个包都装(基础模型包=文本+人脸,图像模型=so400m),装完再开索引",
                          done: modelsReady, blockedBy: authorized ? nil : "①授权照片库",
                          actionTitle: nil, action: nil)
                 // ③ 索引

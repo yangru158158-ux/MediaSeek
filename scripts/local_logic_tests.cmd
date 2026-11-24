@@ -1,5 +1,6 @@
 @echo off
-rem Local logic assertions (Windows): 96 query-understanding checks + Python mirror.
+rem Local logic assertions (Windows): 96 query-understanding checks + Python mirror
+rem + 2.0 image-slot migration state machine (scripts\sim_image_slot_test.py).
 rem Runs in seconds before pushing - no macOS CI queue (created 2026-10-23 after
 rem repeated capacity rejections on macOS runners during US peak hours).
 rem One-time deps:
@@ -28,3 +29,8 @@ if errorlevel 1 exit /b 1
 
 echo == Python mirror exhaustive (dictionary/labels/generic) ==
 python scripts\label_tokens_mirror.py
+if errorlevel 1 exit /b 1
+
+echo == Image slot migration state machine (2.0, mirrors ModelManager) ==
+python scripts\sim_image_slot_test.py
+if errorlevel 1 exit /b 1
