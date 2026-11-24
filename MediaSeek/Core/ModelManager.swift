@@ -120,8 +120,9 @@ final class ModelManager: ObservableObject {
     ///      比对不触发,零重嵌;此前选的是标准(库里 768 维)则照常全量重嵌
     ///   ② 只有 Base(只装过 1.0 完整包):Base 停用,删除;图像模型显示未安装,
     ///      提示去下载 so400m。不保留 Base 当降级(理由见 minImageModelDim)
-    ///   ③ Pro 目录在但 meta 缺失/损坏(1.0 里会静默退回 Base):Pro 不可用,
-    ///      删除;Base 照②处理,用户重下 so400m
+    ///   ③ Pro 目录在但不可用(meta 读不出、维度不达标,或缺已编译的模型目录——
+    ///      1.0 里会静默退回 Base):删除;Base 照②处理,用户重下 so400m
+    /// ①里改名失败:清掉 Pro 目录收敛到「图像模型未安装」并提示重装,不重试
     /// 本函数只负责清理,「不用 Base」的最终防线在 loadSlot 的 dim 守卫——
     /// 这里删除失败时下次启动再试,期间也不会加载 Base
     private func migrateImageSlot() {
@@ -133,6 +134,16 @@ final class ModelManager: ObservableObject {
         func storedDim(_ dir: URL) -> Int? {
             guard let data = try? Data(contentsOf: dir.appendingPathComponent("meta.json")) else { return nil }
             return (try? JSONDecoder().decode(ModelMeta.self, from: data))?.dim
+        }
+        /// meta 可解出维度且达标,且两个已编译模型目录都在。只看 meta 不够:1.0 的
+        /// 导入是逐文件复制/编译,中途失败会留下「有 meta.json、没 mlmodelc」的
+        /// 半成品——2.0 验收 low 指出,拿它当可用会把 Base 删掉后加载失败且无兜底
+        func proDim(_ dir: URL) -> Int? {
+            guard let dim = storedDim(dir), dim >= ModelManager.minImageModelDim,
+                  fm.fileExists(atPath: dir.appendingPathComponent("SiglipImage.mlmodelc").path),
+                  fm.fileExists(atPath: dir.appendingPathComponent("SiglipText.mlmodelc").path)
+            else { return nil }
+            return dim
         }
         // 目录不存在视为已清;删除失败只记日志,由 loadSlot 守卫兜底
         func wipe(_ dir: URL) -> Bool {
@@ -147,8 +158,7 @@ final class ModelManager: ObservableObject {
             }
         }
 
-        if fm.fileExists(atPath: proDir.path), let dim = storedDim(proDir),
-           dim >= Self.minImageModelDim {
+        if let dim = proDim(proDir) {
             // ① Pro 可用:先删 Base(删不掉就原样不动,下次再试),再把 Pro 改名
             if wipe(baseDir) {
                 do {
@@ -157,13 +167,17 @@ final class ModelManager: ObservableObject {
                     IndexingCoordinator.DiagLog.shared.event(
                         "模型槽位迁移(2.0):Pro(dim=\(dim))已改名为 ImageEmbedder,Base 已删")
                 } catch {
+                    // 改名失败就清掉失败现场(Pro 目录),收敛到「图像模型未安装」:
+                    // 留着它,下次启动会重回本分支——先删掉用户按提示重装进
+                    // ImageEmbedder 的 so400m,再改名一次(2.0 验收 low)
+                    _ = wipe(proDir)
                     migrationNote = "已升级到 2.0:图像模型目录迁移失败,请在「模型在线更新」重装 so400m"
                     IndexingCoordinator.DiagLog.shared.event(
-                        "模型槽位迁移(2.0):改名失败(\(error.localizedDescription))")
+                        "模型槽位迁移(2.0):改名失败(\(error.localizedDescription)),已清 Pro 目录")
                 }
             }
         } else if fm.fileExists(atPath: proDir.path) {
-            // ③ Pro 不可用
+            // ③ Pro 不可用(meta 读不出、维度不达标,或缺已编译模型目录)
             _ = wipe(proDir)
             if wipe(baseDir) {
                 migrationNote = "已升级到 2.0:原有图像模型不可用,请在「模型在线更新」下载 so400m"

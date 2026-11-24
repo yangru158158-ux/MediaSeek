@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
-"""2.0 图像模型槽位迁移的状态机模拟测试(替换第四十六批的 sim_model_switch_test.py
-——那套「标准 ↔ so400m 切换」逻辑已随 Base 停用整段删除)。
+"""2.0 图像模型槽位迁移与导入文件视觉向量重建的状态机模拟测试
+(替换第四十六批的 sim_model_switch_test.py——那套「标准 ↔ so400m 切换」逻辑
+已随 Base 停用整段删除)。
 
-本机编译不了 ModelManager/Views(不在 swiftc 本地类型检查集),把 2.0 改动的
-控制流**忠实移植**成 Python 状态机,在模拟的文件系统/UserDefaults/通知上跑
-全部迁移场景断言。⚠️ 这是逻辑镜像不是 Swift 编译验证:类型错仍要等 CI;
-Swift 代码以 ModelManager.swift 为准,改 Swift 必同步改这里。
+本机编译不了 ModelManager/IndexingCoordinator/Views(不在 swiftc 本地类型检查集),
+把 2.0 改动的控制流**忠实移植**成 Python 状态机,在模拟的文件系统/UserDefaults/
+通知/向量库上跑全部场景断言。⚠️ 这是逻辑镜像不是 Swift 编译验证:类型错仍要等
+CI;Swift 代码为准,改 Swift 必同步改这里。
 
-镜像的 Swift 逻辑(括号内为 ModelManager.swift 的函数):
-  migrate_image_slot   (migrateImageSlot)      启动迁移,纯目录状态驱动
-  load_clip            (loadSlot 的 "clip" 分支) 「不用 Base」的最终守卫 + 维度变更广播
-  import_zip           (importModelZip)        目录名即槽位,Base 目录跳过
-  installed_fingerprint(installedFingerprint)  与 export_models.yml 的清单指纹同规
+镜像的 Swift 逻辑(括号内为 Swift 函数与所在文件):
+  migrate_image_slot   (migrateImageSlot,ModelManager)        启动迁移,纯目录状态驱动
+  load_clip            (loadSlot 的 "clip" 分支,ModelManager)  「不用 Base」的最终守卫+维度变更广播
+  import_zip           (importModelZip,ModelManager)          目录名即槽位,Base 目录跳过
+  installed_fingerprint(installedFingerprint,ModelManager)    与 export_models.yml 的清单指纹同规
+  wait_ready           (waitReady,ModelManager)               图像模型没装时不干等满超时
+  sync_imported_files  (syncImportedFiles,IndexingCoordinator) 导入文件的视觉向量按模型维度重建
 
-场景编号对应 2.0 方案记忆里的迁移状态机。直接跑: python scripts/sim_image_slot_test.py
+场景编号:S*=槽位迁移(对应 2.0 方案记忆里的迁移状态机),F*=导入文件视觉向量重建。
+直接跑: python scripts/sim_image_slot_test.py
 """
 import json
 import sys
@@ -27,6 +31,22 @@ META_TEXT = {"type": "gemma", "space": "gemma", "dim": 512}
 META_FACE = {"type": "face", "space": "face", "dim": 512, "model_size": 174383860}
 # 在线源旧清单实测值(2026-11-24 Range 探针):已装 1.0 全套模型的设备指纹
 OLD_FULL_FP = "T:512|I:768|F:512:174383860"
+COMPILED = ("SiglipImage.mlmodelc", "SiglipText.mlmodelc")   # loadSlot 加载的两个目录
+VISUAL_EXT = (".jpg", ".jpeg", ".png", ".heic", ".mp4", ".mov")   # 图片/视频(UTType image/movie)
+
+
+def full(meta):
+    """完整的模型目录:meta.json + 两个已编译模型目录"""
+    return dict({"meta.json": json.dumps(meta)}, **{n: "<mlmodelc>" for n in COMPILED})
+
+
+def half(meta):
+    """半成品目录:1.0 导入中途失败留下的「有 meta.json、没 mlmodelc」"""
+    return {"meta.json": json.dumps(meta)}
+
+
+def is_visual(name):
+    return name.lower().endswith(VISUAL_EXT)
 
 
 # ---------------------------------------------------------------- 模拟基座
@@ -36,9 +56,10 @@ class FS:
     def __init__(self, dirs=None):
         self.dirs = {k: dict(v) for k, v in (dirs or {}).items()}
         self.rmtree_fail = set()     # 注入「目录删不掉」
+        self.move_fail = False       # 注入「改名抛错」
 
     def put(self, d, meta):
-        self.dirs[d] = {"meta.json": json.dumps(meta)}
+        self.dirs[d] = full(meta)
 
     def exists(self, d):
         return d in self.dirs
@@ -52,6 +73,8 @@ class FS:
         return True
 
     def move(self, src, dst):
+        if self.move_fail:
+            raise OSError("moveItem failed")
         assert src in self.dirs and dst not in self.dirs
         self.dirs[dst] = self.dirs.pop(src)
 
@@ -64,6 +87,13 @@ class FS:
             return json.loads(raw).get("dim")
         except ValueError:
             return None
+
+    def pro_dim(self, d):
+        """对应 proDim(_:):维度达标且两个已编译模型目录都在才算可用"""
+        dim = self.dim(d)
+        if dim is None or dim < MIN_DIM or any(n not in self.dirs.get(d, {}) for n in COMPILED):
+            return None
+        return dim
 
 
 class Defaults:
@@ -84,6 +114,7 @@ class World:
         self.log = []
         self.notes = []              # 每次启动的 migrationNote
         self.posts = []              # NotificationCenter 已发通知
+        self.file_clip_dim = 0       # 库内导入文件的 clip 向量维度(0=没有;对应 fileClipVectorDim)
 
     def event(self, msg):
         self.log.append(msg)
@@ -96,11 +127,16 @@ def migrate_image_slot(w):
     那次启动设 migrationNote(没迁移=None)"""
     fs, d = w.fs, w.defaults
     note = None
-    if fs.exists(PRO) and (dim := fs.dim(PRO)) is not None and dim >= MIN_DIM:
-        if fs.rm(BASE):                                # ① Pro 可用:删 Base 后改名
-            fs.move(PRO, BASE)
-            note = "统一为 so400m"
-            w.event("模型槽位迁移(2.0):Pro(dim=%d)已改名为 ImageEmbedder,Base 已删" % dim)
+    if (dim := fs.pro_dim(PRO)) is not None:            # ① Pro 可用:删 Base 后改名
+        if fs.rm(BASE):
+            try:
+                fs.move(PRO, BASE)
+                note = "统一为 so400m"
+                w.event("模型槽位迁移(2.0):Pro(dim=%d)已改名为 ImageEmbedder,Base 已删" % dim)
+            except OSError:                            # 改名失败:清掉失败现场,不重试
+                fs.rm(PRO)
+                note = "迁移失败,请重装"
+                w.event("模型槽位迁移(2.0):改名失败,已清 Pro 目录")
     elif fs.exists(PRO):                               # ③ Pro 不可用
         fs.rm(PRO)
         if fs.rm(BASE):
@@ -174,6 +210,31 @@ def wait_ready(w, text_ready, load_pass_running):
     return text_ready or image == "ready"   # 其余等满超时:anyReady
 
 
+def sync_imported_files(w, clip_ready, files, broken=()):
+    """syncImportedFiles():files = [(文件名, 是否已索引)];broken = 写不出向量的文件名。
+    返回本轮处理的文件名列表。视觉文件处理成功后,库内文件 clip 向量维度=当前模型维度"""
+    d = w.defaults
+    model_dim = d.get("clipModelDim")
+    rebuild = False
+    if clip_ready and model_dim is not None:
+        if (d.get("fileClipRebuiltDim") or 0) != model_dim:
+            rebuild = w.file_clip_dim != model_dim
+            if not rebuild:
+                d.set("fileClipRebuiltDim", model_dim)
+    done = []
+    for name, indexed in files:
+        visual = is_visual(name)
+        pick = (clip_ready or not visual) if not indexed else (rebuild and visual)
+        if not pick:
+            continue
+        done.append(name)
+        if visual and clip_ready and name not in broken:
+            w.file_clip_dim = model_dim
+    if rebuild and model_dim is not None:              # 整轮做完才记账
+        d.set("fileClipRebuiltDim", model_dim)
+    return done
+
+
 def expect(cond, msg):
     if not cond:
         print("FAIL:", msg)
@@ -199,9 +260,7 @@ def main():
     ok(load_clip(w) == "missing", "图像模型=未安装")
 
     print("S2 本人设备(1.0 装了 Base+so400m 且在用 so400m):零重嵌")
-    w = World({BASE: {"meta.json": json.dumps(META_BASE)},
-               PRO: {"meta.json": json.dumps(META_PRO)}},
-              imageModelUsePro=True, clipModelDim=1152)
+    w = World({BASE: full(META_BASE), PRO: full(META_PRO)}, imageModelUsePro=True, clipModelDim=1152)
     migrate_image_slot(w)
     ok(not w.fs.exists(PRO) and w.fs.dim(BASE) == 1152, "Base 删除,Pro 目录改名顶替为 ImageEmbedder")
     ok(w.notes == ["统一为 so400m"] and len(w.log) == 1, "提示迁移完成,记 1 条日志")
@@ -221,16 +280,14 @@ def main():
        "第二次启动无动作、无新提示(notes 按启动累积,只看最后一次)")
 
     print("S3 1.0 装了 so400m 但选的是标准(库里 768 维):照常全量重嵌")
-    w = World({BASE: {"meta.json": json.dumps(META_BASE)},
-               PRO: {"meta.json": json.dumps(META_PRO)}},
-              imageModelUsePro=False, clipModelDim=768)
+    w = World({BASE: full(META_BASE), PRO: full(META_PRO)}, imageModelUsePro=False, clipModelDim=768)
     migrate_image_slot(w)
     ok(w.fs.dim(BASE) == 1152, "同样改名顶替")
     load_clip(w)
     ok(w.posts == ["clipModelChanged"], "维度 768→1152→广播一次(同步开始处清旧向量重嵌)")
 
     print("S4 只装过 1.0 完整包(只有 Base)")
-    w = World({BASE: {"meta.json": json.dumps(META_BASE)}}, clipModelDim=768)
+    w = World({BASE: full(META_BASE)}, clipModelDim=768)
     migrate_image_slot(w)
     ok(not w.fs.exists(BASE) and w.notes == ["标准图像模型已停用并移除"], "Base 停用并删除,提示去下载 so400m")
     ok(load_clip(w) == "missing" and not w.posts, "图像模型=未安装,不会拿 Base 顶上")
@@ -249,23 +306,22 @@ def main():
     print("S5 Pro 目录损坏")
     for label, content in (("meta.json 缺失", {}), ("meta 不是 JSON", {"meta.json": "{坏"}),
                            ("meta 缺 dim", {"meta.json": json.dumps({"type": "clip"})})):
-        w = World({BASE: {"meta.json": json.dumps(META_BASE)}, PRO: dict(content)})
+        w = World({BASE: full(META_BASE), PRO: dict(content)})
         migrate_image_slot(w)
         ok(not w.fs.exists(PRO) and not w.fs.exists(BASE) and w.notes == ["Pro 不可用"],
            "%s→Pro 与 Base 都清掉,提示重下" % label)
 
     print("S6 迁移中断后续做")
-    w = World({PRO: {"meta.json": json.dumps(META_PRO)}})          # 删了 Base 后被杀
+    w = World({PRO: full(META_PRO)})                              # 删了 Base 后被杀
     migrate_image_slot(w)
     ok(w.fs.dim(BASE) == 1152 and not w.fs.exists(PRO), "只剩 Pro→下次启动直接改名")
-    w = World({BASE: {"meta.json": json.dumps(META_PRO)}}, imageModelUsePro=True)   # 改名后被杀
+    w = World({BASE: full(META_PRO)}, imageModelUsePro=True)      # 改名后被杀
     migrate_image_slot(w)
     ok(w.notes == [None] and not w.log and "imageModelUsePro" not in w.defaults.d,
        "已改名→无动作,但仍清掉旧记账")
 
     print("S7 终态可回滚:ImageEmbedder 里就是 so400m 的 meta")
-    w = World({BASE: {"meta.json": json.dumps(META_BASE)}, PRO: {"meta.json": json.dumps(META_PRO)}},
-              clipModelDim=1152)
+    w = World({BASE: full(META_BASE), PRO: full(META_PRO)}, clipModelDim=1152)
     migrate_image_slot(w)
     ok(json.loads(w.fs.dirs[BASE]["meta.json"]) == META_PRO and not w.fs.exists(PRO),
        "1.0 会把 ImageEmbedder 当标准槽加载到 1152 维模型,与库内维度一致,不触发重嵌")
@@ -282,7 +338,7 @@ def main():
     ok(found == 0 and err == "没有模型目录", "ImageEmbedderPro 已不是合法槽位名")
 
     print("S9 最终守卫:Base 删不掉也不会被加载")
-    w = World({BASE: {"meta.json": json.dumps(META_BASE)}}, clipModelDim=768)
+    w = World({BASE: full(META_BASE)}, clipModelDim=768)
     w.fs.rmtree_fail = {BASE}
     migrate_image_slot(w)
     ok(w.fs.exists(BASE) and w.notes == [None], "删除失败:目录原样不动,下次启动再试")
@@ -300,17 +356,84 @@ def main():
        "维度从未记录→1152 广播一次(与 1.0 setImageModel 判定等价;全新设备的自动同步由首索引门控挡住)")
 
     print("S11 waitReady 的提前返回不误伤")
-    ok(wait_ready(World({BASE: {"meta.json": json.dumps(META_PRO)}}),
-                  text_ready=False, load_pass_running=True) is True,
+    ok(wait_ready(World({BASE: full(META_PRO)}), text_ready=False, load_pass_running=True) is True,
        "文本没就绪但图像就绪:不提前返回,等满超时后 anyReady=True")
     ok(wait_ready(World(), text_ready=False, load_pass_running=True) is False,
        "两个都没装:等满超时后 anyReady=False")
     ok(wait_ready(World(), text_ready=True, load_pass_running=True) is True,
        "加载轮次还在跑(图像模型只是没轮到):不提前返回,值同超时分支")
-    ok(wait_ready(World({BASE: {"meta.json": json.dumps(META_PRO)}}),
-                  text_ready=True, load_pass_running=False) is True, "模型齐全→True")
+    ok(wait_ready(World({BASE: full(META_PRO)}), text_ready=True, load_pass_running=False) is True,
+       "模型齐全→True")
 
-    print(f"\nPASS: 2.0 图像模型槽位迁移 {checks} 项状态机断言全部通过")
+    print("S12 Pro 是半成品(有 meta.json、没 mlmodelc)")
+    w = World({BASE: full(META_BASE), PRO: half(META_PRO)}, imageModelUsePro=True)
+    migrate_image_slot(w)
+    ok(not w.fs.exists(PRO) and not w.fs.exists(BASE) and w.notes == ["Pro 不可用"],
+       "meta 达标但缺已编译模型→不算可用:两个都清,提示重下(不会删掉 Base 后才加载失败)")
+    part = full(META_PRO); del part["SiglipText.mlmodelc"]
+    ok(World({"x": part}).fs.pro_dim("x") is None and World({"x": full(META_PRO)}).fs.pro_dim("x") == 1152,
+       "只缺一个 mlmodelc 也不可用;两个都在才可用")
+
+    print("S13 Pro 改名失败")
+    w = World({BASE: full(META_BASE), PRO: full(META_PRO)}, imageModelUsePro=True)
+    w.fs.move_fail = True
+    migrate_image_slot(w)
+    ok(not w.fs.exists(PRO) and not w.fs.exists(BASE) and w.notes == ["迁移失败,请重装"],
+       "Base 已删、失败现场 Pro 被清→收敛到「未安装」并提示重装")
+    w.fs.move_fail = False
+    w.log.clear()
+    migrate_image_slot(w)
+    ok(w.notes[-1] is None and not w.log, "再启动无动作(不重试改名)")
+    import_zip(w, {BASE: META_PRO})                               # 用户按提示重装
+    migrate_image_slot(w)
+    ok(w.fs.exists(BASE) and load_clip(w) == "ready", "重装进 ImageEmbedder 的 so400m 不会被下次启动删掉")
+
+    # ---- 导入文件的视觉向量(库内文件 clip 向量维度、文件列表) ----
+    def fw(file_dim, rebuilt=None):
+        w = World({BASE: full(META_PRO)}, clipModelDim=1152, fileClipRebuiltDim=rebuilt)
+        w.file_clip_dim = file_dim
+        return w
+    docs = [("a.pdf", True), ("b.txt", True), ("c.jpg", True), ("d.mp4", True), ("e.pdf", False)]
+
+    print("F1 在用 so400m、库内文件向量已是 1152 维:文件侧零重做")
+    w = fw(1152)
+    ok(sync_imported_files(w, True, docs) == ["e.pdf"] and w.defaults.get("fileClipRebuiltDim") == 1152,
+       "只做未索引的 e.pdf,记账直接对齐")
+
+    print("F2 文件向量被换模型清掉(从 Base 切到 so400m):全部图片/视频重做一次")
+    w = fw(0)
+    ok(sync_imported_files(w, True, docs) == ["c.jpg", "d.mp4", "e.pdf"] and w.file_clip_dim == 1152,
+       "已索引的 c.jpg/d.mp4 也重做;文本/PDF 已索引的不动")
+    ok(sync_imported_files(w, True, [("a.pdf", True), ("b.txt", True), ("c.jpg", True), ("d.mp4", True), ("e.pdf", True)]) == [],
+       "记账后再同步不重做")
+
+    print("F3 图像模型没装(Base 已停用、so400m 未下载)")
+    w = fw(0, 768)
+    new = [("c.jpg", False), ("d.mp4", False), ("b.txt", False)]
+    ok(sync_imported_files(w, False, new) == ["b.txt"] and w.defaults.get("fileClipRebuiltDim") == 768,
+       "只做文本文件;图片/视频不做也不记已索引,记账不动")
+    ok(sync_imported_files(w, True, [("c.jpg", False), ("d.mp4", False), ("b.txt", True)])
+       == ["c.jpg", "d.mp4"] and w.defaults.get("fileClipRebuiltDim") == 1152,
+       "装好 so400m 后图片/视频补上(b.txt 上轮已做完不重做),记账更新")
+
+    print("F4 没有图片/视频文件")
+    w = fw(0)
+    ok(sync_imported_files(w, True, [("a.pdf", True)]) == [] and w.defaults.get("fileClipRebuiltDim") == 1152,
+       "队列为空,直接记账")
+
+    print("F5 个别图片写不出向量:只重做一轮,不循环")
+    w = fw(0)
+    ok(sync_imported_files(w, True, [("bad.jpg", True), ("c.jpg", True)], broken={"bad.jpg"}) == ["bad.jpg", "c.jpg"],
+       "两个都重做一次")
+    ok(sync_imported_files(w, True, [("bad.jpg", True), ("c.jpg", True)], broken={"bad.jpg"}) == [],
+       "记账后不再重做(不会每次同步都重跑)")
+
+    print("F6 全新安装:文件全部未索引")
+    w = fw(0)
+    ok(sync_imported_files(w, True, [(n, False) for n, _ in docs]) == [n for n, _ in docs],
+       "图片/视频/文本/PDF 全部处理")
+
+    print(f"\nPASS: 2.0 图像模型槽位迁移与导入文件视觉向量重建 {checks} 项状态机断言全部通过")
 
 
 if __name__ == "__main__":

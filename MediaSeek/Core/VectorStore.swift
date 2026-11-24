@@ -1252,9 +1252,23 @@ final class VectorStore {
     } }
 
     /// 清空全部 clip 空间向量(更换图像模型、旧向量点积已无意义时)。
-    /// OCR/标签/人脸/用户标签不受影响,照片/视频在下一轮同步全量重嵌
+    /// OCR/标签/人脸/用户标签不受影响,照片/视频在下一轮同步全量重嵌。
+    /// 注意清的是整个 clip 空间:导入的图片/视频文件的视觉向量(.file/.fileChunk
+    /// 行)也在其中,它们的重建由 IndexingCoordinator.syncImportedFiles 的维度
+    /// 记账负责(批137二修,2.0 验收 medium——此前文件向量被清后永不重建)
     func wipeClipVectors() throws { try serialized {
         try exec("DELETE FROM items WHERE space = 'clip'")
+    } }
+
+    /// 导入文件的 clip 向量维度(任取一行;没有返回 0)。
+    /// 文件侧的 clip 行只有两种:图片整图(kind='file')与视频帧(kind='fileChunk')
+    /// ——文件名向量与 PDF/文本块虽同用这两个 kind,但在 gemma 空间,已按 space 排除
+    func fileClipVectorDim() -> Int { try serialized {
+        guard let db, let stmt = try? prepare(
+            "SELECT dim FROM items WHERE space = 'clip' AND kind IN ('file','fileChunk') LIMIT 1")
+        else { return 0 }
+        defer { sqlite3_finalize(stmt) }
+        return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int(stmt, 0)) : 0
     } }
 
     /// 已有 clip 向量的照片/视频集合(增量同步的「已索引」口径)。

@@ -2,11 +2,14 @@
 """远程探针:不下载 2.1GB 的 models-so400m.zip,用 HTTP Range 只取
 zip 尾部中央目录,验证包结构符合 App 导入器(importModelZip)的预期。
 
-验证点(第四十六批 so400m 切换的前置条件):
+验证点(第四十六批 so400m 切换的前置条件;2.0 起 so400m 是唯一图像模型,
+本探针同样用于重发在线源后验证):
   1. zip 根下有 ImageEmbedder/ 目录(导入器按目录名认槽位)
   2. 含 SiglipImage.mlpackage / SiglipText.mlpackage / tokenizer.json / meta.json
   3. meta.json: type=clip、dim=1152(so400m)、image_size=384
-     —— dim>=1024 正是导入器自动路由 .imagePro 槽位的启发式条件
+     —— 2.0 起 dim>=1024 是 ModelManager 的停用判据:导入器拒绝 dim 低于
+        它的 Base 包。第四十六批时它是「自动路由到 .imagePro 槽」的条件,
+        该槽位与路由已随 Base 停用删除
 用法:
   python scripts/probe_so400m_zip.py <github_token>
 """

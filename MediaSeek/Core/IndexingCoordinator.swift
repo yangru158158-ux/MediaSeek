@@ -1450,7 +1450,36 @@ final class IndexingCoordinator: ObservableObject {
     // MARK: - 导入文件
 
     private func syncImportedFiles() async throws {
-        let files = imports.allFiles().filter { !$0.indexed }
+        // 批137二修(2.0 验收 medium):导入文件的视觉向量随图像模型重建。
+        // 换模型时 startRun 的维度比对清空的是整个 clip 空间,图片/视频文件的
+        // 视觉向量(embedImported 写的 .file/.fileChunk 行)也在其中;而这里原先
+        // 只挑 !indexed 的文件,被清掉的向量永不重建——第四十六批标准↔so400m
+        // 切换时即如此,2.0 把「从 Base 切到 so400m」变成迁移的必经之路才暴露。
+        // 与照片侧「只认向量行本身」(refKeysWithClipVectors)同规,按模型维度记账:
+        //   · fileClipRebuiltDim ≠ 当前图像模型维度 = 这个模型下还没给文件建过
+        //     视觉向量 → 图片/视频文件全部重做一次(不论 indexed),整轮做完记账
+        //   · 库内文件的 clip 向量维度已与当前模型一致 → 直接对齐记账,不重做
+        //     (在用 so400m 的设备升级后文件侧零重做)
+        //   · 图像模型没装(Base 已停用、so400m 未下载):图片/视频文件先不做。
+        //     原先会在没有视觉向量的情况下把它们记成已索引,此后永不补
+        let clipReady = models.siglip != nil
+        let modelDim = UserDefaults.standard.object(forKey: "clipModelDim") as? Int
+        var rebuildVisual = false
+        if clipReady, let modelDim {
+            let rebuiltDim = UserDefaults.standard.object(forKey: "fileClipRebuiltDim") as? Int
+            if (rebuiltDim ?? 0) != modelDim {
+                rebuildVisual = store.fileClipVectorDim() != modelDim
+                if !rebuildVisual {
+                    UserDefaults.standard.set(modelDim, forKey: "fileClipRebuiltDim")
+                }
+            }
+        }
+        let files = imports.allFiles().filter { record in
+            if !record.indexed {
+                return clipReady || !Self.isVisualFile(record.name)
+            }
+            return rebuildVisual && Self.isVisualFile(record.name)
+        }
         total += files.count
         phase = .files
         for file in files {
@@ -1458,6 +1487,18 @@ final class IndexingCoordinator: ObservableObject {
             await embedImported(file)
             processed += 1
         }
+        // 整轮做完才记账:中途被取消则下一次从头再做(重做是幂等的,只多花时间)
+        if rebuildVisual, let modelDim {
+            UserDefaults.standard.set(modelDim, forKey: "fileClipRebuiltDim")
+        }
+    }
+
+    /// 导入文件是否图片/视频(与 embedImported 同口径:按扩展名对应的 UTType 判;
+    /// record.name 就是文件名,见 ImportLibrary 写入处的 lastPathComponent)
+    private static func isVisualFile(_ name: String) -> Bool {
+        let ext = (name as NSString).pathExtension
+        guard !ext.isEmpty, let type = UTType(filenameExtension: ext) else { return false }
+        return type.conforms(to: .image) || type.conforms(to: .movie)
     }
 
     func embedImported(_ record: ImportedFile) async {
