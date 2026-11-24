@@ -17,15 +17,18 @@ settings:
   base:
     SWIFT_VERSION: "5.9"
     TARGETED_DEVICE_FAMILY: "1"
-    # 2(2026-11-24,批137/138):图像模型只剩 so400m,Base 停用并从在线数据源删除——
-    # 新装流程与模型包结构不兼容 1.0,主版本号升 2。版本名最初写的是「2.0」,
-    # 构建号随 github.run_number 一路累积到 298;用户要求把它定位成全新的版本、
-    # 构建号从 1 重新开始。构建号只在同一版本名内要求递增(Apple TN2420:build
-    # numbers must be unique within each release train),「2.0」下已有 298,故
-    # 版本名改为「2」;release.yml 的构建号 = run_number - 298,从 1 起算。
-    # ⚠️「2」与「2.0」是否被 App Store Connect 视为同一版本名未经证实:若上传
-    # 被拒(must contain a higher version),改用一个没用过的版本名,如「2.1」
-    MARKETING_VERSION: "2"
+    # 2.1(2026-11-25,批137~139):图像模型只剩 so400m,Base 停用并从在线数据源删除——
+    # 新装流程与模型包结构不兼容 1.0,主版本号升 2。版本名几经变化:
+    #   「2.0」:构建号直接用 github.run_number,一路累积到 298;
+    #   「2」  :想让构建号从 1 重新开始。上传没被拒,但 App Store Connect 把它归进
+    #           「版本 2.0」显示(与 298 并列),构建号 1 比已装的 298 小,手机
+    #           TestFlight 上不出现(2026-11-25 装机实锤);
+    #   「2.1」:数值大于 2.0,才真正自成一个新的版本。
+    # 构建号只在同一版本名内要求递增(Apple TN2420:build numbers must be unique
+    # within each release train),换版本名后可以从 1 起算;release.yml 里
+    # 构建号 = 运行序号 - 偏移量。教训:想要一个全新的版本,版本名要在数值上
+    # 比上一个大,「2」与「2.0」在苹果那边是同一个版本
+    MARKETING_VERSION: "2.1"
     CURRENT_PROJECT_VERSION: "1"
     GENERATE_INFOPLIST_FILE: NO
   configs:
@@ -59,7 +62,7 @@ targets:
       path: MediaSeek/Info.plist
       properties:
         CFBundleDisplayName: 智搜
-        CFBundleShortVersionString: "2"
+        CFBundleShortVersionString: "2.1"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
         UILaunchScreen: {}
         UIFileSharingEnabled: true
