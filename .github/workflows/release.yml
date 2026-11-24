@@ -64,13 +64,22 @@ jobs:
       - name: 归档(手动签名)
         env:
           TEAM_ID: ${{ secrets.DEVELOPMENT_TEAM_ID }}
+        run: |
           # 批138:构建号从 1 重新起算(用户要求把大版本 2 定位成全新的版本)。
           # 此前直接用 run_number,一路累积到 298(298=版本名「2.0」下最后一次上传,
           # run 45414065702)。构建号只在同一版本名内要求递增,换版本名后可从头数。
-          # 减去 298 后下一次发版(run_number 299)= 构建号 1,此后随 run_number 递增;
-          # 失败的 run 也占 run_number,所以构建号可能跳号,只要递增 Apple 就接受
-          BUILD_NUM: ${{ github.run_number - 298 }}
-        run: |
+          # 偏移量 299:298 之后的运行序号 299 被一次「工作流文件无效」的失败运行占用
+          # (run 45421219686),所以下一次发版运行序号 300 → 构建号 1。
+          # 减法放在 shell 里做,不写进 env 的表达式(把 github.run_number 减 298 直接
+          # 写成 env 值之后,GitHub 把整个工作流文件判成无效;确切原因未查明,不依赖它)。
+          # GITHUB_RUN_NUMBER 是运行器自带的环境变量。失败的 run 也占号,所以构建号
+          # 可能跳号,递增即可
+          BUILD_NUM=$((GITHUB_RUN_NUMBER - 299))
+          if [ "$BUILD_NUM" -lt 1 ]; then
+            echo "::error::构建号算出 $BUILD_NUM(运行序号 $GITHUB_RUN_NUMBER - 299),小于 1,中止"
+            exit 1
+          fi
+          echo "构建号 CURRENT_PROJECT_VERSION=$BUILD_NUM(运行序号 $GITHUB_RUN_NUMBER - 299)"
           xcodebuild archive             CURRENT_PROJECT_VERSION="$BUILD_NUM" \
             -project MediaSeek.xcodeproj \
             -scheme MediaSeek \
