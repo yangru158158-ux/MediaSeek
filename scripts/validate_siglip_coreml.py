@@ -26,7 +26,13 @@ import numpy as np
 import torch
 from PIL import Image, ImageDraw
 
-MODEL_ID = os.environ.get("SIGLIP_MODEL", "google/siglip2-base-patch16-256")
+# 批141(2026-11-25):被测模型默认改为产线唯一的图像模型 so400m——此前默认测
+# 的是已停用的 Base(2.0 起不再使用),自动体检「通过」却没检到线上真正在用的
+# 模型。型号须与导出流程一致:export_models.yml 的 SIGLIP_MODEL、
+# model_validation.yml 的 dist 矩阵,三处是同一个。要复测 Base 用环境变量覆盖
+MODEL_ID = os.environ.get("SIGLIP_MODEL", "google/siglip2-so400m-patch14-384")
+# 已停用的 Base:只用来判断「图文分 ≥0.09」那条线是拦截还是只测量(见掩码回归段)
+BASE_MODEL_ID = "google/siglip2-base-patch16-256"
 OUT_DIR = Path(os.environ.get("VALIDATE_OUT", "."))
 
 
@@ -189,7 +195,15 @@ def mode_extract(out_npz: Path):
     # (≥0.999,阻断);②健康图文分 ≥0.09(阻断);③真实掩码(203 事故形态)
     # 应显著劣化——仅警告不阻断:若上游训练约定变化导致不劣化,需人工判断
     # 新语义,机械阻断反而挡住合法演进。
-    print("\n== 掩码语义回归(阻断) ==")
+    #
+    # 批141(2026-11-25):②对 so400m 本轮只测量不拦截。0.09 是按 Base 的分数带
+    # 定的绝对分,分数带随模型移动。产线型号用不带冠词的校准串实测为
+    # 猫 0.0997 / 狗 0.0938 / 电脑屏幕 0.0973(run 45628084357),但体检串多一个
+    # 冠词且走导出图原式,差多少没测过——狗那张只高出 0.004,足以被这个差值
+    # 翻转。先切过来、用下面的精确值定线,再恢复拦截。①③与性别边距照常拦截
+    measuring_health = MODEL_ID != BASE_MODEL_ID
+    health_scores: dict[str, float] = {}
+    print("\n== 掩码语义回归(阻断) ==" + ("  [图文分线:本轮只测量]" if measuring_health else ""))
 
     def traced_formula(text: str, ones_mask: bool):
         real = tok(text)["input_ids"]
@@ -222,12 +236,24 @@ def mode_extract(out_npz: Path):
         print(f"  {img_key:<7} 全1掩码vs官方={c_ones:.6f}  图文分(全1)={s_ones:+.4f}  图文分(真实掩码)={s_real:+.4f}")
         if c_ones < 0.999:
             raise SystemExit(f"FAIL 全1掩码偏离官方无掩码管线({c_ones:.6f})——导出图掩码语义被改坏")
+        health_scores[img_key] = s_ones
         if s_ones < 0.09:
-            raise SystemExit(f"FAIL {img_key} 健康图文分过低({s_ones:.4f}<0.09)——文本塔内容失明复发")
+            if measuring_health:
+                print(f"  ⚠️ 测量中(不拦截):{img_key} 图文分 {s_ones:.4f} 低于 Base 时代的线 0.09")
+            else:
+                raise SystemExit(f"FAIL {img_key} 健康图文分过低({s_ones:.4f}<0.09)——文本塔内容失明复发")
         if s_real > s_ones:
             print(f"  ⚠️ 真实掩码不劣于全1({s_real:.4f}≥{s_ones:.4f}),请人工确认上游训练约定是否变化")
     if ran == 0:
         raise SystemExit("FAIL 测试图全部加载失败,掩码回归空转")
+    if measuring_health:
+        # 精确值:体检原串 × 导出图原式,与阻断判定用的是同一个数——定线只认它
+        lo_key = min(health_scores, key=health_scores.get)
+        lo = health_scores[lo_key]
+        print("  [批141 测量] 图文分精确值(体检原串): "
+              + "  ".join(f"{k}={v:.4f}" for k, v in health_scores.items()))
+        print(f"  [批141 测量] 最低={lo_key} {lo:.4f},距 Base 时代的线 0.09 为 {lo - 0.09:+.4f}"
+              "(本轮不拦截,据此定线后恢复)")
     print("  PASS 掩码语义回归:全1掩码=训练语义,真实掩码劣化形态在案")
 
     # ---- 第五十批阻断回归:性别对比边距(性别词对比过滤的依据) ----
@@ -289,11 +315,15 @@ def mode_extract(out_npz: Path):
     print(f"已保存 {out_npz}")
 
     # 产线导出链验证(两版本都跑):新导出代码(文本塔定长 64 双输入)+ coremltools 转换 + 推理一致性
-    # 失败不阻断:v5 masking_utils 补丁若不够,由 v4 分支给出可行路线
+    # 历史上失败不阻断:那是 v4/v5 双环境时代的设计,一边不行还有另一边给路线。
+    # 批141(2026-11-25):改为失败即体检失败——现在是 transformers 5 单环境,
+    # 没有另一条路线兜底;而 so400m(877M 参数)的导出在这段里可能因内存跑不动,
+    # 只打 ⚠️ 的话体检显示通过、其实没检到导出链
     import tempfile
     import coremltools as ct
     from export_models import export_siglip
     print(f"\n== 产线导出链验证 @ transformers {transformers.__version__} ==")
+    export_chain_failed = False
     try:
         with tempfile.TemporaryDirectory() as tmp:
             export_siglip(tmp, MODEL_ID, fp16=True)
@@ -372,8 +402,11 @@ def mode_extract(out_npz: Path):
             sep(txt_ml32, "fp32")
     except Exception as e:
         import traceback
-        print(f"  ⚠️ 该环境导出链失败: {type(e).__name__}: {e}")
+        print(f"  FAIL 该环境导出链失败: {type(e).__name__}: {e}")
         traceback.print_exc()
+        export_chain_failed = True
+    if export_chain_failed:
+        raise SystemExit("FAIL 产线导出链验证失败(异常见上)——CoreML 导出或对拍没跑成,本次体检不算通过")
 
 
 def mode_compare(a_npz: Path, b_npz: Path):
