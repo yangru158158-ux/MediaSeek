@@ -50,20 +50,24 @@ jobs:
           if-no-files-found: ignore
 
   dist:
-    # so400m 门槛校准(2026-10-22):base 与 so400m 并行跑真实词集分数分布
+    # so400m 门槛校准(2026-10-22):跑真实词集分数分布
     # (词典英译+模板 与 多语言整词 两套变体 × 全部探针图),纯测量不阻断。
     # 依据:门槛不可跨模型迁移(zudolab 实测门槛悬空=静默0结果;OpenAI 社区
-    # 实测换模型分布整体移动)——重标必须拿双模型各自真尺度。仅手动触发。
+    # 实测换模型分布整体移动)——重标必须拿模型自己的真尺度。仅手动触发。
+    # 批141(2026-11-25):矩阵只留产线型号。base 一支随 Base 停用删除
+    # (2.0 起唯一图像模型是 so400m);so400m 的型号原先写 patch16-384,与产线
+    # 实际导出的 patch14-384(见 export_models.yml)不是同一个模型,改为一致。
+    # 留档:2026-10-23 的 patch16 校准里,体检线用的三张图(不带冠词的模板串)
+    # 为 猫 0.1069 / 狗 0.0927 / 电脑屏幕 0.1017,而 validate 脚本的阻断线是
+    # 0.09——狗那张余量只有 0.003。产线型号的真实值以本矩阵跑出的为准
     if: github.event_name == 'workflow_dispatch'
     runs-on: macos-15
     timeout-minutes: 40
     strategy:
       matrix:
         include:
-          - id: base
-            model: google/siglip2-base-patch16-256
           - id: so400m
-            model: google/siglip2-so400m-patch16-384
+            model: google/siglip2-so400m-patch14-384
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
