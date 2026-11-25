@@ -31,7 +31,7 @@ from PIL import Image, ImageDraw
 # 模型。型号须与导出流程一致:export_models.yml 的 SIGLIP_MODEL、
 # model_validation.yml 的 dist 矩阵,三处是同一个。要复测 Base 用环境变量覆盖
 MODEL_ID = os.environ.get("SIGLIP_MODEL", "google/siglip2-so400m-patch14-384")
-# 已停用的 Base:只用来判断「图文分 ≥0.09」那条线是拦截还是只测量(见掩码回归段)
+# 已停用的 Base:只用来选图文分合格线(Base 0.09 / 其它 0.08,见掩码回归段)
 BASE_MODEL_ID = "google/siglip2-base-patch16-256"
 OUT_DIR = Path(os.environ.get("VALIDATE_OUT", "."))
 
@@ -192,18 +192,22 @@ def mode_extract(out_npz: Path):
     # 设备 CoreML 文本塔 = 定长64输入 + (1-mask)×-30000 加性掩码 + 末位池化。
     # 此前体检两侧同错(参考向量也传掩码),对拍一致、静默放行——本段用导出图
     # 原式三方对拍:①全1掩码(偏置归零=训练语义)必须与官方无掩码管线一致
-    # (≥0.999,阻断);②健康图文分 ≥0.09(阻断);③真实掩码(203 事故形态)
+    # (≥0.999,阻断);②健康图文分不低于合格线(阻断);③真实掩码(203 事故形态)
     # 应显著劣化——仅警告不阻断:若上游训练约定变化导致不劣化,需人工判断
     # 新语义,机械阻断反而挡住合法演进。
     #
-    # 批141(2026-11-25):②对 so400m 本轮只测量不拦截。0.09 是按 Base 的分数带
-    # 定的绝对分,分数带随模型移动。产线型号用不带冠词的校准串实测为
-    # 猫 0.0997 / 狗 0.0938 / 电脑屏幕 0.0973(run 45628084357),但体检串多一个
-    # 冠词且走导出图原式,差多少没测过——狗那张只高出 0.004,足以被这个差值
-    # 翻转。先切过来、用下面的精确值定线,再恢复拦截。①③与性别边距照常拦截
-    measuring_health = MODEL_ID != BASE_MODEL_ID
+    # 批141(2026-11-25):②的合格线按被测模型取值,Base 0.09 / 其它 0.08。
+    # 0.09 是按 Base 的分数带定的:Base 在此项的实测(体检原串,run 39901280047)
+    # 猫 0.1126 / 狗 0.1038 / 屏幕 0.1157,最低者高出线 0.0138。现用的 so400m
+    # (patch14,run 45644710670)实测 猫 0.1168 / 狗 0.1170 / 屏幕 0.0925——最低的
+    # 是屏幕,高出 0.09 只剩 0.0025。失明形态(真实掩码)的分数最高 0.0447
+    # (Base 时代 0.0512),健康带与失明带之间是空的;so400m 取 0.08(用户定):
+    # 与健康分留 0.0125,同 Base 时代的余量,离失明带 0.035。
+    # ⚠️ 定线只认体检原串 × 导出图原式的精确值:不带冠词的校准串与它相差
+    # -0.005~+0.023(猫/狗偏高、屏幕偏低),会看错哪张图最紧
+    health_line = 0.09 if MODEL_ID == BASE_MODEL_ID else 0.08
     health_scores: dict[str, float] = {}
-    print("\n== 掩码语义回归(阻断) ==" + ("  [图文分线:本轮只测量]" if measuring_health else ""))
+    print(f"\n== 掩码语义回归(阻断) ==  [图文分合格线 {health_line}]")
 
     def traced_formula(text: str, ones_mask: bool):
         real = tok(text)["input_ids"]
@@ -237,23 +241,19 @@ def mode_extract(out_npz: Path):
         if c_ones < 0.999:
             raise SystemExit(f"FAIL 全1掩码偏离官方无掩码管线({c_ones:.6f})——导出图掩码语义被改坏")
         health_scores[img_key] = s_ones
-        if s_ones < 0.09:
-            if measuring_health:
-                print(f"  ⚠️ 测量中(不拦截):{img_key} 图文分 {s_ones:.4f} 低于 Base 时代的线 0.09")
-            else:
-                raise SystemExit(f"FAIL {img_key} 健康图文分过低({s_ones:.4f}<0.09)——文本塔内容失明复发")
+        if s_ones < health_line:
+            raise SystemExit(f"FAIL {img_key} 健康图文分过低({s_ones:.4f}<{health_line})——文本塔内容失明复发")
         if s_real > s_ones:
             print(f"  ⚠️ 真实掩码不劣于全1({s_real:.4f}≥{s_ones:.4f}),请人工确认上游训练约定是否变化")
     if ran == 0:
         raise SystemExit("FAIL 测试图全部加载失败,掩码回归空转")
-    if measuring_health:
-        # 精确值:体检原串 × 导出图原式,与阻断判定用的是同一个数——定线只认它
-        lo_key = min(health_scores, key=health_scores.get)
-        lo = health_scores[lo_key]
-        print("  [批141 测量] 图文分精确值(体检原串): "
-              + "  ".join(f"{k}={v:.4f}" for k, v in health_scores.items()))
-        print(f"  [批141 测量] 最低={lo_key} {lo:.4f},距 Base 时代的线 0.09 为 {lo - 0.09:+.4f}"
-              "(本轮不拦截,据此定线后恢复)")
+    # 精确值:体检原串 × 导出图原式,与阻断判定用的是同一个数——定线只认它。
+    # 每次都打:余量还剩多少一眼可见,分数带再随库版本/测试图/模型漂移时据此重定
+    lo_key = min(health_scores, key=health_scores.get)
+    print("  [批141 图文分] 精确值(体检原串): "
+          + "  ".join(f"{k}={v:.4f}" for k, v in health_scores.items()))
+    print(f"  [批141 图文分] 最低={lo_key} {health_scores[lo_key]:.4f},高出合格线 {health_line} 达 "
+          f"{health_scores[lo_key] - health_line:+.4f}")
     print("  PASS 掩码语义回归:全1掩码=训练语义,真实掩码劣化形态在案")
 
     # ---- 第五十批阻断回归:性别对比边距(性别词对比过滤的依据) ----
