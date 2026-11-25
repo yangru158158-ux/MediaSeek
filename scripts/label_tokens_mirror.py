@@ -3,8 +3,11 @@
 
 此前两轮本机镜像与 CI 分歧的教训:english(for:) 查两张表(dictionary +
 LabelZh.englishFromZh)、多命中按位置排序用空格拼接——镜像漏一环,CI 就红一轮。
-本镜像从 Swift 源码直接解析三张表,逐语义复刻,跑 34 条断言中的标签相关
-子集 + 两条 1566 词穷尽循环(CI 上从未跑完过,先在本机排雷)。
+本镜像从 Swift 源码直接解析三张表,逐语义复刻,跑 Swift 断言里的标签相关
+子集 + 标签词典穷尽(词集级与匹配级,各两个方向)+ 专名/证件桥/繁简对拍。
+(批142 更正:此处原写「跑 34 条断言中的…」——34 是创建时点 Swift 侧的
+断言总数,此后两边都涨过几轮,那个数早已不是任何一边的口径;批134 验收
+low 点名,随本批改动一并更正为不带时点数字的表述。)
 """
 import re
 import sys
@@ -41,6 +44,14 @@ for en, cn in list(EXTRA.items()) + list(BASE.items()):  # base 后写先到先�
     pass
 for en, cn in list(BASE.items()) + list(EXTRA.items()):
     EN_FROM_ZH.setdefault(cn, en)
+# 批142:反查全集(同中文名的全部键,键排序)——Swift LabelZh.englishKeysFromZh
+# 同构。Swift 侧单值表 englishFromZh 重名先到先得、先到哪个随字典遍历顺序
+# 变;镜像的 EN_FROM_ZH 是确定的(base 先),所以镜像复现不了那种漂移,
+# 只能守「补全后全部键都在词集」
+EN_KEYS_FROM_ZH = {}
+for en, cn in list(BASE.items()) + list(EXTRA.items()):
+    EN_KEYS_FROM_ZH.setdefault(cn, []).append(en)
+EN_KEYS_FROM_ZH = {cn: sorted(keys) for cn, keys in EN_KEYS_FROM_ZH.items()}
 
 
 def term_coverage(term):
@@ -122,6 +133,24 @@ def expanded(tokens):
     return out
 
 
+def label_tokens_match_count(query_tokens, label_title):
+    """批142:QueryUnderstanding.labelTokensMatchCount 逐语义复刻(标签牌匹配)。
+    牌里的词按「, 」拆开逐个判;复合词(含下划线)整键在词集或全部片段都在
+    词集才算命中;简单词在词集才算命中。返回匹配词数。"""
+    count = 0
+    for term in re.split(r"[, ]", label_title.lower()):
+        if not term:
+            continue
+        if "_" in term:
+            if term in query_tokens:
+                count += 1          # 批142:整键在词集=命中
+            elif set(term.split("_")) <= query_tokens:
+                count += 1          # 批126:片段全中
+        elif term in query_tokens:
+            count += 1
+    return count
+
+
 # 第七十二批:繁→简字表解析(定义必须先于 label_tokens 的首次调用)
 t2s_block = QU.split("static let t2sChars: [Character: Character] = [", 1)[1]
 t2s_block = t2s_block.split("\n    ]", 1)[0]
@@ -143,6 +172,13 @@ def label_tokens(query):
             if t:
                 tokens.add(t)
                 dict_tokens.add(t)
+    # 批142:同名多键补全——Swift labelTokens 把整词原子对应的全部键补进
+    # 词集并按直译词对待(同享泛化剔除免疫);镜像同步。位置与 Swift 同:
+    # 词典英译之后、下划线拆分之前
+    for t in raw:
+        for k in EN_KEYS_FROM_ZH.get(t, []):
+            tokens.add(k)
+            dict_tokens.add(k)
     # 批131(批130验收 medium 同步):查询端下划线复合词拆分
     # —Swift 批130 加了(play_card→{play_card,play,card}),镜像同步
     for t in raw:
@@ -170,7 +206,7 @@ def expect(cond, msg):
         sys.exit(1)
 
 
-# ---- 34 条断言中的标签相关子集 ----
+# ---- 标签相关子集(与 Swift 断言同集) ----
 expect("machine" in label_tokens("machine"), "machine 本尊保留")
 expect("person" in label_tokens("person"), "person 本尊保留")
 expect("machine" in label_tokens("机器"), "机器(2字)直译保留")
@@ -280,5 +316,55 @@ print(f"证件桥: 表 {len(COUNTERPARTS)} 键 / 别名 {len(OCR_ALIASES)} 组 �
 pc = label_tokens("play_card")
 expect("play_card" in pc and "play" in pc and "card" in pc,
        "play_card 拆分三形并存(整词+片段,与照片标签端 id_card 拆分对齐)")
+
+# ---- 批142:标签通道匹配级穷举 + 单元面(与 Swift 断言同集) ----
+# 第四十七批的两条穷举只断言「词集里有这个词」;牌能不能匹配上是另一段逻辑
+# (复合词自批126 起要求全部片段在词集)。Swift 侧探针实测:208 个复合键里
+# 203 个中文搜不上自己的牌、5 个连英文直搜都搜不上、25 个同名多键的中文名
+# 只能搜到先到先得的那一个。两侧同步升级为匹配级
+fail_match_zh = [(cn, en) for en, cn in ZH.items()
+                 if label_tokens_match_count(label_tokens(cn), en) == 0]
+expect(not fail_match_zh, f"中文搜不到自己的标签牌: {fail_match_zh[:5]}")
+fail_match_en = [en for en in ZH if label_tokens_match_count(label_tokens(en), en) == 0]
+expect(not fail_match_en, f"英文直搜匹配不上自己的牌: {fail_match_en[:5]}")
+print(f"匹配级穷尽: 中文 {len(ZH) - len(fail_match_zh)}/{len(ZH)}  "
+      f"英文 {len(ZH) - len(fail_match_en)}/{len(ZH)}")
+adult_cat = label_tokens("成年猫")
+expect("adult_cat" in adult_cat and "adult" not in adult_cat,
+       "「成年猫」词集=整键 adult_cat,不注入片段 adult")
+expect(label_tokens_match_count(adult_cat, "adult") == 0,
+       "「成年猫」不命中简单词牌 adult(全部人像照不灌入)")
+expect(label_tokens_match_count(adult_cat, "person, adult, adult_cat") == 1,
+       "「成年猫」命中自己那张牌上的 adult_cat,同牌的 person/adult 不计数")
+expect(label_tokens_match_count(label_tokens("热气球"), "outdoor, balloon_hotair") == 1,
+       "「热气球」命中 balloon_hotair 牌")
+expect(label_tokens_match_count(label_tokens("身份证"), "play_card") == 0,
+       "277 事故守卫(批126)不破:「身份证」词集含 card,仍不命中 play_card")
+expect(label_tokens_match_count({"card"}, "play_card, credit_card") == 0,
+       "词集只有片段 card 时任何 *_card 牌都不命中")
+expect(label_tokens_match_count({"blue"}, "blue_sky") == 0,
+       "词集只有片段 blue 时不命中 blue_sky(整键不在词集,仍走片段全中规则)")
+expect(label_tokens_match_count(label_tokens("laundry_machine"), "laundry_machine") == 1,
+       "laundry_machine 英文直搜命中自己的牌(machine 被当泛化词剔掉后靠整键)")
+expect(label_tokens_match_count(label_tokens("天空"), "blue_sky") == 1
+       and label_tokens_match_count(label_tokens("文档"), "printed_page") == 1,
+       "复合键桥接生效:天空→blue_sky、文档→printed_page")
+expect(label_tokens_match_count(label_tokens("电子产品"), "consumer_electronics") == 1
+       and label_tokens_match_count(label_tokens("木头"), "wood_processed") == 1,
+       "复合键桥接生效:电子产品→consumer_electronics、木头→wood_processed")
+billboard = label_tokens("广告牌")
+expect("billboard" in billboard and "billboards" in billboard,
+       "「广告牌」两个键都在词集(此前先到先得只留一个)")
+phone = label_tokens("手机")
+expect("cell_phone" in phone and "mobile_phone" in phone, "「手机」两个键都在词集")
+drone = label_tokens("无人机")
+expect(label_tokens_match_count(drone, "drone") == 1
+       and label_tokens_match_count(drone, "drone_machine") == 1,
+       "「无人机」两张牌(drone / drone_machine)都命中")
+expect(EN_KEYS_FROM_ZH.get("手机") == ["cell_phone", "mobile_phone"]
+       and EN_KEYS_FROM_ZH.get("猫") == ["cat"],
+       "反查全集:手机=两键且有序;单键名只有一个键")
+multi_names = sorted(cn for cn, keys in EN_KEYS_FROM_ZH.items() if len(keys) >= 2)
+print(f"反查全集: {len(EN_KEYS_FROM_ZH)} 个中文名,其中多键 {len(multi_names)} 个")
 
 print("PASS: 镜像全绿(词典", len(DICTIONARY), "条/标签", len(ZH), "词/泛化", len(GENERIC), "个)")

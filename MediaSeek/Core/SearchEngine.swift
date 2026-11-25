@@ -587,7 +587,7 @@ final class SearchEngine {
                 var scored: [(refKey: String, matches: Int, title: String)] = []
                 for row in rows where among?.contains(row.refKey) ?? true {
                     // 批126:复合牌精确匹配(替换 E2 的 flatMap 拆词交集)
-                    let m = Self.labelTokensMatchCount(tokens, row.title)
+                    let m = QueryUnderstanding.labelTokensMatchCount(tokens, row.title)
                     if m > 0 { scored.append((row.refKey, m, row.title)) }
                 }
                 labelHits = Array(scored.sorted { $0.matches > $1.matches }.prefix(topK).map {
@@ -603,7 +603,7 @@ final class SearchEngine {
                 var scored: [(refKey: String, matches: Int, title: String)] = []
                 for row in rows where among?.contains(row.refKey) ?? true {
                     // 批126:复合牌精确匹配
-                    let m = Self.labelTokensMatchCount(tokens, row.title)
+                    let m = QueryUnderstanding.labelTokensMatchCount(tokens, row.title)
                     if m > 0 {
                         scored.append((row.refKey, m, row.title))
                         videoLabelRefs.insert(row.refKey)
@@ -751,7 +751,7 @@ final class SearchEngine {
                                 if imageKinds.contains(.photo), let rows = try? store.allPhotoLabels() {
                                     for row in rows where among?.contains(row.refKey) ?? true {
                                         // 批126:复合牌精确匹配
-                                        if Self.labelTokensMatchCount(lt, row.title) > 0 {
+                                        if QueryUnderstanding.labelTokensMatchCount(lt, row.title) > 0 {
                                             labelCount += h.insert(row.refKey).inserted ? 1 : 0
                                         }
                                     }
@@ -759,7 +759,7 @@ final class SearchEngine {
                                 if scope == .all || scope == .video, let rows = try? store.allVideoFrameLabels() {
                                     for row in rows where among?.contains(row.refKey) ?? true {
                                         // 批126:复合牌精确匹配
-                                        if Self.labelTokensMatchCount(lt, row.title) > 0 {
+                                        if QueryUnderstanding.labelTokensMatchCount(lt, row.title) > 0 {
                                             labelCount += h.insert(row.refKey).inserted ? 1 : 0
                                         }
                                     }
@@ -1453,7 +1453,7 @@ final class SearchEngine {
                         var scored: [(refKey: String, title: String, matches: Int)] = []
                         for row in rows where (within?.contains(row.refKey) ?? true) {
                             // 批126:复合牌精确匹配
-                            let m = Self.labelTokensMatchCount(tokens, row.title)
+                            let m = QueryUnderstanding.labelTokensMatchCount(tokens, row.title)
                             if m > 0 { scored.append((row.refKey, row.title, m)) }
                         }
                         for row in scored.sorted(by: { $0.matches > $1.matches }).prefix(topK)
@@ -1876,7 +1876,7 @@ final class SearchEngine {
         if !tokens.isEmpty, let rows = try? store.allVideoFrameLabels() {
             for row in rows {
                 // 批126:复合牌精确匹配
-                if Self.labelTokensMatchCount(tokens, row.title) > 0 {
+                if QueryUnderstanding.labelTokensMatchCount(tokens, row.title) > 0 {
                     labelRefs.insert(row.refKey)
                 }
             }
@@ -1924,29 +1924,8 @@ final class SearchEngine {
     }
 
     /// 通道内按 refKey 去重(视频多帧/文件多块),供 RRF 按名次计分
-    /// 批126:复合牌精确匹配——下划线复合词(id_card/play_card/credit_card)
-    /// 要求全部片段都被查询 tokens 命中才算匹配,防止单个泛词片段(card)
-    /// 串门(277 装机实锤:「身份证」tokens 含 card → play_card 拆出 card
-    /// → 扑克照全灌进标签通道,9 张视觉全是赌桌)。简单词(无下划线)
-    /// 照旧任一命中即匹配。返回匹配词数(用于排序)。
-    /// 例:id_card={id,card} +「身份证」tokens={card,id,...} → 全中 ✓
-    ///    play_card={play,card} + 同上 → play 没中 ✗ → 扑克出局
-    static func labelTokensMatchCount(_ queryTokens: Set<String>, _ labelTitle: String) -> Int {
-        let terms = labelTitle.lowercased().components(separatedBy: CharacterSet(charactersIn: ", "))
-        var count = 0
-        for term in terms {
-            let trimmed = term.trimmingCharacters(in: .whitespaces)
-            if trimmed.isEmpty { continue }
-            if trimmed.contains("_") {
-                let fragments = Set(trimmed.components(separatedBy: "_"))
-                if fragments.isSubset(of: queryTokens) { count += 1 }
-            } else if queryTokens.contains(trimmed) {
-                count += 1
-            }
-        }
-        return count
-    }
-
+    /// (标签牌匹配 labelTokensMatchCount 批142 迁至 QueryUnderstanding,
+    /// 与 labelTokens 同住并纳入 CI 断言)
     private static func dedupByRef(_ hits: [SearchHit]) -> [SearchHit] {
         var best: [String: SearchHit] = [:]
         for hit in hits {

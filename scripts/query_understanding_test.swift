@@ -335,7 +335,76 @@ enum QueryUnderstandingTest {
         expect(passCn == zhToEns.count,
                "全量 \(zhToEns.count) 个中文词反查全部命中标签通道")
 
-        // 断言数口径:全文 expect 调用 96 项(另含 1 行函数定义,批94 增 5 批98 增 3 批134 增 1)
-        print("PASS: 查询理解 96 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词穷尽)")
+        // —— 批142:标签通道【匹配级】穷尽 ——
+        // 上面两条穷举只断言「词集里有这个词」(①en ∈ tokens ②∃ 同名键 ∈ tokens),
+        // 而牌能不能匹配上是另一段逻辑(labelTokensMatchCount,批126 起复合词
+        // 要求全部片段在词集)。本机探针(同一份源码编译)逐个标签判
+        // 「labelTokens(cn) 能否匹配上牌 en」,实测:
+        //   · 208 个下划线复合键里 203 个中文搜不上自己的牌(词集里是整键
+        //     balloon_hotair,没有 balloon/hotair 两个片段;能搜上的 5 个是
+        //     碰巧在短语词典里有带空格的写法);
+        //   · adult_cat / decorative_plant / drone_machine / iron_clothing /
+        //     laundry_machine 连英文直搜都搜不上(拆出的片段是泛化词,被剔);
+        //   · 25 个中文名对应多个英文键(广告牌→billboard/billboards),单值
+        //     反查表先到先得、先到哪个随字典遍历顺序变——同一段代码两次
+        //     启动,「无人机」「音箱」一次能搜到牌、一次两个键都搜不到。
+        // 穷举升级:每个标签两个方向都必须真能匹配上自己的牌
+        var matchZh = 0, matchEn = 0
+        for (en, cn) in LabelZh.zh {
+            let zh = QueryUnderstanding.labelTokensMatchCount(QueryUnderstanding.labelTokens(cn), en)
+            guard zh > 0 else { fatalError("FAIL: 词典中文「\(cn)」搜不到自己的标签牌 \(en)") }
+            matchZh += 1
+            let typed = QueryUnderstanding.labelTokensMatchCount(QueryUnderstanding.labelTokens(en), en)
+            guard typed > 0 else { fatalError("FAIL: 英文标签直搜匹配不上自己的牌 \(en)") }
+            matchEn += 1
+        }
+        expect(matchZh == LabelZh.zh.count && matchEn == LabelZh.zh.count,
+               "全量 \(LabelZh.zh.count) 个标签:中文反查与英文直搜都能匹配上自己的牌")
+
+        // 批142 单元面:整键命中、不注入片段、批126 守卫不破
+        let adultCat = QueryUnderstanding.labelTokens("成年猫")
+        expect(adultCat.contains("adult_cat") && !adultCat.contains("adult"),
+               "「成年猫」词集=整键 adult_cat,不注入片段 adult")
+        expect(QueryUnderstanding.labelTokensMatchCount(adultCat, "adult") == 0,
+               "「成年猫」不命中简单词牌 adult(全部人像照不灌入)")
+        expect(QueryUnderstanding.labelTokensMatchCount(adultCat, "person, adult, adult_cat") == 1,
+               "「成年猫」命中自己那张牌上的 adult_cat,同牌的 person/adult 不计数")
+        expect(QueryUnderstanding.labelTokensMatchCount(
+            QueryUnderstanding.labelTokens("热气球"), "outdoor, balloon_hotair") == 1,
+               "「热气球」命中 balloon_hotair 牌(批142 前 203 个复合键的常态:词集只有整键)")
+        expect(QueryUnderstanding.labelTokensMatchCount(QueryUnderstanding.labelTokens("身份证"), "play_card") == 0,
+               "277 事故守卫(批126)不破:「身份证」词集含 card,仍不命中 play_card")
+        expect(QueryUnderstanding.labelTokensMatchCount(["card"], "play_card, credit_card") == 0,
+               "词集只有片段 card 时任何 *_card 牌都不命中")
+        expect(QueryUnderstanding.labelTokensMatchCount(["blue"], "blue_sky") == 0,
+               "词集只有片段 blue 时不命中 blue_sky(整键不在词集,仍走片段全中规则)")
+        expect(QueryUnderstanding.labelTokensMatchCount(
+            QueryUnderstanding.labelTokens("laundry_machine"), "laundry_machine") == 1,
+               "laundry_machine 英文直搜命中自己的牌(machine 被当泛化词剔掉后靠整键)")
+        expect(QueryUnderstanding.labelTokensMatchCount(QueryUnderstanding.labelTokens("天空"), "blue_sky") == 1
+               && QueryUnderstanding.labelTokensMatchCount(QueryUnderstanding.labelTokens("文档"), "printed_page") == 1,
+               "复合键桥接生效:天空→blue_sky、文档→printed_page(10-13 入表,批125 起没生效)")
+        expect(QueryUnderstanding.labelTokensMatchCount(
+            QueryUnderstanding.labelTokens("电子产品"), "consumer_electronics") == 1
+               && QueryUnderstanding.labelTokensMatchCount(QueryUnderstanding.labelTokens("木头"), "wood_processed") == 1,
+               "复合键桥接生效:电子产品→consumer_electronics、木头→wood_processed")
+        // 批142 同名多键:原名下全部键都进词集,与字典遍历顺序无关
+        let billboard = QueryUnderstanding.labelTokens("广告牌")
+        expect(billboard.contains("billboard") && billboard.contains("billboards"),
+               "「广告牌」两个键都在词集(此前先到先得只留一个)")
+        let phone = QueryUnderstanding.labelTokens("手机")
+        expect(phone.contains("cell_phone") && phone.contains("mobile_phone"),
+               "「手机」两个键都在词集")
+        expect(QueryUnderstanding.labelTokensMatchCount(QueryUnderstanding.labelTokens("无人机"), "drone") == 1
+               && QueryUnderstanding.labelTokensMatchCount(
+                    QueryUnderstanding.labelTokens("无人机"), "drone_machine") == 1,
+               "「无人机」两张牌(drone / drone_machine)都命中")
+        expect(LabelZh.englishKeysFromZh["手机"] == ["cell_phone", "mobile_phone"]
+               && LabelZh.englishKeysFromZh["猫"] == ["cat"],
+               "反查全集:手机=两键且有序;单键名只有一个键")
+
+        // 断言数口径:全文 expect 调用 111 项(另含 1 行函数定义,批94 增 5 批98 增 3
+        // 批134 增 1 批142 增 15:匹配级穷举 1 + 整键/守卫/桥接/同名多键单元面 14)
+        print("PASS: 查询理解 111 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词的词集穷尽与匹配级穷尽)")
     }
 }

@@ -221,6 +221,22 @@ enum QueryUnderstanding {
                 dictTokens.insert(s)
             }
         }
+        // 批142:同名多键补全——一个中文名对应多个英文标签键时(广告牌→
+        // billboard/billboards,全表 25 个中文名),english(for:) 经单值反查表
+        // englishFromZh 只捐出「先到先得」的一个,先到哪个随字典遍历顺序变
+        // (每次启动都可能不同)——落选键的牌,中文这次搜得到、下次搜不到
+        // (本机探针同一份源码两次启动:「无人机」「音箱」一次命中、一次两个
+        // 键都落空)。这里把原名下的全部键补进词集,按直译词对待(同享泛化
+        // 剔除免疫)。只认整词原子(与单字键「整词相等才生效」同规);只进
+        // 标签通道——english(for:) 与 SigLIP 查询串本批不动
+        for t in raw {
+            if let keys = LabelZh.englishKeysFromZh[t] {
+                for k in keys {
+                    tokens.insert(k)
+                    dictTokens.insert(k)
+                }
+            }
+        }
         // 批130:查询端下划线复合词拆分(play_card→{play_card,play,card})
         // —批125/126 拆了照片标签端(id_card→{id,card})但没拆查询端,
         // 英文复合词标签搜索全灭(play_card 标签=0,286 装机实锤);
@@ -247,6 +263,50 @@ enum QueryUnderstanding {
             tokens = expandedTokens(tokens).subtracting(genericTokens.subtracting(seed))
         }
         return tokens
+    }
+
+    /// 标签牌匹配词数(批142 自 SearchEngine 迁入:与 labelTokens 同住查询
+    /// 理解层,CI 断言才够得着——此前穷举只断言「词集里有这个词」,没断言
+    /// 「这个词能匹配上牌」,203 个复合键中文搜不上自己的牌而测试全绿)。
+    /// 牌里的词按「, 」拆开逐个判:
+    /// · 简单词(无下划线):词集里有它才算命中;
+    /// · 下划线复合词,两条路任中其一:
+    ///   ① 批126 复合牌精确匹配(用户确认方案 E):全部片段都被查询词集命中
+    ///     ——防止单个泛词片段(card)串门(277 装机实锤:「身份证」tokens 含
+    ///     card → play_card 拆出 card → 扑克照全灌进标签通道,9 张视觉全是
+    ///     赌桌);
+    ///   ② 批142:复合词【整键】在词集里。词典中文反查与同义表捐进词集的
+    ///     是整键(热气球→balloon_hotair、天空→blue_sky),从不带片段,①永远
+    ///     不成立——208 个复合键里 203 个中文搜不上自己的牌(批125 起:此前
+    ///     牌按整词比,5891a7f 把牌词按下划线拆片段后整键对不上,批126 换成
+    ///     片段全中依然对不上),同义表里 4 条复合键桥接(sky→blue_sky、
+    ///     document→printed_page、electronics→consumer_electronics、wood→
+    ///     wood_processed)同样自批125 起一直没生效;拆出的片段是泛化词时
+    ///     (adult_cat/laundry_machine 等 5 个)连英文直搜都搜不上。整键命中
+    ///     不带片段,不会把 adult/card 漏给别的牌(所以不走「把词典键也拆成
+    ///     片段」那条路:搜「成年猫」会带出 adult,全部人像照的 adult 牌都会
+    ///     命中)。
+    /// 返回匹配词数(用于排序)。
+    /// 例:adult_cat +「成年猫」tokens={成年猫,adult_cat,cat,...} → 整键 ✓
+    ///    play_card +「身份证」tokens={card,driver,license,身份证} → ✗ 扑克出局
+    static func labelTokensMatchCount(_ queryTokens: Set<String>, _ labelTitle: String) -> Int {
+        let terms = labelTitle.lowercased().components(separatedBy: CharacterSet(charactersIn: ", "))
+        var count = 0
+        for term in terms {
+            let trimmed = term.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty { continue }
+            if trimmed.contains("_") {
+                if queryTokens.contains(trimmed) {
+                    count += 1   // 批142:整键在词集=命中
+                } else {
+                    let fragments = Set(trimmed.components(separatedBy: "_"))
+                    if fragments.isSubset(of: queryTokens) { count += 1 }
+                }
+            } else if queryTokens.contains(trimmed) {
+                count += 1
+            }
+        }
+        return count
     }
 
     /// 性别词对照(第五十批引入,第五十五批重标定):SigLIP 绝对分数区分

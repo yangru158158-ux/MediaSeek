@@ -216,5 +216,19 @@ enum LabelZh {
         return out
     }()
 
+    /// 批142:反查全集——同一个中文名对应的【全部】英文标签键(键排序,与
+    /// 遍历顺序无关)。全表 25 个中文名有多个键(人→person/human、广告牌→
+    /// billboard/billboards、手机→cell_phone/mobile_phone…)。englishFromZh
+    /// 是单值表,重名先到先得,而先到的是哪个取决于字典遍历顺序(每次启动
+    /// 都可能不同)——落选键的牌中文搜不到,且随启动漂移(本机探针同一份
+    /// 源码两次启动:「无人机」「音箱」一次命中、一次两个键都落空)。
+    /// 只供标签通道(QueryUnderstanding.labelTokens);english(for:) 与
+    /// SigLIP 查询串仍走单值表,本批不动
+    static let englishKeysFromZh: [String: [String]] = {
+        var out: [String: [String]] = [:]
+        for (en, cn) in zh { out[cn, default: []].append(en) }
+        return out.mapValues { $0.sorted() }
+    }()
+
     static func chinese(for label: String) -> String? { zh[label] }
 }
