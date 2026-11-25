@@ -383,7 +383,7 @@ enum QueryUnderstandingTest {
                "laundry_machine 英文直搜命中自己的牌(machine 被当泛化词剔掉后靠整键)")
         expect(QueryUnderstanding.labelTokensMatchCount(QueryUnderstanding.labelTokens("天空"), "blue_sky") == 1
                && QueryUnderstanding.labelTokensMatchCount(QueryUnderstanding.labelTokens("文档"), "printed_page") == 1,
-               "复合键桥接生效:天空→blue_sky、文档→printed_page(10-13 入表,批125 起没生效)")
+               "复合键桥接生效:天空→blue_sky、文档→printed_page(10-13 入表;文档自批125、天空自批126 起没生效)")
         expect(QueryUnderstanding.labelTokensMatchCount(
             QueryUnderstanding.labelTokens("电子产品"), "consumer_electronics") == 1
                && QueryUnderstanding.labelTokensMatchCount(QueryUnderstanding.labelTokens("木头"), "wood_processed") == 1,
@@ -402,9 +402,24 @@ enum QueryUnderstandingTest {
         expect(LabelZh.englishKeysFromZh["手机"] == ["cell_phone", "mobile_phone"]
                && LabelZh.englishKeysFromZh["猫"] == ["cat"],
                "反查全集:手机=两键且有序;单键名只有一个键")
+        // 批142 二修(验收 medium):多键名在短语里也要补全——首版只认整词原子,
+        // 「无人机表演」「广告牌设计」仍随启动只捐一个键
+        let droneShow = QueryUnderstanding.labelTokens("无人机表演")
+        expect(droneShow.contains("drone") && droneShow.contains("drone_machine"),
+               "短语里的多键名也补全:「无人机表演」两个键都在词集")
+        let billboardDesign = QueryUnderstanding.labelTokens("广告牌设计")
+        expect(billboardDesign.contains("billboard") && billboardDesign.contains("billboards"),
+               "短语里的多键名也补全:「广告牌设计」两个键都在词集")
+        let hybridBillboard = QueryUnderstanding.labelTokens("华研广告牌")
+        expect(!hybridBillboard.contains("billboard") && !hybridBillboard.contains("billboards"),
+               "盖不满的原子词不捐:「华研广告牌」(专名+多键名)两个键都不进词集")
+        let birthdayCake = QueryUnderstanding.labelTokens("生日蛋糕")
+        expect(!birthdayCake.contains("cake_regular"),
+               "嵌套只留最长:「生日蛋糕」里的「蛋糕」不单独捐,不带入 cake_regular")
 
-        // 断言数口径:全文 expect 调用 111 项(另含 1 行函数定义,批94 增 5 批98 增 3
-        // 批134 增 1 批142 增 15:匹配级穷举 1 + 整键/守卫/桥接/同名多键单元面 14)
-        print("PASS: 查询理解 111 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词的词集穷尽与匹配级穷尽)")
+        // 断言数口径:全文 expect 调用 115 项(另含 1 行函数定义,批94 增 5 批98 增 3
+        // 批134 增 1 批142 增 15:匹配级穷举 1 + 整键/守卫/桥接/同名多键单元面 14;
+        // 批142 二修增 4:短语里的多键名 2 + 盖不满/嵌套守卫 2)
+        print("PASS: 查询理解 115 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词的词集穷尽与匹配级穷尽)")
     }
 }

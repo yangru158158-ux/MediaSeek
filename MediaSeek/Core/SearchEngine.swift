@@ -1924,8 +1924,6 @@ final class SearchEngine {
     }
 
     /// 通道内按 refKey 去重(视频多帧/文件多块),供 RRF 按名次计分
-    /// (标签牌匹配 labelTokensMatchCount 批142 迁至 QueryUnderstanding,
-    /// 与 labelTokens 同住并纳入 CI 断言)
     private static func dedupByRef(_ hits: [SearchHit]) -> [SearchHit] {
         var best: [String: SearchHit] = [:]
         for hit in hits {

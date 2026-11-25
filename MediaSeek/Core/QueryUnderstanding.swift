@@ -225,15 +225,25 @@ enum QueryUnderstanding {
         // billboard/billboards,全表 25 个中文名),english(for:) 经单值反查表
         // englishFromZh 只捐出「先到先得」的一个,先到哪个随字典遍历顺序变
         // (每次启动都可能不同)——落选键的牌,中文这次搜得到、下次搜不到
-        // (本机探针同一份源码两次启动:「无人机」「音箱」一次命中、一次两个
-        // 键都落空)。这里把原名下的全部键补进词集,按直译词对待(同享泛化
-        // 剔除免疫)。只认整词原子(与单字键「整词相等才生效」同规);只进
-        // 标签通道——english(for:) 与 SigLIP 查询串本批不动
+        // (本机探针同一份源码三次启动:「无人机」「音箱」各有一次两个键都
+        // 落空)。这里沿 english(for:) 实际捐出的每一个碎片区间,把该区间
+        // 对应的中文名下的全部键补进词集,按直译词对待(同享泛化剔除免疫)。
+        // 判据不另立,全部沿用 termCoverage:原子词盖满才捐(「华研广告牌」
+        // 盖不满,一个键都不捐)、嵌套只留最长(「生日蛋糕」里的「蛋糕」
+        // 「火车站」里的「火车」不单独捐,否则会把嵌套规则打穿)、单字键整词
+        // 相等才生效。首版只认整词原子,「无人机表演」「广告牌设计」这类短语
+        // 里的多键名仍随启动漂移(验收 medium,二修补齐)。
+        // 只进标签通道——english(for:) 与 SigLIP 查询串本批不动
         for t in raw {
-            if let keys = LabelZh.englishKeysFromZh[t] {
-                for k in keys {
-                    tokens.insert(k)
-                    dictTokens.insert(k)
+            guard case .complete(let spans) = termCoverage(t) else { continue }
+            for m in spans {
+                let s = t.index(t.startIndex, offsetBy: m.start)
+                let e = t.index(t.startIndex, offsetBy: m.end)
+                if let keys = LabelZh.englishKeysFromZh[String(t[s..<e])] {
+                    for k in keys {
+                        tokens.insert(k)
+                        dictTokens.insert(k)
+                    }
                 }
             }
         }
@@ -276,13 +286,15 @@ enum QueryUnderstanding {
     ///     card → play_card 拆出 card → 扑克照全灌进标签通道,9 张视觉全是
     ///     赌桌);
     ///   ② 批142:复合词【整键】在词集里。词典中文反查与同义表捐进词集的
-    ///     是整键(热气球→balloon_hotair、天空→blue_sky),从不带片段,①永远
-    ///     不成立——208 个复合键里 203 个中文搜不上自己的牌(批125 起:此前
-    ///     牌按整词比,5891a7f 把牌词按下划线拆片段后整键对不上,批126 换成
-    ///     片段全中依然对不上),同义表里 4 条复合键桥接(sky→blue_sky、
-    ///     document→printed_page、electronics→consumer_electronics、wood→
-    ///     wood_processed)同样自批125 起一直没生效;拆出的片段是泛化词时
-    ///     (adult_cat/laundry_machine 等 5 个)连英文直搜都搜不上。整键命中
+    ///     是整键(热气球→balloon_hotair、天空→blue_sky),从不带片段——
+    ///     批125(5891a7f)把牌词按下划线拆片段、批126(1611fa8)改成片段
+    ///     全中之后,208 个复合键里 203 个中文搜不上自己的牌:词集里没有
+    ///     片段的(热气球)自批125 起断,只带一个片段的(天空→blue_sky 带
+    ///     sky)自批126 起断;同义表里 4 条复合键桥接同样失效(document→
+    ///     printed_page 自批125 起,sky→blue_sky、electronics→
+    ///     consumer_electronics、wood→wood_processed 自批126 起)。拆出的
+    ///     片段是泛化词时(adult_cat/laundry_machine 等 5 个)连英文直搜都
+    ///     搜不上。整键命中
     ///     不带片段,不会把 adult/card 漏给别的牌(所以不走「把词典键也拆成
     ///     片段」那条路:搜「成年猫」会带出 adult,全部人像照的 adult 牌都会
     ///     命中)。

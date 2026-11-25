@@ -172,13 +172,19 @@ def label_tokens(query):
             if t:
                 tokens.add(t)
                 dict_tokens.add(t)
-    # 批142:同名多键补全——Swift labelTokens 把整词原子对应的全部键补进
-    # 词集并按直译词对待(同享泛化剔除免疫);镜像同步。位置与 Swift 同:
-    # 词典英译之后、下划线拆分之前
+    # 批142:同名多键补全——Swift labelTokens 沿 english(for:) 实际捐出的碎片
+    # 区间,把区间对应中文名下的全部键补进词集并按直译词对待(同享泛化剔除
+    # 免疫);镜像同步。位置与 Swift 同:词典英译之后、下划线拆分之前。
+    # 判据沿用 term_coverage(二修,验收 medium):盖满才捐、嵌套只留最长、
+    # 单字键整词相等才生效——首版只认整词原子,短语里的多键名仍会漂移
     for t in raw:
-        for k in EN_KEYS_FROM_ZH.get(t, []):
-            tokens.add(k)
-            dict_tokens.add(k)
+        kind, _, spans = term_coverage(t)
+        if kind != "complete":
+            continue
+        for m in spans:
+            for k in EN_KEYS_FROM_ZH.get(t[m[0]:m[1]], []):
+                tokens.add(k)
+                dict_tokens.add(k)
     # 批131(批130验收 medium 同步):查询端下划线复合词拆分
     # —Swift 批130 加了(play_card→{play_card,play,card}),镜像同步
     for t in raw:
@@ -364,6 +370,19 @@ expect(label_tokens_match_count(drone, "drone") == 1
 expect(EN_KEYS_FROM_ZH.get("手机") == ["cell_phone", "mobile_phone"]
        and EN_KEYS_FROM_ZH.get("猫") == ["cat"],
        "反查全集:手机=两键且有序;单键名只有一个键")
+# 批142 二修(验收 medium):多键名在短语里也要补全;盖不满/嵌套守卫
+drone_show = label_tokens("无人机表演")
+expect("drone" in drone_show and "drone_machine" in drone_show,
+       "短语里的多键名也补全:「无人机表演」两个键都在词集")
+billboard_design = label_tokens("广告牌设计")
+expect("billboard" in billboard_design and "billboards" in billboard_design,
+       "短语里的多键名也补全:「广告牌设计」两个键都在词集")
+hybrid_billboard = label_tokens("华研广告牌")
+expect("billboard" not in hybrid_billboard and "billboards" not in hybrid_billboard,
+       "盖不满的原子词不捐:「华研广告牌」(专名+多键名)两个键都不进词集")
+birthday_cake = label_tokens("生日蛋糕")
+expect("cake_regular" not in birthday_cake,
+       "嵌套只留最长:「生日蛋糕」里的「蛋糕」不单独捐,不带入 cake_regular")
 multi_names = sorted(cn for cn, keys in EN_KEYS_FROM_ZH.items() if len(keys) >= 2)
 print(f"反查全集: {len(EN_KEYS_FROM_ZH)} 个中文名,其中多键 {len(multi_names)} 个")
 
