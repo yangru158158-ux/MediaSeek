@@ -10,6 +10,7 @@ struct SettingsView: View {
     @State private var videoDiagText: String?
     @State private var calibRunning = false
     @State private var calibText: String?
+    @State private var calibFileReady = FileManager.default.fileExists(atPath: ThresholdCalibration.dataURL.path)
     @State private var labelVocab: [(label: String, count: Int)] = []
     @State private var showLabelVocab = false
 
@@ -251,6 +252,14 @@ struct SettingsView: View {
                 // 用户找不到(而且那个按钮当时还指向错误的路径)
                 diagExportLink
             }
+            if calibFileReady {
+                // 批152:完整分数表(每张照片对每个词的分数),给离线评估「相对分」用;
+                // 文件在上次测量时生成,进设置页时还在就直接可导出
+                ShareLink(item: ThresholdCalibration.dataURL) {
+                    Label("导出校准数据", systemImage: "square.and.arrow.up")
+                }
+                .font(.caption)
+            }
         } header: {
             Text("门槛校准测量")
         } footer: {
@@ -288,6 +297,7 @@ struct SettingsView: View {
             }
             await MainActor.run {
                 calibText = out
+                calibFileReady = FileManager.default.fileExists(atPath: ThresholdCalibration.dataURL.path)
                 calibRunning = false
             }
         }
