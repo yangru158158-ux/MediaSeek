@@ -481,6 +481,18 @@ final class SearchEngine {
     /// 性别对比过滤与低置信尾线收口,不会灌屏。30=结果页首屏量级
     private static let tierMinResults = 30
 
+    /// 批144(用户定「捞得多的词收尾线」):AND 逐词宽召回的免尾线豁免只留给
+    /// 捞得少的词。批103「交集即精度」的前提是每个词的宽召回足够窄——对弱词
+    /// (阳光:裸搜语义仅 9 张)成立;常见词不成立:3 (3) 装机 搜「猫咪 小狗」,
+    /// 猫咪 宽召回 3,909(0.104~0.177)、小狗 3,912,交集 3,019 几乎全错,而
+    /// 「语义:猫咪 小狗」(另一条逐词收尾线的路)=8。阈值沿用 tierMinResults
+    /// (薄判同款):宽召回不足这个数的词照旧免尾线,达到的按单词搜索同规收
+    /// 尾线。只作用于 AND 宽召回(and:/or: 的 and、裸搜多词),单词与 语义:
+    /// 多词不经此处
+    private static func andRecallTailApplies(_ wideCount: Int) -> Bool {
+        wideCount > tierMinResults
+    }
+
     /// 第六十八批:第三档底网(全局 0.08×gate)从「薄了就换网」收紧为反空兜底。
     /// 旧逻辑命中不足 tierMinResults 就整网换到噪声带底网,而 so400m 分数压缩后
     /// 真命中与噪声挤在 15% 带宽内、尾线切不开——「智搜」187 张/「id」15 张/
@@ -1857,7 +1869,10 @@ final class SearchEngine {
                        hits.count, hits.first?.score ?? 0, hits.map(\.score).min() ?? 0))
             // 深潜豁免尾线(低分段真命中会被 best×0.85 一刀砍光,与主管线同规);
             // 批104②:AND 宽召回在结果内分支同享免尾线(与全局路径同规,交集即精度)
-            if best > 0, !genderDive, !andRecall { hits = hits.filter { $0.score >= best * 0.85 } }
+            // 批144:免尾线只留给捞得少的词(判据见 andRecallTailApplies)
+            if best > 0, !genderDive, (!andRecall || Self.andRecallTailApplies(hits.count)) {
+                hits = hits.filter { $0.score >= best * 0.85 }
+            }
             return videoFrameGuard(hits, term: term, gateScale: gateScale)
         }
         var hits: [SearchHit]
@@ -1942,9 +1957,19 @@ final class SearchEngine {
                    hits.count, hits.first?.score ?? 0, hits.map(\.score).min() ?? 0))
         // 低置信收紧与主流程同规:最佳 <0.13 = 无真匹配,只留贴近最佳的一小撮;
         // 深潜豁免(性别词的噪声闸=对比边距,与主管线同规);
-        // 批103:AND 宽召回免尾线(交集即精度)
-        if best > 0, !genderDive, !andRecall {
-            hits = hits.filter { $0.score >= best * (best >= 0.13 * gateScale ? 0.85 : 0.95) }
+        // 批103:AND 宽召回免尾线(交集即精度);
+        // 批144:免尾线只留给捞得少的词(判据见 andRecallTailApplies)
+        let andWide = hits.count
+        let tailFactor: Float = best >= 0.13 * gateScale ? 0.85 : 0.95
+        let tailInAnd = andRecall && Self.andRecallTailApplies(andWide)
+        if best > 0, !genderDive, (!andRecall || tailInAnd) {
+            hits = hits.filter { $0.score >= best * tailFactor }
+        }
+        // 批144仪器:AND 宽召回里收了尾线的词,记收尾线前后的数量与尾线值
+        if tailInAnd, !genderDive {
+            IndexingCoordinator.DiagLog.shared.event(
+                String(format: "AND尾线[%@] 宽召回=%d 收尾线后=%d 线=%.3f",
+                       term, andWide, hits.count, best * tailFactor))
         }
         return videoFrameGuard(hits, term: term, gateScale: gateScale)
     }
