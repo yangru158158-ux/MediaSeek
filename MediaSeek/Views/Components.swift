@@ -86,6 +86,8 @@ struct HitCell: View {
     var selectionMode: Bool = false
     var isSelected: Bool = false
     @EnvironmentObject var app: AppModel
+    /// 卡片标题字号(批149):比 .caption2 小一号,随系统字号缩放
+    @ScaledMetric(relativeTo: .caption2) private var titleSize: CGFloat = 10
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -108,8 +110,16 @@ struct HitCell: View {
                         .stroke(isSelected ? Color.blue : .clear, lineWidth: 2)
                 )
             Text(hit.title)
-                .font(.caption2)
-                .lineLimit(1)
+                // 批149(用户:「同时命中那行字是不是小一点,让所有文字一起显示,有时候
+                // 有用」):多词 AND 的标题「同时命中:杨如·标签 杭州·拍摄地」有 14 个
+                // 汉字宽,格子只有约 114 点宽——原先 .caption2(11pt)且只许一行,必然
+                // 截成「…」;硬压进一行要缩到 7pt 出头,看不清。改为 10pt + 最多三行:
+                // 两词的标题占两行,带「标签牌(全部命中)」的占三行,整行都读得到;
+                // 单词搜索的标题照旧一行,卡片高度不变
+                .font(.system(size: titleSize))
+                .lineLimit(3)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
             Text("\(Int(hit.score * 100))%")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
