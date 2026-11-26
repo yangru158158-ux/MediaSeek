@@ -1,5 +1,6 @@
 name: ASC Tools
-# App Store Connect API 工具(本机 DNS 不通苹果域名,只能借 CI 的网):
+# App Store Connect API 工具(备用入口:接口域名本机可直连,2026-11-26 实测;
+# 旧注「本机 DNS 不通苹果域名,只能借 CI 的网」是误判,见批140):
 # add-tester = 邀请 TestFlight 测试员到指定组(默认外部组;内部组须对方
 # 已是 ASC 团队成员)。参数:email / group。
 on:

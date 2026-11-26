@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
-"""邀请 TestFlight 测试员(2026-10-19):本机 DNS 不通苹果域名,此脚本只在
-CI(macOS runner)上经 asc_tools.yml 运行。
+"""邀请 TestFlight 测试员(2026-10-19):本机与 CI(macOS runner,经 asc_tools.yml)
+都能跑——接口域名 api.appstoreconnect.apple.com 本机可直连(2026-11-26 实测,
+不带凭据返回 401)。旧注的「本机 DNS 不通苹果域名」是误判(批140 查明:
+同域名的 asc_builds.py 是域名少写了 .apple)。
 用法: python asc_add_tester.py <email> <组名> [--internal]
 流程: 签 ES256 JWT → 查/建 betaGroup(默认外部组;外部组首次要过 Beta 审核)
      → POST /v1/betaTesters 邀请(对方邮箱收 TestFlight 邀请函)。
