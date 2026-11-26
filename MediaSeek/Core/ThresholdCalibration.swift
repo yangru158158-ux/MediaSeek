@@ -7,15 +7,20 @@ import Foundation
 /// 量不出这三条线在真实相册上切得对不对——3 (3) 装机日志里 12 个查询的一档命中
 /// 全是 0。要回答「系数对不对」,得拿真实相册的数据。
 ///
-/// 做法:固定词表逐词对全部照片打分(查询串与主管线同一个函数),按「照片的标签牌
+/// 做法:固定词表逐词对全部条目打分(查询串与主管线同一个函数),按「条目的标签牌
 /// 是否命中该词」分三组——真(牌命中)/ 他(有牌但不命中)/ 无牌——各组记六个
 /// 分数带的张数与最高分,写进 diag.log,由开发侧离线汇总。
 ///
 /// 批152(用户:「再量一次」):批150 的装机数据表明绝对分分不开真伪(真命中九成落在
 /// 0.07~0.157,噪声能到 0.17~0.226),下一步要评估「相对分」——跟对照词比、跟这张
 /// 照片对其它词的平均分比、看这个词排第几。六带计数做不了这些,所以测量时把整张
-/// 分数表(全部照片 × 词表与对照词)、每张照片的标签牌、以及「牌是否命中该词」的
+/// 分数表(全部条目 × 词表与对照词)、每个条目的标签牌、以及「牌是否命中该词」的
 /// 标记,写成一份制表符分隔的文件(`dataURL`),由设置页「导出校准数据」分享出去。
+///
+/// 批154(用户:搜 鱼 排在前面的 3 个视频与鱼无关,「不管关还是开」):视频帧走的是
+/// 另一条更松的线(只凭分数 0.15×gate 即可入场,照片要 0.157),而批152 只量了照片。
+/// 于是把视频帧也量进来(真值=帧标签牌),文件格式升到 v3:每行多一列类型
+/// (P=照片 / V=视频帧)和一列所属(视频帧=所属视频的本地标识,用来把同一视频的多帧归并)。
 /// **只读**:不改向量、不改记账、不改任何搜索行为。
 enum ThresholdCalibration {
 
@@ -57,49 +62,50 @@ enum ThresholdCalibration {
         var text: String { c.map { String($0) }.joined(separator: "/") }
     }
 
-    /// 逐词全库打分,写 diag.log(六带计数)与原始分数表文件。返回给界面看的摘要。
-    /// - Parameter gate: 现行门槛系数(ModelManager.siglipGateScale)
-    static func run(store: VectorStore, siglip: SigLIPEmbedder, gate: Float) throws -> String {
-        let started = Date()
-        // 带界(降序):一档 0.30×gate / 未缩放的二档 0.18(系数取 1.0 时的线)/
-        // 二档 0.18×gate / 尾线低置信基准 0.13×gate / 三档 0.08×gate
-        let edges: [Float] = [0.30 * gate, 0.18, 0.18 * gate, 0.13 * gate, 0.08 * gate]
-        var plates: [String: String] = [:]
-        for r in try store.allPhotoLabels() where plates[r.refKey] == nil { plates[r.refKey] = r.title }
-        // 分数表:每个词一行,列=照片(以第一个词的全库结果定照片顺序)
-        let all = words + extras
-        var scores: [[Float]] = []
-        var queries: [String] = []
-        var refKeys: [String] = []
+    /// 一类条目(照片 / 视频帧)的分数表、牌命中标记与六带计数行
+    private struct Grid {
+        var rowKeys: [String] = []          // 行标识 = 所属资产#帧序号(照片的帧序号恒定)
+        var owners: [String] = []           // 所属资产(照片=自身;视频帧=所属视频)
         var indexOf: [String: Int] = [:]
-        // 牌命中标记:[词 × 照片数 + 照片序号] = 1 表示这张照片的牌命中该词(只对词表内的词)
-        var mask = [UInt8]()
-        var photos = 0
-        var lines: [String] = []
+        var mask = [UInt8]()                // [词表内序号 × 行数 + 行序号] = 1 表示该行的牌命中该词
+        var scores: [[Float]] = []          // [词(词表 + 对照)][行]
+        var texts: [String] = []            // 每个词实际送进模型的查询串
+        var lines: [String] = []            // 词表内每个词一行的六带计数
+        var plateCount = 0                  // 有标签牌的条目数(视频帧按视频计)
+    }
+
+    /// 对一类条目逐词打分(查询串与主管线同一条函数)
+    private static func measure(kind: ItemKind, store: VectorStore, siglip: SigLIPEmbedder,
+                                plates: [String: String], edges: [Float],
+                                tag: String, withQuery: Bool) throws -> Grid {
+        var g = Grid()
+        g.plateCount = plates.count
+        let all = words + extras
         for (wi, word) in all.enumerated() {
             let isMain = wi < words.count
             let text = isMain ? SearchEngine.siglipQuery(word, nativeZh: true)
                               : QueryUnderstanding.nativeSiglipQuery(word)
             let q = try siglip.embedQuery(text)
-            let hits = try store.search(space: siglip.space, kinds: [.photo], query: q,
+            let hits = try store.search(space: siglip.space, kinds: [kind], query: q,
                                         limit: 1_000_000, minScore: -1)
-            if refKeys.isEmpty {
-                photos = hits.count
-                refKeys = hits.map(\.refKey)
-                for (i, k) in refKeys.enumerated() { indexOf[k] = i }
-                mask = [UInt8](repeating: 0, count: words.count * photos)
+            // 行的顺序以第一个词的全库结果定;之后各词按行标识对位
+            if g.rowKeys.isEmpty {
+                g.rowKeys = hits.map { $0.refKey + "#" + String($0.frameIndex) }
+                g.owners = hits.map(\.refKey)
+                for (i, k) in g.rowKeys.enumerated() { g.indexOf[k] = i }
+                g.mask = [UInt8](repeating: 0, count: words.count * g.rowKeys.count)
             }
-            var row = [Float](repeating: 0, count: photos)
+            var row = [Float](repeating: 0, count: g.rowKeys.count)
             var yes = Bands(), other = Bands(), none = Bands()
             let tokens: Set<String> = isMain ? QueryUnderstanding.labelTokens(word) : []
             for h in hits {
-                guard let i = indexOf[h.refKey] else { continue }
+                guard let i = g.indexOf[h.refKey + "#" + String(h.frameIndex)] else { continue }
                 row[i] = h.score
                 guard isMain else { continue }
                 if let plate = plates[h.refKey] {
                     if QueryUnderstanding.labelTokensMatchCount(tokens, plate) > 0 {
                         yes.add(h.score, edges)
-                        mask[wi * photos + i] = 1
+                        g.mask[wi * g.rowKeys.count + i] = 1
                     } else {
                         other.add(h.score, edges)
                     }
@@ -107,45 +113,75 @@ enum ThresholdCalibration {
                     none.add(h.score, edges)
                 }
             }
-            scores.append(row)
-            queries.append(text)
+            g.scores.append(row)
+            g.texts.append(text)
             if isMain {
-                lines.append("校准[\(word)] 串=\(text) 真=\(yes.n):\(yes.text) "
-                             + "他=\(other.n):\(other.text) 高=\(fmt(other.maxScore)) "
-                             + "无牌=\(none.n):\(none.text) 高=\(fmt(none.maxScore))")
+                var line = "\(tag)[\(word)] "
+                if withQuery { line += "串=\(text) " }
+                line += "真=\(yes.n):\(yes.text) 他=\(other.n):\(other.text) 高=\(fmt(other.maxScore)) "
+                line += "无牌=\(none.n):\(none.text) 高=\(fmt(none.maxScore))"
+                g.lines.append(line)
             }
         }
+        return g
+    }
+
+    /// 逐词给全部照片与视频帧打分,写 diag.log(六带计数)与原始分数表文件(v3)。返回给界面看的摘要。
+    /// - Parameter gate: 现行门槛系数(ModelManager.siglipGateScale)
+    static func run(store: VectorStore, siglip: SigLIPEmbedder, gate: Float) throws -> String {
+        let started = Date()
+        // 带界(降序):一档 0.30×gate / 未缩放的二档 0.18(系数取 1.0 时的线)/
+        // 二档 0.18×gate / 尾线低置信基准 0.13×gate / 三档 0.08×gate
+        let edges: [Float] = [0.30 * gate, 0.18, 0.18 * gate, 0.13 * gate, 0.08 * gate]
+        var photoPlates: [String: String] = [:]
+        for r in try store.allPhotoLabels() where photoPlates[r.refKey] == nil { photoPlates[r.refKey] = r.title }
+        var framePlates: [String: String] = [:]
+        for r in try store.allVideoFrameLabels() where framePlates[r.refKey] == nil { framePlates[r.refKey] = r.title }
+        let photos = try measure(kind: .photo, store: store, siglip: siglip, plates: photoPlates,
+                                 edges: edges, tag: "校准", withQuery: true)
+        let frames = try measure(kind: .videoFrame, store: store, siglip: siglip, plates: framePlates,
+                                 edges: edges, tag: "校准帧", withQuery: false)
         let edgeText = edges.map { String(format: "%.3f", $0) }.joined(separator: "/")
         IndexingCoordinator.DiagLog.shared.event(
-            "校准头 照片=\(photos) 有牌=\(plates.count) 词数=\(words.count) 系数=\(gate) 带=\(edgeText) "
+            "校准头 照片=\(photos.rowKeys.count) 有牌=\(photos.plateCount) 词数=\(words.count) 系数=\(gate) 带=\(edgeText) "
             + "(六带自上而下:≥一档线/未缩放二档线~一档线/二档线~未缩放二档线/尾线低置信线~二档线/"
             + "三档线~尾线低置信线/<三档线;只算照片;真=标签牌命中该词,他=有牌不命中,无牌=没有标签牌)")
-        for l in lines { IndexingCoordinator.DiagLog.shared.event(l) }
+        for l in photos.lines { IndexingCoordinator.DiagLog.shared.event(l) }
+        IndexingCoordinator.DiagLog.shared.event(
+            "校准帧头 视频帧=\(frames.rowKeys.count) 有牌视频=\(frames.plateCount)(六带同上;真=帧标签牌命中该词;"
+            + "主管线里视频帧只凭分数 ≥\(String(format: "%.3f", 0.15 * gate)) 即可入场,照片二档线是 \(String(format: "%.3f", 0.18 * gate)))")
+        for l in frames.lines { IndexingCoordinator.DiagLog.shared.event(l) }
 
-        // 原始分数表文件
+        // 原始分数表文件(v3):每行 = 类型 序号 所属 标签牌 牌命中标记 分数…
+        let all = words + extras
         var out: [String] = []
-        out.append("#智搜校准数据 v2\t照片=\(photos)\t词数=\(words.count)\t额外=\(extras.count)\t系数=\(gate)")
+        out.append("#智搜校准数据 v3\t照片=\(photos.rowKeys.count)\t视频帧=\(frames.rowKeys.count)\t词数=\(words.count)\t额外=\(extras.count)\t系数=\(gate)")
         out.append("#词表\t" + all.joined(separator: "\t"))
-        out.append("#串\t" + queries.joined(separator: "\t"))
-        out.append("#列\t序号\t标签牌\t牌命中(逐词0/1,按词表顺序)\t分数(先词表后额外,各一个)")
-        var maskChars = [Character]()
-        maskChars.reserveCapacity(words.count)
-        for p in 0..<photos {
-            maskChars.removeAll(keepingCapacity: true)
-            for w in 0..<words.count { maskChars.append(mask[w * photos + p] == 1 ? "1" : "0") }
-            var parts: [String] = [String(p), plates[refKeys[p]] ?? "", String(maskChars)]
-            parts.reserveCapacity(3 + all.count)
-            for w in 0..<all.count { parts.append(String(format: "%.3f", scores[w][p])) }
-            out.append(parts.joined(separator: "\t"))
+        out.append("#串\t" + photos.texts.joined(separator: "\t"))
+        out.append("#列\t类型(P=照片 V=视频帧)\t序号\t所属(视频帧=所属视频的本地标识,照片留空)\t标签牌\t牌命中(逐词0/1,按词表顺序)\t分数(先词表后额外,各一个)")
+        func emit(_ g: Grid, _ type: String, _ withOwner: Bool, _ plates: [String: String], _ out: inout [String]) {
+            let n = g.rowKeys.count
+            var maskChars = [Character]()
+            maskChars.reserveCapacity(words.count)
+            for p in 0..<n {
+                maskChars.removeAll(keepingCapacity: true)
+                for w in 0..<words.count { maskChars.append(g.mask[w * n + p] == 1 ? "1" : "0") }
+                var parts: [String] = [type, String(p), withOwner ? g.owners[p] : "", plates[g.owners[p]] ?? "", String(maskChars)]
+                parts.reserveCapacity(5 + all.count)
+                for w in 0..<all.count { parts.append(String(format: "%.3f", g.scores[w][p])) }
+                out.append(parts.joined(separator: "\t"))
+            }
         }
+        emit(photos, "P", false, photoPlates, &out)
+        emit(frames, "V", true, framePlates, &out)
         let body = out.joined(separator: "\n") + "\n"
         try body.write(to: dataURL, atomically: true, encoding: .utf8)
         let kb = body.utf8.count / 1024
         IndexingCoordinator.DiagLog.shared.event(
-            "校准表 已写入 \(dataURL.lastPathComponent) 行=\(photos) 列=\(all.count + 3) 大小=\(kb)KB")
+            "校准表 已写入 \(dataURL.lastPathComponent) 照片行=\(photos.rowKeys.count) 视频帧行=\(frames.rowKeys.count) 列=\(all.count + 5) 大小=\(kb)KB")
 
         let secs = Date().timeIntervalSince(started)
-        return "\(words.count) 个词 · 照片 \(photos) 张(有标签牌 \(plates.count) 张) · 用时 \(String(format: "%.1f", secs)) 秒\n"
+        return "\(words.count) 个词 · 照片 \(photos.rowKeys.count) 张(有标签牌 \(photos.plateCount) 张)· 视频帧 \(frames.rowKeys.count) 帧 · 用时 \(String(format: "%.1f", secs)) 秒\n"
              + "明细已写入诊断日志:点下方「导出诊断日志」发出\n"
              + "完整分数表已存成文件(\(String(format: "%.1f", Double(kb) / 1024)) MB):点下方「导出校准数据」发出"
     }

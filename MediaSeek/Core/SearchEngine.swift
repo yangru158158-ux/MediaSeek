@@ -1148,7 +1148,17 @@ final class SearchEngine {
                     limit: topK, minAbs: 0.08 * gate, minZ: Self.relativeZ)) ?? [])
                     .filter { !kept.contains($0.hit.refKey) }
                 if !rel.isEmpty {
+                    // 批154(3 (14) 装机:搜 鱼,相对分捞到 38 张水族馆照片,排在前面的是 3 个
+                    // 与鱼无关的视频):只凭分数进场的视频帧——帧标签与查询词没有交集,分数够
+                    // 视频线 0.15×gate(0.1305)、够不着照片二档线 0.157——是比相对分命中更弱的
+                    // 证据,排到相对分命中后面;有标签实据的视频帧照旧在前。开关关时不改
+                    let isWeakFrame: (SearchHit) -> Bool = {
+                        $0.kind == .videoFrame && !videoLabelRefs.contains($0.refKey)
+                    }
+                    let weakFrames = survivors.filter(isWeakFrame)
+                    survivors.removeAll(where: isWeakFrame)
                     survivors.append(contentsOf: rel.map { $0.hit })
+                    survivors.append(contentsOf: weakFrames)
                 }
                 tierDiag += "相对分+\(rel.count) "
             }
