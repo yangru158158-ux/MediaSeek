@@ -327,6 +327,9 @@ struct SettingsView: View {
             // "已完成",靠这组数暴露真伪
             let diag = app.store.speechDiagnostics()
             let doneN = (UserDefaults.standard.stringArray(forKey: "speechDone") ?? []).count
+            // 批147:已记账却没有语音段的(文本被视频重新索引覆盖丢了,下轮同步自动补转写)
+            let lostN = (try? app.store.refsWithoutSpeech(
+                Array(Set(UserDefaults.standard.stringArray(forKey: "speechDone") ?? []))))?.count ?? 0
             VStack(alignment: .leading, spacing: 2) {
                 Text("转写状态:已记账 \(doneN) 部 · 已存文本 \(diag.stored) 部")
                     .font(.caption).foregroundStyle(
@@ -335,6 +338,10 @@ struct SettingsView: View {
                 if diag.stored > 0, !diag.sample.isEmpty {
                     Text("样例:\(diag.sample)…")
                         .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                }
+                if lostN > 0 {
+                    Text("其中 \(lostN) 部的转写文本已丢(视频重新索引时被覆盖)——点「同步新增内容」会自动补转写,可中断续跑")
+                        .font(.caption2).foregroundStyle(.orange)
                 }
                 if UserDefaults.standard.bool(forKey: "speechEnabled"), diag.stored == 0, doneN > 0 {
                     Text("已记账但零文本——多为听写未启用导致识别器空转。去 系统设置→通用→键盘→启用听写(勾普通话),然后点下方「重新转写」")

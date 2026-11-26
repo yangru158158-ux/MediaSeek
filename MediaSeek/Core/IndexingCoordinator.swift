@@ -873,13 +873,23 @@ final class IndexingCoordinator: ObservableObject {
         let rd = Self.recentlyDeletedIDs()
         let black = Set(UserDefaults.standard.stringArray(forKey: "vidAllBlack") ?? [])
         let assetFailed = Set(UserDefaults.standard.stringArray(forKey: "vidAssetFail") ?? [])
+        // 批147(3 (6) 装机实锤:已记账 349 部,库里只剩 16 部有转写文本)转写自愈:
+        // 已记账、但文字行里没有语音段的 = 文本被视频重新索引整行覆盖丢了
+        // (saveOCR 此前不保留语音段,批147 起保留)。这些重新排进待转写——
+        // 处理过的视频(含无语音的)行尾必有「〔语音〕」段,所以判得准
+        let lost = (try? store.refsWithoutSpeech(Array(done))) ?? []
         var pending: [PHAsset] = []
         let fetch = PHAsset.fetchAssets(with: .video, options: nil)
         fetch.enumerateObjects { asset, _, _ in
             let id = asset.localIdentifier
             guard !rd.contains(id), !black.contains(id), !assetFailed.contains(id),
-                  !done.contains(id), !failed.contains(id) else { return }
+                  !failed.contains(id), !done.contains(id) || lost.contains(id) else { return }
             pending.append(asset)
+        }
+        let lostPending = pending.filter { done.contains($0.localIdentifier) }.count
+        if lostPending > 0 {
+            IndexingCoordinator.DiagLog.shared.event(
+                "语音自愈: 已记账 \(done.count) 部,文本已丢 \(lost.count) 部,本轮补转写 \(lostPending) 部")
         }
         guard !pending.isEmpty else { return }
         // 有活干才碰权限:语音权限弹窗只在首轮转写前出现一次

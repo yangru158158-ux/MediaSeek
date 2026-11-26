@@ -715,14 +715,42 @@ final class VectorStore {
         sqlite3_step(stmt)
     } }
 
-    /// 保存照片的 OCR 文字(每照片一行,重复覆盖)
+    /// 保存 OCR 文字(每资产一行,重复覆盖)。
+    /// 批147(3 (6) 装机实锤:已记账 349 部,库里只剩 16 部有转写文本):覆盖前
+    /// 保留该行已有的语音转写段。视频重新索引会整行重写帧 OCR,此前把转写阶段
+    /// 追加进来的「〔语音〕…」一并抹掉,而 speechDone 仍记着「已转写」从此不再
+    /// 重转——换图像模型/全量重建/改抽帧数都会触发。语音段永远追加在行尾
+    /// (appendSpeechText),这里取行尾那一段原样接回去
     func saveOCR(refKey: String, text: String) throws { try serialized {
+        var merged = text
+        if !text.contains(Self.speechMarker) {
+            let rd = try prepare("SELECT text FROM ocr_text WHERE ref_key = ?")
+            defer { sqlite3_finalize(rd) }
+            sqlite3_bind_text(rd, 1, refKey, -1, Self.transient)
+            if sqlite3_step(rd) == SQLITE_ROW, let c = sqlite3_column_text(rd, 0),
+               let kept = Self.splitSpeech(String(cString: c))?.speech, !kept.isEmpty {
+                // splitSpeech 从标记前的换行处起切;这里统一成「正文\n语音段」
+                let speech = kept.hasPrefix("\n") ? String(kept.dropFirst()) : kept
+                merged = text.isEmpty ? speech : text + "\n" + speech
+            }
+        }
         let stmt = try prepare("INSERT OR REPLACE INTO ocr_text(ref_key, text) VALUES(?,?)")
         defer { sqlite3_finalize(stmt) }
         sqlite3_bind_text(stmt, 1, refKey, -1, Self.transient)
-        sqlite3_bind_text(stmt, 2, text, -1, Self.transient)
+        sqlite3_bind_text(stmt, 2, merged, -1, Self.transient)
         guard sqlite3_step(stmt) == SQLITE_DONE else { throw MSError("OCR 保存失败") }
     } }
+
+    /// 语音转写段的标记(转写阶段追加进行尾;无语音的视频写同款标记的占位)
+    static let speechMarker = "〔语音〕"
+
+    /// 把一行文字拆成「OCR 正文」与「行尾的语音转写段」;没有语音段返回 nil。
+    /// 取第一处标记:行首(该行原本无文字时 appendSpeechText 直接写语音)或
+    /// 另起一行处。saveOCR 保留语音段、clearSpeechTexts 剥语音段共用这一处判定
+    static func splitSpeech(_ text: String) -> (ocr: String, speech: String)? {
+        guard let r = text.range(of: "\n" + speechMarker) ?? text.range(of: speechMarker) else { return nil }
+        return (String(text[..<r.lowerBound]), String(text[r.lowerBound...]))
+    }
 
     /// 视频语音转写追加进该 ref 的 OCR 原文(〔语音〕独立段落):
     /// 帧 OCR 行已存在则追加不覆盖;总长封顶防极端长视频撑爆检索。
@@ -759,8 +787,9 @@ final class VectorStore {
                          String(cString: sqlite3_column_text(stmt, 1))))
         }
         for (key, text) in rows {
-            guard let r = text.range(of: "\n〔语音〕") ?? text.range(of: "〔语音〕") else { continue }
-            let head = String(text[..<r.lowerBound])
+            // 批147:改用 splitSpeech(与 saveOCR 保留语音段同一处判定)
+            guard let parts = Self.splitSpeech(text) else { continue }
+            let head = parts.ocr
             if head.isEmpty {
                 let del = try prepare("DELETE FROM ocr_text WHERE ref_key = ?")
                 defer { sqlite3_finalize(del) }
@@ -812,6 +841,28 @@ final class VectorStore {
                         String(cString: sqlite3_column_text(stmt, 1))))
         }
         return out.map { (refKey: $0.0, text: $0.1) }
+    } }
+
+    /// 批147:给定 ref 里,文字行中【没有】语音段的(整行不存在的也算)——
+    /// 转写自愈用。处理过的视频(含确认无语音的)行尾必有「〔语音〕」段;
+    /// 已记账却没有 = 文本被视频重新索引覆盖丢了。IN 列表分片绑定同 searchOCR(among:)
+    func refsWithoutSpeech(_ refs: [String]) throws -> Set<String> { try serialized {
+        guard let db, !refs.isEmpty else { return [] }
+        var withSpeech = Set<String>()
+        for chunkStart in stride(from: 0, to: refs.count, by: 400) {
+            let part = Array(refs[chunkStart..<min(chunkStart + 400, refs.count)])
+            let marks = Array(repeating: "?", count: part.count).joined(separator: ",")
+            let stmt = try prepare("SELECT ref_key FROM ocr_text WHERE text LIKE ? AND ref_key IN (\(marks))")
+            defer { sqlite3_finalize(stmt) }
+            sqlite3_bind_text(stmt, 1, "%\(Self.speechMarker)%", -1, Self.transient)
+            for (i, id) in part.enumerated() {
+                sqlite3_bind_text(stmt, Int32(i + 2), id, -1, Self.transient)
+            }
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                withSpeech.insert(String(cString: sqlite3_column_text(stmt, 0)))
+            }
+        }
+        return Set(refs).subtracting(withSpeech)
     } }
 
     /// 文字检索(限定范围):只在给定 ref 集合里做子串匹配(结果内搜索用)
