@@ -86,7 +86,7 @@ enum ThresholdCalibration {
         for l in lines { IndexingCoordinator.DiagLog.shared.event(l) }
         let secs = Date().timeIntervalSince(started)
         return "\(words.count) 个词 · 照片 \(photos) 张(有标签牌 \(plates.count) 张) · 用时 \(String(format: "%.1f", secs)) 秒\n"
-             + "明细已写入诊断日志:回上一页点「导出诊断日志」发出"
+             + "明细已写入诊断日志:点下方「导出诊断日志」发出"
     }
 
     private static func fmt(_ s: Float) -> String {

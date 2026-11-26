@@ -64,12 +64,13 @@ final class IndexingCoordinator: ObservableObject {
         private let df: DateFormatter = {
             let f = DateFormatter(); f.dateFormat = "HH:mm:ss.SSS"; return f
         }()
-        private var fileURL: URL? {
-            let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-                .appendingPathComponent("MediaSeek", isDirectory: true)
-            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            return dir.appendingPathComponent("diag.log")
-        }
+        /// 日志文件的唯一路径(批151):写入、建文件、设置页导出三处共用。
+        /// 批82 把日志从 Application Support 搬到 Documents(文件 App「我的 iPhone」
+        /// 里直达),但设置页的导出按钮只改了文件名、没改目录,指向 Application Support
+        /// 下一个从来没有日志的文件——按钮坏了一个月没人发现(用户一直从「文件」App 取)。
+        /// 路径只在这里算一次,免得各写一遍再走散
+        static let logURL: URL = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("diag.log")
         func event(_ msg: String) {
             let line = df.string(from: Date()) + " " + msg
             lock.lock()
@@ -86,8 +87,7 @@ final class IndexingCoordinator: ObservableObject {
             ioQueue.async {
                 // 批82一修(用户点名):Application Support 在沙盒深处文件 App 看不见;
                 // Documents=文件 App「我的 iPhone → MediaSeek → diag.log」直达
-                let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-                let u = dir.appendingPathComponent("diag.log")
+                let u = Self.logURL
                 if let h = FileHandle(forWritingAtPath: u.path) {
                     h.seekToEndOfFile()
                     h.write((out + "\n").data(using: .utf8)!)
@@ -102,8 +102,7 @@ final class IndexingCoordinator: ObservableObject {
         }
         /// 确保日志文件存在(设置页导出前调用,防分享不存在的文件——验收 medium)
         nonisolated func ensureFileExists() {
-            let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            let u = dir.appendingPathComponent("diag.log")
+            let u = Self.logURL
             if !FileManager.default.fileExists(atPath: u.path) {
                 try? "—— 诊断日志 ——\n".data(using: .utf8)?.write(to: u)
             }

@@ -247,6 +247,9 @@ struct SettingsView: View {
             .disabled(calibRunning || app.models.siglip == nil)
             if let t = calibText {
                 Text(t).font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
+                // 批151:测完就地导出——原先写「回上一页点导出」,可设置只有一页,
+                // 用户找不到(而且那个按钮当时还指向错误的路径)
+                diagExportLink
             }
         } header: {
             Text("门槛校准测量")
@@ -255,6 +258,20 @@ struct SettingsView: View {
                  ? "图像模型就绪后可用"
                  : "用几十个常见词给库里全部照片打一遍分,量出搜索的分数门槛在你的相册上实际切在哪里(挡掉了多少真命中、放进来多少别的)。约十几秒;只测量,不改任何搜索结果;结果写入诊断日志")
         }
+    }
+
+    /// 导出诊断日志(「索引选项」与「门槛校准测量」两处共用)。
+    /// 批151 修:路径取 DiagLog.logURL。批82 把日志搬到 Documents 时,这里只把文件名
+    /// 从 MediaSeek/diag.log 改成 diag.log、目录还是 Application Support——指向一个
+    /// 从来没有日志的文件,按钮点下去导不出东西,一个月没人发现
+    private var diagExportLink: some View {
+        ShareLink(item: { () -> URL in
+            IndexingCoordinator.DiagLog.shared.ensureFileExists()
+            return IndexingCoordinator.DiagLog.logURL
+        }()) {
+            Label("导出诊断日志", systemImage: "doc.text")
+        }
+        .font(.caption)
     }
 
     private func runCalibration() {
@@ -334,14 +351,7 @@ struct SettingsView: View {
             // 误会);当前值在行右侧,提示行只说明出厂默认与生效方式
             Text("当前 \(app.indexing.indexConcurrency) 路 · 出厂默认 4;越大越快、越热。改动立即生效(进行中的索引热切换)")
             HStack {
-                ShareLink(item: { () -> URL in
-                    IndexingCoordinator.DiagLog.shared.ensureFileExists()
-                    return FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-                        .appendingPathComponent("diag.log")
-                }()) {
-                    Label("导出诊断日志", systemImage: "doc.text")
-                }
-                .font(.caption)
+                diagExportLink
             }
                 .font(.caption).foregroundStyle(.secondary)
             Toggle(isOn: Binding(
