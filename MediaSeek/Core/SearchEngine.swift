@@ -1869,7 +1869,8 @@ final class SearchEngine {
     /// 现有门槛按单模板分布标定——要上必须先在设备上 A/B 单独验证
     /// (批93/批106 的 averagedQuery 平均向量已被批107 交集路径替代删除,
     /// 259 装机实测熔合概念与 AND 意图错位;配方与教训见 git 历史 d7f520d)
-    private static func siglipQuery(_ concept: String, nativeZh: Bool = false) -> String {
+    /// 批150:private → internal,供 ThresholdCalibration 用同一条查询串做门槛测量
+    static func siglipQuery(_ concept: String, nativeZh: Bool = false) -> String {
         if let en = QueryUnderstanding.english(for: concept) {
             // 批95:so400m 激活时中文词直用原文模板壳(原生路径,依据与边界
             // 见 ModelManager.preferNativeZhQuery);标准版仍走词典英译。

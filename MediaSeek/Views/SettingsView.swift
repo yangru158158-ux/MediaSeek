@@ -8,6 +8,8 @@ struct SettingsView: View {
     @State private var confirmRespeech = false
     @State private var videoDiagRunning = false
     @State private var videoDiagText: String?
+    @State private var calibRunning = false
+    @State private var calibText: String?
     @State private var labelVocab: [(label: String, count: Int)] = []
     @State private var showLabelVocab = false
 
@@ -19,6 +21,7 @@ struct SettingsView: View {
                 tuningSection
                 labelVocabSection
                 videoDiagSection
+                calibrationSection
                 aboutSection
             }
             .navigationTitle("设置")
@@ -223,6 +226,54 @@ struct SettingsView: View {
             }
         }
         _ = store
+    }
+
+    // MARK: - 门槛校准测量(批150)
+
+    /// 门槛校准测量:在用户自己的相册上实测 SigLIP 分数门槛线切在哪里——
+    /// 固定词表逐词给全部照片打分,按「标签牌是否认出该词」分组记各分数带的张数,
+    /// 写进 diag.log 由开发侧汇总(ThresholdCalibration)。只读,不改任何搜索结果
+    private var calibrationSection: some View {
+        Section {
+            Button {
+                runCalibration()
+            } label: {
+                if calibRunning {
+                    HStack { ProgressView(); Text("测量中…") }
+                } else {
+                    Label("开始测量", systemImage: "ruler")
+                }
+            }
+            .disabled(calibRunning || app.models.siglip == nil)
+            if let t = calibText {
+                Text(t).font(.caption2).foregroundStyle(.secondary).textSelection(.enabled)
+            }
+        } header: {
+            Text("门槛校准测量")
+        } footer: {
+            Text(app.models.siglip == nil
+                 ? "图像模型就绪后可用"
+                 : "用几十个常见词给库里全部照片打一遍分,量出搜索的分数门槛在你的相册上实际切在哪里(挡掉了多少真命中、放进来多少别的)。约十几秒;只测量,不改任何搜索结果;结果写入诊断日志")
+        }
+    }
+
+    private func runCalibration() {
+        guard !calibRunning, let siglip = app.models.siglip else { return }
+        calibRunning = true
+        let store = app.store
+        let gate = app.models.siglipGateScale
+        Task.detached(priority: .userInitiated) {
+            let out: String
+            do {
+                out = try ThresholdCalibration.run(store: store, siglip: siglip, gate: gate)
+            } catch {
+                out = "测量失败:\(error.localizedDescription)"
+            }
+            await MainActor.run {
+                calibText = out
+                calibRunning = false
+            }
+        }
     }
 
     /// 重新转写:清记账+清旧语音文本(含白卷/占位),下轮同步全量重跑
