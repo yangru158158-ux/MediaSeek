@@ -460,9 +460,11 @@ final class SearchEngine {
         if spec.channel == .any, Self.splitTerms(query).count >= 2,
            !Self.isAsciiPhrase(query) {
             let andSpec = QuerySpec(connector: .and, channel: .any, body: query)
+            // 批146(用户选「混合方案」):裸搜多词走词分流——画面词合成一句
+            // (单词语义阶梯),精确证据逐词求交;and:/or: 前缀不经此处
             let scoped = try await searchScoped(spec: andSpec, scope: scope, topK: topK,
                                                 siglip: siglip, within: among,
-                                                dateRange: dateRange)
+                                                dateRange: dateRange, phraseRecall: true)
             return SearchOutcome(hits: scoped.hits, textIDs: scoped.textIDs,
                                  timeLabel: dateRange?.label, placeLabel: placeLabel,
                                  note: Self.andNote(scoped.ignored))
@@ -1409,10 +1411,12 @@ final class SearchEngine {
     /// 显式语法流程:通道(文字/语义/自动)× 连接词(and/or)自由组合。
     /// 返回 hits + textIDs(文字维度命中集,第十五批:此前调用方写死空集,
     /// 「文字:」前缀的全部命中被三维度切换栏归进语义栏——用户实测
-    /// 文字:地图 189 个全挂语义、文字 0)
+    /// 文字:地图 189 个全挂语义、文字 0)。
+    /// phraseRecall(批146,默认 false):裸搜多词专用——画面词合成一句走单词语义
+    /// 阶梯,见下方「批146」注释;and:/or:/文字: 前缀不传,行为不变
     private func searchScoped(spec: QuerySpec, scope: SearchScope,
                               topK: Int, siglip: SigLIPEmbedder?, within: Set<String>? = nil,
-                              dateRange: QueryDateRange? = nil)
+                              dateRange: QueryDateRange? = nil, phraseRecall: Bool = false)
         async throws -> (hits: [DisplayHit], textIDs: Set<String>, ignored: [String]) {
         // 第七十一批:删除「文件范围整体返回空」守卫(第三十九批为拦照片/视频
         // 而设,把文字通道一并拦死——文件页签 文字:/and: 恒空,与裸搜同病)。
@@ -1470,7 +1474,95 @@ final class SearchEngine {
 
         // 语义/自动通道:数字词→文字,其余词→视觉
         var perTerm: [[SearchHit]] = []
-        for t in terms {
+        // 地名先定位(地理编码要等):地名词走 GPS 拍摄通道,不进下面的整句
+        var placeRegionByIndex: [Int: CLCircularRegion] = [:]
+        for (i, t) in terms.enumerated() where scope != .file {
+            if let p = QueryUnderstanding.barePlace(t),
+               let region = await PlaceGeocoder.region(for: p, radius: 50_000) {
+                placeRegionByIndex[i] = region
+            }
+        }
+        // 批146(用户选「混合方案」):裸搜多词的词分流。画面词不再逐词跑 SigLIP
+        // 再求交,而是合成一句走单词语义阶梯+尾线(与「原生语义:」同款构造:
+        // 原生模板壳+原文,不拆词),整句命中同时算作每个画面词的证据;人名/
+        // 专名/数字/地名/文字这类精确证据照旧逐词求交。只对裸搜多词生效
+        // (phraseRecall),and:/or: 前缀不变,需要严格「同时命中」用 and:。
+        // 起因:3 (4) 装机 搜「猫咪 小狗」按逐词 AND 只剩同框的——真猫视频只
+        // 满足「猫咪」、小狗视频只满足「小狗」,按定义进不来;用户确认
+        // 「原生语义:猫咪 小狗」(=6)是想要的结果。
+        // 已知取舍(用户知情):「猫 沙发」「宝宝 老公」这类要求同框的纯画面词
+        // 组合,从「必须同时有」变成「按整句相似度排序」(同框通常在前,只含
+        // 其一的受尾线限制可能出现在后面)。标签牌是精确证据,仍要求全部画面词
+        // 都在牌上命中——不按「任一词」放(否则「宝宝 老公」会把所有带 baby 牌
+        // 的照片灌进来,批41 事故重演)。
+        var visualIndexes = Set<Int>()
+        var phraseHits: [SearchHit] = []
+        var phraseCount = 0
+        if phraseRecall {
+            for (i, t) in terms.enumerated()
+            where !Self.containsDigit(t) && placeRegionByIndex[i] == nil
+                && !siglipSkipped(QueryUnderstanding.simplified(t)) {
+                visualIndexes.insert(i)
+            }
+            let visualTerms = visualIndexes.sorted().map { terms[$0] }
+            if !visualTerms.isEmpty {
+                let phrase = visualTerms.joined(separator: " ")
+                let phraseTokens = QueryUnderstanding.labelTokens(phrase)
+                // 语义阶梯(单词语义同规:0.25/0.15 阶梯、反空兜底、尾线、帧实据护栏)
+                var merged: [SearchHit] = semanticHits(phrase, siglip: siglip, topK: topK,
+                                                       within: within, scope: scope, gateScale: gate,
+                                                       nativeZh: nativeZh)
+                // 标签牌是精确证据:必须【全部】画面词都在牌上命中才算(批41 事故
+                // 不重演——「宝宝 老公」里 老公 没有 Vision 标签,若按「任一词」算,
+                // 所有带 baby 牌的照片都会灌进来)。「模糊的任一」只放在整句那一层
+                let termTokens = visualTerms.map { QueryUnderstanding.labelTokens($0) }
+                func plateMatchesAll(_ title: String) -> Bool {
+                    termTokens.allSatisfy { QueryUnderstanding.labelTokensMatchCount($0, title) > 0 }
+                }
+                var plateHits: [SearchHit] = []
+                if scope == .all || scope == .photo, let rows = try? store.allPhotoLabels() {
+                    for r in rows where (within?.contains(r.refKey) ?? true) && plateMatchesAll(r.title) {
+                        plateHits.append(SearchHit(kind: .photo, refKey: r.refKey, frameIndex: 0,
+                                                   space: "label", title: r.title, date: nil,
+                                                   score: 1.0, color: nil))
+                    }
+                }
+                if scope == .all || scope == .video, let rows = try? store.allVideoFrameLabels() {
+                    for r in rows where (within?.contains(r.refKey) ?? true) && plateMatchesAll(r.title) {
+                        plateHits.append(SearchHit(kind: .videoFrameLabel, refKey: r.refKey, frameIndex: 0,
+                                                   space: "label", title: r.title, date: nil,
+                                                   score: 1.0, color: nil))
+                    }
+                }
+                // 与其它标签通道同规:命中数降序(全中恒为 1)+ topK 截断,通道自身有界
+                merged.append(contentsOf: plateHits.prefix(topK))
+                phraseHits = Self.dedupByRef(merged)
+                // 批145:概念词截图抑制(与主管线同规;这里的「一档」是 0.25×gate)
+                if !phraseHits.isEmpty,
+                   QueryUnderstanding.conceptScreenshotSuppressible(phraseTokens, query: phrase) {
+                    var plates: [String: String] = [:]
+                    for r in (try? store.allPhotoLabels()) ?? [] where plates[r.refKey] == nil {
+                        plates[r.refKey] = r.title
+                    }
+                    for r in (try? store.allVideoFrameLabels()) ?? [] where plates[r.refKey] == nil {
+                        plates[r.refKey] = r.title
+                    }
+                    let strongLine: Float = 0.25 * gate
+                    let before = phraseHits.count
+                    phraseHits = phraseHits.filter {
+                        !QueryUnderstanding.shouldSuppressScreenshotHit(
+                            phraseTokens, plate: plates[$0.refKey], score: $0.score, strongLine: strongLine)
+                    }
+                    if phraseHits.count != before {
+                        IndexingCoordinator.DiagLog.shared.event(
+                            String(format: "截图抑制[%@] 尾线后=%d 剔除截图=%d 余=%d",
+                                   phrase, before, before - phraseHits.count, phraseHits.count))
+                    }
+                }
+                phraseCount = phraseHits.count
+            }
+        }
+        for (i, t) in terms.enumerated() {
             // 第三十九批:自动通道与文字通道同规按范围过滤(验收 medium 发现:
             // and:/or: 前缀在视频范围下仍混入照片命中)
             let allowed = Self.scopeAllowedKinds(scope)
@@ -1494,8 +1586,8 @@ final class SearchEngine {
                 // 内容词由此获得「在地拍摄∩内容」能力(and:上海 猫=在上海
                 // 拍的猫)。裸搜整串单地名走既有地点浏览并集(路径不变)
                 var hits: [SearchHit] = []
-                if scope != .file, let p = QueryUnderstanding.barePlace(t),
-                   let region = await PlaceGeocoder.region(for: p, radius: 50_000) {
+                // 地名在循环前已定位(placeRegionByIndex,批146 随词分流前移,判据不变)
+                if let p = QueryUnderstanding.barePlace(t), let region = placeRegionByIndex[i] {
                     photo.fetchAllAssets().enumerateObjects { asset, _, _ in
                         guard hits.count < topK else { return }
                         if scope == .photo, asset.mediaType != .image { return }
@@ -1538,12 +1630,19 @@ final class SearchEngine {
                     perTerm.append(hits)
                     continue
                 }
-                // 非地点词(能走到这里 hits 必为空):语义主座直接落座
-                hits.append(contentsOf: semanticHits(t, siglip: siglip, topK: topK,
-                                                      within: within, scope: scope, gateScale: gate,
-                                                      nativeZh: nativeZh,
-                                                      andRecall: spec.connector == .and))
-                if let within { hits = hits.filter { within.contains($0.refKey) } }
+                // 非地点词(能走到这里 hits 必为空):语义主座直接落座。
+                // 批146:裸搜多词的画面词不逐词跑 SigLIP,直接用循环前算好的整句
+                // 命中当证据(照片/视频帧标签已在整句里);其余词照旧
+                let usesPhrase = phraseRecall && visualIndexes.contains(i)
+                if usesPhrase {
+                    hits = phraseHits
+                } else {
+                    hits.append(contentsOf: semanticHits(t, siglip: siglip, topK: topK,
+                                                          within: within, scope: scope, gateScale: gate,
+                                                          nativeZh: nativeZh,
+                                                          andRecall: spec.connector == .and))
+                    if let within { hits = hits.filter { within.contains($0.refKey) } }
+                }
                 var seen = Set(hits.map(\.refKey))
                 // 「像或含字」同构(第十六批):裸搜模式里每个词 = OCR∪视觉任一
                 // 命中即算,and:/or: 自动通道此前只送语义——证件/文件类词语义
@@ -1559,7 +1658,8 @@ final class SearchEngine {
                 // 本通道同样无解(命中前提就是标签∩),根治属挂起的相对证据
                 // 重设计。标签条目只补缺口(语义条目带真实分排前,与 OCR 补
                 // 缺口同规);照片范围不并入(视频侧数据,与下方人名标签同规)
-                if allowed.contains(.videoFrame), let rows = try? store.allVideoFrameLabels() {
+                // 批146:画面词的帧标签已并入整句命中,这里不再逐词读一遍
+                if !usesPhrase, allowed.contains(.videoFrame), let rows = try? store.allVideoFrameLabels() {
                     let tokens = QueryUnderstanding.labelTokens(t)
                     if !tokens.isEmpty {
                         // 与主管线同通道完全同构(验收拦下初版无界返回):命中数
@@ -1609,6 +1709,12 @@ final class SearchEngine {
             }
         }
         var combined = combine(perTerm, connector: spec.connector)
+        // 批146仪器:裸搜多词词分流的结果构成(画面词几个、精确词几个、整句命中
+        // 几个、逐词求交后几个)——装机核对「猫咪 小狗」这类查询走了哪条路
+        if phraseRecall, !visualIndexes.isEmpty {
+            IndexingCoordinator.DiagLog.shared.event(
+                "多词整句[\(spec.body)] 画面词=\(visualIndexes.count) 精确词=\(terms.count - visualIndexes.count) 整句命中=\(phraseCount) 结果=\(combined.count)")
+        }
         // 批96二改(用户拍板按契约返回空,与上方 .text 分支同规)
         let ignored = spec.connector == .and
             ? zip(terms, perTerm).filter { $0.1.isEmpty }.map(\.0) : []
@@ -1624,10 +1730,9 @@ final class SearchEngine {
                     // 第六十五批:space=="label"(视频帧标签通道)标「帧标签」,
                     // 与 userTag 的「标签」区分——命中方式来源不可错标(验收拦下)
                     // 批97:space=="browse"(地点 GPS 通道)标「拍摄地」同规
-                    let way = h.space == "ocr" ? "文字"
-                        : (h.space == "browse" ? "拍摄地"
-                           : (h.space == "userTag" ? "标签"
-                              : (h.space == "label" ? "帧标签" : "语义")))
+                    // 批146:裸搜多词的画面词证据来自整句,标「整句相似」(标签牌须
+                    // 全部画面词命中,照实标出),不冒充逐词语义命中
+                    let way = Self.hitWayLabel(h, phraseRecall: phraseRecall)
                     info[h.refKey, default: []].append("\(t)·\(way)")
                 }
             }
@@ -1642,6 +1747,20 @@ final class SearchEngine {
         let textIDs = Set(combined.filter { $0.space == "ocr" }
             .map { "\($0.kind.rawValue)-\($0.refKey)" })
         return (resolve(combined, dateRange: dateRange), textIDs, ignored)
+    }
+
+    /// 多词结果卡上的命中方式标签(逐词列出每张照片凭什么命中)。
+    /// 批146:原为四层嵌套三目,改为函数;裸搜多词里画面词的语义证据来自整句
+    /// (标「整句相似」),标签牌要求全部画面词都命中(照实标出)
+    private static func hitWayLabel(_ h: SearchHit, phraseRecall: Bool) -> String {
+        if h.space == "ocr" { return "文字" }
+        if h.space == "browse" { return "拍摄地" }
+        if h.space == "userTag" { return "标签" }
+        if h.space == "label" {
+            if phraseRecall { return "标签牌(全部命中)" }
+            return h.kind == .videoFrameLabel ? "帧标签" : "标签牌"
+        }
+        return phraseRecall ? "整句相似" : "语义"
     }
 
     /// 范围允许的命中 kind(第三十九批):文字/自动通道统一按范围过滤,
@@ -1793,6 +1912,22 @@ final class SearchEngine {
         return concept
     }
 
+    /// 逐词语义通道不跑 SigLIP 的两类词(入参须已繁→简归一,与 semanticHits 同):
+    /// ①专名词(第六十二批):整词原文兜底=品类语义噪声带捞全库,只走文字通道;
+    /// ②人名(第六十四批):零命中+命中用户标签,且非性别词——名字→脸的绑定只在
+    /// 标签与 OCR 文字里,语义对人名只有噪声。
+    /// 批146 抽成一处:semanticHits 用它早退,裸搜多词的词分流用同一判据决定
+    /// 「哪些词是画面词」——两处各写一遍会漂移
+    private func siglipSkipped(_ term: String) -> Bool {
+        if QueryUnderstanding.isProperNoun(term) { return true }
+        if QueryUnderstanding.isDictionaryUnknown(term),
+           QueryUnderstanding.genderOpposite(of: term) == nil,
+           !((try? store.searchUserTags(query: term)) ?? []).isEmpty {
+            return true
+        }
+        return false
+    }
+
     /// 单词语义命中(SigLIP 视觉,门槛 0.14 + 0.08 弱信号兜底 + 相对尾部截断)。
     /// gateScale=激活模型的门槛缩放系数(so400m 0.87,第六十一批校准)
     private func semanticHits(_ rawTerm: String, siglip: SigLIPEmbedder?, topK: Int,
@@ -1812,15 +1947,11 @@ final class SearchEngine {
         if scope == .file { return [] }
         // 第六十二批:专名词整词跳过视觉(与主管线 semanticTerms 同规)——
         // 整词原文兜底=SigLIP 品类语义噪声带捞全库,只走文字通道
-        if QueryUnderstanding.isProperNoun(term) { return [] }
         // 第六十四批人名闸:零命中(isDictionaryUnknown)+命中用户标签=人名,
         // 且非性别词 → 跳过视觉(标签/OCR 照常;依据与判据边界见主管线
         // semanticTerms 注释);无标签零命中词(财报类)不受影响,照走多语言
-        if QueryUnderstanding.isDictionaryUnknown(term),
-           QueryUnderstanding.genderOpposite(of: term) == nil,
-           !((try? store.searchUserTags(query: term)) ?? []).isEmpty {
-            return []
-        }
+        // (批146:两道闸抽成 siglipSkipped,与裸搜多词判「画面词」共用一处判据)
+        if siglipSkipped(term) { return [] }
         // 第六十三批性别词深潜(与主管线 genderDive 同规):第三档地板+豁免
         // 尾线,性别裁决交给下方对比边距(低分段实测依据见主管线注释)
         let genderDive = QueryUnderstanding.genderContrast(of: term) != nil
