@@ -19,6 +19,7 @@ struct SettingsView: View {
             List {
                 modelSection
                 ModelUpdateSection()
+                searchOptionsSection
                 tuningSection
                 labelVocabSection
                 videoDiagSection
@@ -134,6 +135,33 @@ struct SettingsView: View {
             Text("图像模型词汇")
         } footer: {
             Text("列出库里照片/视频实际打上的英文标签及中文对照。这些中文直接可搜且双通道兼得:文字维度=照片里含该字样,语义/标签维度=画面内容匹配(如搜「海滩」命中 beach 标签的照片)。未收录中文的标签仍可搜英文原词。")
+        }
+    }
+
+    // MARK: - 搜索选项(批153)
+
+    /// 视觉相对分(实验,默认关)。依据=批152 在用户相册上的实测:视觉模型的绝对分数
+    /// 分不开真伪(同精度 83% 下只捞到 4.7% 的真命中),「这个词在该照片自己的分数里有多
+    /// 突出」分得开(同精度 86% 下 20.1%)。打开后主管线在绝对分阶梯与尾线之后补一批相对分
+    /// 命中,照旧过截图抑制(SearchEngine 主管线「批153」注释)。开关只管单词全局搜索的照片
+    private var searchOptionsSection: some View {
+        Section {
+            Toggle(isOn: Binding(
+                get: { UserDefaults.standard.bool(forKey: "relativeScoreEnabled") },
+                set: { on in
+                    UserDefaults.standard.set(on, forKey: "relativeScoreEnabled")
+                    if on { app.search.warmRelativeReferences() }
+                })) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("视觉相对分(实验)")
+                    Text("不只看分数高低,还看这个词在每张照片自己的分数里有多突出。对标签认不出的东西(夜晚、鱼、游泳池这类)能多搜出不少照片;每次搜索会慢一点;只管单词搜索的照片结果")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+        } header: {
+            Text("搜索选项")
+        } footer: {
+            Text("默认关闭。打开后先别急着搜,头一两秒在准备参照词。想对比就开了搜一遍、关了再搜一遍")
         }
     }
 

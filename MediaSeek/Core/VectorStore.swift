@@ -416,6 +416,75 @@ final class VectorStore {
         return Array(hits.sorted { $0.score > $1.score }.prefix(limit))
     } }
 
+    /// 相对分检索(批153,用户「做」;设置页实验开关,默认关)。
+    /// 绝对分 ≥ minAbs 的行,再用参照词向量(refs = 参照词数 × dim,按行连续)算这一行
+    /// 对全部参照词的分数,得标准化相对分 z = (查询分 − 均值) / 标准差,返回 z ≥ minZ 的行,
+    /// 按 z 从高到低排(下游按名次融合,通道内的顺序就是显示顺序;hit 的 score 仍是查询分)。
+    /// 排序取 z 不取绝对分的依据(批152 数据,相对分命中内部):前 20 张按 z 排命中率 69%、
+    /// 按绝对分 59%;前 10 张持平(58% 对 59%)——差别不大,取与筛选条件一致的 z。
+    /// 依据=批152 装机数据(66 词 × 13553 张):绝对分在真实相册上分不开真伪——真命中九成
+    /// 落在 0.07~0.157;同一个词在「这张照片自己的分数分布」里有多突出,分得开得多
+    /// (同精度 86% 下召回 4.7% → 20.1%)。参照词的个数、阈值都跟着那份数据走,改词表要重量。
+    /// 只给 minAbs 以上的行算参照分;不落库、不改索引
+    func searchRelative(space: String, kinds: [ItemKind], query: [Float], refs: [Float],
+                        limit: Int, minAbs: Float, minZ: Float) throws -> [(hit: SearchHit, z: Float)] { try serialized {
+        guard let db, !query.isEmpty, !refs.isEmpty, refs.count % query.count == 0 else { return [] }
+        let dim = query.count
+        let refCount = refs.count / dim
+        // 参照向量按行切成数组(vDSP.dot 吃数组;只切一次,循环里复用)
+        var refRows: [[Float]] = []
+        refRows.reserveCapacity(refCount)
+        for i in 0..<refCount {
+            refRows.append(Array(refs[(i * dim)..<((i + 1) * dim)]))
+        }
+        let ph = kinds.map { _ in "?" }.joined(separator: ",")
+        let stmt = try prepare("""
+        SELECT kind, ref_key, frame_index, title, created_at, dim, vec, color
+        FROM items WHERE space = ? AND kind IN (\(ph))
+        """)
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, space, -1, Self.transient)
+        for (i, k) in kinds.enumerated() {
+            sqlite3_bind_text(stmt, Int32(i + 2), k.rawValue, -1, Self.transient)
+        }
+        var out: [(hit: SearchHit, z: Float)] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let rowDim = Int(sqlite3_column_int(stmt, 5))
+            guard rowDim == dim, let blob = sqlite3_column_blob(stmt, 6) else { continue }
+            let v = blob.assumingMemoryBound(to: Float.self)
+            let vec = Array(UnsafeBufferPointer(start: v, count: dim))
+            let score = vDSP.dot(vec, query)
+            guard score >= minAbs else { continue }
+            // 这一行的参照分均值与(总体)标准差
+            var sum: Float = 0
+            var sumsq: Float = 0
+            for r in refRows {
+                let x = vDSP.dot(vec, r)
+                sum += x
+                sumsq += x * x
+            }
+            let n = Float(refCount)
+            let mean = sum / n
+            let variance = sumsq / n - mean * mean
+            guard variance > 1e-10 else { continue }
+            let z = (score - mean) / variance.squareRoot()
+            guard z >= minZ else { continue }
+            let kind = ItemKind(rawValue: String(cString: sqlite3_column_text(stmt, 0))) ?? .file
+            let refKey = String(cString: sqlite3_column_text(stmt, 1))
+            let frameIndex = Int(sqlite3_column_int(stmt, 2))
+            let title = sqlite3_column_type(stmt, 3) == SQLITE_NULL
+                ? nil : String(cString: sqlite3_column_text(stmt, 3))
+            let ts = sqlite3_column_double(stmt, 4)
+            let date = ts > 0 ? Date(timeIntervalSince1970: ts) : nil
+            let color = sqlite3_column_type(stmt, 7) == SQLITE_NULL
+                ? nil : String(cString: sqlite3_column_text(stmt, 7))
+            out.append((SearchHit(kind: kind, refKey: refKey, frameIndex: frameIndex,
+                                  space: space, title: title, date: date, score: score,
+                                  color: color), z))
+        }
+        return Array(out.sorted { $0.z > $1.z }.prefix(limit))
+    } }
+
     // MARK: - 导入文件
 
     func addFolder(bookmark: Data) throws -> Int64 { try serialized {

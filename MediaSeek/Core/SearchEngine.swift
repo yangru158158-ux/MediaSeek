@@ -59,6 +59,45 @@ final class SearchEngine {
         self.imports = imports
     }
 
+    // MARK: - 相对分(批153:设置页实验开关,默认关)
+
+    /// 实验开关:设置页「视觉相对分(实验)」。UserDefaults 里没有这个键时为关
+    static var relativeScoreEnabled: Bool { UserDefaults.standard.bool(forKey: "relativeScoreEnabled") }
+    /// 相对分线 z = (查询分 − 该照片对 66 个参照分的均值) / 标准差:
+    /// 批152 装机数据上汇总精度 86% / 召回 20.1% 的点(现行绝对分线 83% / 4.7%)
+    private static let relativeZ: Float = 2.90
+    /// 参照词向量的缓存;owner = 生成它的 SigLIPEmbedder 实例(换模型即失效重算)
+    private let relRefLock = NSLock()
+    private var relRefCache: (owner: ObjectIdentifier, rows: [Float])?
+
+    /// 66 个参照词的查询向量,与「门槛校准测量」同一份词表、同一条查询串,按行拼成一个数组。
+    /// z 的线是在这 66 个词上量的——要换词表,先改 ThresholdCalibration.words 并重新测量
+    private func relativeReferenceVectors(_ siglip: SigLIPEmbedder) throws -> [Float] {
+        let owner = ObjectIdentifier(siglip)
+        relRefLock.lock()
+        if let c = relRefCache, c.owner == owner {
+            relRefLock.unlock()
+            return c.rows
+        }
+        relRefLock.unlock()
+        var rows: [Float] = []
+        for word in ThresholdCalibration.words {
+            rows.append(contentsOf: try siglip.embedQuery(Self.siglipQuery(word, nativeZh: true)))
+        }
+        relRefLock.lock()
+        relRefCache = (owner, rows)
+        relRefLock.unlock()
+        return rows
+    }
+
+    /// 设置页打开开关时预热参照词向量(66 次文本塔推理),免得第一次搜索卡一下
+    func warmRelativeReferences() {
+        Task.detached(priority: .utility) {
+            guard let siglip = await MainActor.run(body: { self.models.siglip }) else { return }
+            _ = try? self.relativeReferenceVectors(siglip)
+        }
+    }
+
     /// 查询规格:连接词(and/or/无)× 通道(文字/语义/自动)可自由组合
     /// 例:「or 文字:发票 收据」「and 语义:猫 狗」「文字:身份证」「and:2026 屏幕」
     struct QuerySpec {
@@ -1092,6 +1131,27 @@ final class SearchEngine {
                        query,
                        embedPath,
                        hits.count, best, hits.map(\.score).min() ?? 0, survivors.count))
+            // 批153(用户「做」;设置页实验开关,默认关):相对分命中——绝对分阶梯与尾线之后,
+            // 再按「这个词在该照片自己的 66 词分数里有多突出」(z,见
+            // VectorStore.searchRelative)补一批照片:不在幸存集里的并进来,随后照旧过下面的
+            // 截图抑制(批152 数据:相对分对库里没有的词也更灵敏——无人机 44→69,其中 63 张
+            // 是截图牌;截图抑制正是它的闸)。不吃尾线(相对分命中的绝对分天然低于头部,套
+            // 尾线等于全砍);只管全局单词径的照片,交集/性别深潜/结果内/视频帧不参与
+            if Self.relativeScoreEnabled, !q.isEmpty, among == nil, isectWords == nil, !genderDive,
+               imageKinds.contains(.photo),
+               let refs = try? relativeReferenceVectors(siglip) {
+                let kept = Set(survivors.map(\.refKey))
+                // 返回的相对分命中已按 z 从高到低排:接在绝对分命中后面(下游按名次融合,
+                // 通道内的顺序就是相关性顺序),不重新按绝对分排
+                let rel = ((try? store.searchRelative(
+                    space: siglip.space, kinds: [.photo], query: q, refs: refs,
+                    limit: topK, minAbs: 0.08 * gate, minZ: Self.relativeZ)) ?? [])
+                    .filter { !kept.contains($0.hit.refKey) }
+                if !rel.isEmpty {
+                    survivors.append(contentsOf: rel.map { $0.hit })
+                }
+                tierDiag += "相对分+\(rel.count) "
+            }
             // 批143仪器:视觉通道明细——实际送进 SigLIP 的查询串、各档地板与
             // 命中数、幸存命中的牌词分布(每个牌词各挂在多少个命中上,前 12 个)
             // 与头部 8 个命中(P=照片 V=视频帧;各带分数与前 3 个牌词)。
