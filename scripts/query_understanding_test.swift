@@ -304,13 +304,51 @@ enum QueryUnderstandingTest {
             }
         }
 
-        // —— 批134:查询端下划线拆分护栏(批130验收余账) ——
-        // 批130 加了拆分逻辑但两侧测试都没断言它——误删拆分时 CI 全绿,
-        // 286 装机「play_card 标签=0 全灭」的事故会静默回潮;Python 镜像
-        // 同批(批131 已同步逻辑)补同集断言,双侧共守
+        // —— 批134:查询端下划线处理护栏(批130验收余账) ——
+        // 批130 加了拆分逻辑但两侧测试都没断言它——误删时 CI 全绿,286 装机
+        // 「play_card 标签=0 全灭」的事故会静默回潮;Python 镜像同集断言。
+        // 批143(用户定「两个都精确」)护栏改写:词表内的键打进来自身要能命中
+        // 自己的牌(批142 起靠整键),但不再拆片段——拆出的片段会顺带命中同名
+        // 的其它牌(3 (2) 装机:balloon_hotair 标签=56 对 热气球 标签=7,多的
+        // 是 balloon 牌);词表外的下划线串照旧拆
         let pcTokens = QueryUnderstanding.labelTokens("play_card")
-        expect(pcTokens.contains("play_card") && pcTokens.contains("play") && pcTokens.contains("card"),
-               "play_card 拆分三形并存(整词+片段,与照片标签端 id_card 拆分对齐)")
+        expect(pcTokens.contains("play_card") && !pcTokens.contains("play") && !pcTokens.contains("card"),
+               "play_card(词表内的键)整键进词集、不拆片段")
+        expect(QueryUnderstanding.labelTokensMatchCount(pcTokens, "play_card") == 1
+               && QueryUnderstanding.labelTokensMatchCount(pcTokens, "card") == 0,
+               "play_card 命中自己的牌,不命中 card 牌")
+        let idcTokens = QueryUnderstanding.labelTokens("id_card")
+        expect(idcTokens.contains("id") && idcTokens.contains("card"),
+               "词表外的下划线串照旧拆片段(id_card→id+card)")
+        // 批143:全量复合键——①打进来都命中自己的牌;②片段不由拆分注入
+        // (同义表引入的除外,如 blue_sky→sky);③命中词函数与计数函数恒一致
+        var splitLeak: [String] = [], ownMiss: [String] = [], termMismatch: [String] = []
+        for (en, cn) in LabelZh.zh {
+            let typedTokens = QueryUnderstanding.labelTokens(en)
+            if en.contains("_") {
+                if QueryUnderstanding.labelTokensMatchCount(typedTokens, en) == 0 { ownMiss.append(en) }
+                let viaSynonyms = QueryUnderstanding.expandedTokens([en])
+                for frag in en.components(separatedBy: "_") where !frag.isEmpty {
+                    if typedTokens.contains(frag) && !viaSynonyms.contains(frag) {
+                        splitLeak.append("\(en)→\(frag)")
+                    }
+                }
+            }
+            let zhTokens = QueryUnderstanding.labelTokens(cn)
+            for (toks, plate) in [(typedTokens, en), (zhTokens, en)] {
+                if QueryUnderstanding.labelTokensMatchedTerms(toks, plate).count
+                    != QueryUnderstanding.labelTokensMatchCount(toks, plate) {
+                    termMismatch.append(plate)
+                }
+            }
+        }
+        expect(ownMiss.isEmpty, "复合键打进来都命中自己的牌(整键): \(ownMiss.prefix(3))")
+        expect(splitLeak.isEmpty, "复合键的片段不由拆分注入(同义表引入的除外): \(splitLeak.prefix(3))")
+        expect(termMismatch.isEmpty,
+               "命中词函数与计数函数对全量标签×两个方向恒一致: \(termMismatch.prefix(3))")
+        let bhTokens = QueryUnderstanding.labelTokens("balloon_hotair")
+        expect(QueryUnderstanding.labelTokensMatchedTerms(bhTokens, "outdoor, balloon_hotair, balloon") == ["balloon_hotair"],
+               "balloon_hotair 只命中自己的牌,同牌上的 balloon 不算(3 (2) 装机同款)")
 
         // —— 全量标签词典回归(第四十七批):词典里每一个词都必须能工作 ——
         // 不是逐词救火:全部标签词(≈1566)做两个方向的穷尽断言——
@@ -417,9 +455,11 @@ enum QueryUnderstandingTest {
         expect(!birthdayCake.contains("cake_regular"),
                "嵌套只留最长:「生日蛋糕」里的「蛋糕」不单独捐,不带入 cake_regular")
 
-        // 断言数口径:全文 expect 调用 115 项(另含 1 行函数定义,批94 增 5 批98 增 3
+        // 断言数口径:全文 expect 调用 121 项(另含 1 行函数定义,批94 增 5 批98 增 3
         // 批134 增 1 批142 增 15:匹配级穷举 1 + 整键/守卫/桥接/同名多键单元面 14;
-        // 批142 二修增 4:短语里的多键名 2 + 盖不满/嵌套守卫 2)
-        print("PASS: 查询理解 115 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词的词集穷尽与匹配级穷尽)")
+        // 批142 二修增 4:短语里的多键名 2 + 盖不满/嵌套守卫 2;
+        // 批143 净增 6:批134 护栏那条改写为 3 条(词表内的键不拆片段),另增
+        // 全量复合键 3 条(自身命中/片段不注入/命中词与计数一致)+ balloon_hotair 1 条)
+        print("PASS: 查询理解 121 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词的词集穷尽与匹配级穷尽)")
     }
 }

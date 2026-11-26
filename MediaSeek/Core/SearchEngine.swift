@@ -619,6 +619,31 @@ final class SearchEngine {
         // 批115:isectDivert 时上方已整体跳过计算(labelHits 恒空),
         // 此处自然不 append;视频页签/单词/裸搜照旧
         if !labelHits.isEmpty { channels.append((1.6, labelHits)); chLabel = labelHits.count }
+        // 批143仪器:标签通道明细——命中的是哪些牌词、各多少张(照片/视频分开
+        // 计,同一照片/视频多行只算一次)。通道行的「标签=N」只有总数,看不
+        // 出构成:3 (2) 装机 搜 balloon_hotair 标签=56、搜 热气球 标签=7,
+        // 差的是「气球 balloon」牌(balloon_hotair 拆出的 balloon 片段顺带
+        // 命中)。只在全局搜索记(结果内搜索不刷屏)
+        if !labelHits.isEmpty, among == nil {
+            var photoSeen = Set<String>(), frameSeen = Set<String>()
+            var photoTerms: [String: Int] = [:], frameTerms: [String: Int] = [:]
+            for h in labelHits {
+                let inserted: Bool
+                if h.kind == .videoFrameLabel {
+                    inserted = frameSeen.insert(h.refKey).inserted
+                } else {
+                    inserted = photoSeen.insert(h.refKey).inserted
+                }
+                guard inserted else { continue }
+                for term in QueryUnderstanding.labelTokensMatchedTerms(tokens, h.title ?? "") {
+                    if h.kind == .videoFrameLabel { frameTerms[term, default: 0] += 1 }
+                    else { photoTerms[term, default: 0] += 1 }
+                }
+            }
+            IndexingCoordinator.DiagLog.shared.event(
+                "标签明细[\(query)] 照片\(photoSeen.count): " + Self.termCountsLine(photoTerms)
+                + " | 视频\(frameSeen.count): " + Self.termCountsLine(frameTerms))
+        }
 
         // 视觉通道:SigLIP2 原生多语言(分词实验已证),中文原文直接查;
         // 不再用语义路由——泛化标签(document/screenshot)会被几乎任何词
@@ -658,6 +683,10 @@ final class SearchEngine {
             // 短语日志失真;标签只能来自实际执行的分支,平均失败降级也自动正确
             let q: [Float]
             var embedPath: String
+            // 批143仪器:实际送进 SigLIP 文本塔的查询串(视觉明细行用)
+            var sigQueryText = ""
+            // 批143仪器:各档地板与该档命中数(视觉明细行用;交集/性别深潜不适用)
+            var tierDiag = ""
             // 批109:非 nil=语义:多词交集路径(阶梯/视频帧/空态三处按它改道);
             // pureSig=全部词都无精确命中(唯一保留组级尾线的交集形态)
             var isectWords: [String]? = nil
@@ -666,12 +695,14 @@ final class SearchEngine {
                 // 批94:原生向量——唯一规则=官方模板壳+spec.body 原文(未过
                 // core 清洗/时间剥离,也不经词典/桥/平均三道变换);多词语句
                 // 整句直进,SigLIP 原生判断首次可受控测量
-                q = try siglip.embedQuery(QueryUnderstanding.nativeSiglipQuery(spec.body))
+                sigQueryText = QueryUnderstanding.nativeSiglipQuery(spec.body)
+                q = try siglip.embedQuery(sigQueryText)
                 embedPath = "原生前缀"
             } else if spec.channel == .any, Self.isAsciiPhrase(query) {
                 // 批96:英文整串概念——构词空格不当意图分隔,整句(经 core/时间
                 // 剥离后的 query)套原生模板壳,与 原生语义: 同款构造
-                q = try siglip.embedQuery(QueryUnderstanding.nativeSiglipQuery(query))
+                sigQueryText = QueryUnderstanding.nativeSiglipQuery(query)
+                q = try siglip.embedQuery(sigQueryText)
                 embedPath = "英文整串"
             } else if spec.channel == .semantic, visualTerms.count >= 2 {
                 // 批107:语义:多词 = AND 意图(「猫 沙发」=有猫且有沙发)。
@@ -687,7 +718,8 @@ final class SearchEngine {
                 embedPath = "交集"   // 批110:是否有牌约束在下方交集块内细化(标签∩语义)
             } else {
                 let joined = semanticTerms.joined(separator: " ")
-                q = try siglip.embedQuery(Self.siglipQuery(joined, nativeZh: nativeZh))
+                sigQueryText = Self.siglipQuery(joined, nativeZh: nativeZh)
+                q = try siglip.embedQuery(sigQueryText)
                 // 条件原生的生效线与 siglipQuery 内部一致:仅非 ASCII 串吃原生壳
                 embedPath = (nativeZh && !joined.unicodeScalars.allSatisfy(\.isASCII))
                     ? "条件原生" : "模板"
@@ -902,13 +934,16 @@ final class SearchEngine {
                 hits = Self.dedupByRef(try store.search(
                     space: siglip.space, kinds: [.photo], query: q, limit: topK,
                     minScore: floor, among: among))
+                tierDiag += String(format: "一档%.3f=%d ", floor, hits.count)
                 // 弱信号兜底:品牌词/抽象词(「微信」「聊天」)对截图的视觉相似度
                 // 天然低于常规门槛,一刀切会整词清零(2026-10-10 用户实测三个词全空);
                 // 降档条件=薄判(不足 tierMinResults,第六十二批)
                 if hits.count < Self.tierMinResults {
+                    let tier2: Float = 0.18 * gate
                     hits = Self.dedupByRef(try store.search(
                         space: siglip.space, kinds: [.photo], query: q, limit: topK,
-                        minScore: 0.18 * gate, among: among))
+                        minScore: tier2, among: among))
+                    tierDiag += String(format: "二档%.3f=%d ", tier2, hits.count)
                 }
                 if hits.count < Self.tierMinResults {
                     // 第三档分两种:全局地板 0.08(旧注释称「高于无关带上沿」,
@@ -951,6 +986,7 @@ final class SearchEngine {
                         hits = Self.dedupByRef(try store.search(
                             space: siglip.space, kinds: [.photo], query: q, limit: topK,
                             minScore: floor, among: among))
+                        tierDiag += String(format: "三档%.3f=%d ", floor, hits.count)
                     }
                 }
                 }
@@ -1043,6 +1079,36 @@ final class SearchEngine {
                        embedPath,
                        hits.count, best, hits.map(\.score).min() ?? 0, survivors.count))
             chVisual = survivors.count
+            // 批143仪器:视觉通道明细——实际送进 SigLIP 的查询串、各档地板与
+            // 命中数、每个幸存命中(最多 30 个,按分降序)的分数与标签牌
+            // (P=照片 V=视频帧;牌取该照片/视频的第一行牌,最多列 5 个词)。
+            // 背景:3 (2) 装机 搜 无人机 视觉=42 全是 App 截图/终端/文章,
+            // 标签=0 文字=1——第二档(0.18×gate=0.157)放进来的 0.157~0.171
+            // 与真证件照(0.158~0.193)分数带重叠,光看语义行的 best/min 定
+            // 不了修法,得知道这些命中挂着什么牌。只在全局、非交集路径记
+            if !survivors.isEmpty, among == nil, isectWords == nil {
+                var plates: [String: String] = [:]
+                if let rows = try? store.allPhotoLabels() {
+                    for r in rows {
+                        if plates[r.refKey] == nil { plates[r.refKey] = r.title }
+                    }
+                }
+                if let rows = try? store.allVideoFrameLabels() {
+                    for r in rows {
+                        if plates[r.refKey] == nil { plates[r.refKey] = r.title }
+                    }
+                }
+                var detail: [String] = []
+                for h in survivors.prefix(30) {
+                    let kindLetter = h.kind == .videoFrame ? "V" : "P"
+                    let plateWords = (plates[h.refKey] ?? "无牌").components(separatedBy: ", ")
+                    detail.append(kindLetter + String(format: "%.3f:", h.score)
+                                  + plateWords.prefix(5).joined(separator: ","))
+                }
+                IndexingCoordinator.DiagLog.shared.event(
+                    "视觉明细[\(query)] 串=\(sigQueryText) " + tierDiag
+                    + "分:牌=" + detail.joined(separator: " | "))
+            }
             channels.append((1.0, survivors))
         }
 
@@ -1921,6 +1987,13 @@ final class SearchEngine {
                       space: $0.space, title: $0.title, date: $0.date,
                       score: $0.score / maxS, color: $0.color)
         }
+    }
+
+    /// 批143仪器:牌词计数排成「词=数」一行(按数降序、同数按词序),空则「-」
+    private static func termCountsLine(_ counts: [String: Int]) -> String {
+        if counts.isEmpty { return "-" }
+        let ordered = counts.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
+        return ordered.map { "\($0.key)=\($0.value)" }.joined(separator: " ")
     }
 
     /// 通道内按 refKey 去重(视频多帧/文件多块),供 RRF 按名次计分

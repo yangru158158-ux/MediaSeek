@@ -251,7 +251,17 @@ enum QueryUnderstanding {
         // —批125/126 拆了照片标签端(id_card→{id,card})但没拆查询端,
         // 英文复合词标签搜索全灭(play_card 标签=0,286 装机实锤);
         // 拆后与照片端对齐:整词+片段都进 tokens,匹配两端任一命中
+        // 批143(用户定「两个都精确」):打的本身就是词表里的键
+        // (balloon_hotair、play_card)不再拆片段——批142 起整键就能命中自己
+        // 的牌,拆出的片段只会顺带命中同名的其它牌:208 个复合键里 162 个的
+        // 片段同时是另一个简单词牌(balloon_hotair→全部 balloon 牌、
+        // hot_dog→全部 dog 牌)。3 (2) 装机实测:搜 balloon_hotair 标签=56,
+        // 搜 热气球 标签=7,多出的是「气球 balloon」牌;而中文侧没有对应
+        // 片段(不给中文复合名注入片段:成年猫→adult 会带出全部人像),两边
+        // 不对称。现在同为精确。词表外的下划线串(用户自造写法,如 id_card)
+        // 照旧拆:下划线当词分隔,片段各自去碰牌
         for t in raw where t.contains("_") {
+            if LabelZh.zh[t] != nil { continue }
             for frag in t.components(separatedBy: "_") where !frag.isEmpty {
                 tokens.insert(frag)
             }
@@ -299,26 +309,40 @@ enum QueryUnderstanding {
     ///     片段」那条路:搜「成年猫」会带出 adult,全部人像照的 adult 牌都会
     ///     命中)。
     /// 返回匹配词数(用于排序)。
-    /// 例:adult_cat +「成年猫」tokens={成年猫,adult_cat,cat,...} → 整键 ✓
+    /// 例:adult_cat +「成年猫」tokens={成年猫,adult_cat} → 整键 ✓
     ///    play_card +「身份证」tokens={card,driver,license,身份证} → ✗ 扑克出局
     static func labelTokensMatchCount(_ queryTokens: Set<String>, _ labelTitle: String) -> Int {
-        let terms = labelTitle.lowercased().components(separatedBy: CharacterSet(charactersIn: ", "))
         var count = 0
-        for term in terms {
+        for term in labelTitle.lowercased().components(separatedBy: CharacterSet(charactersIn: ", ")) {
             let trimmed = term.trimmingCharacters(in: .whitespaces)
             if trimmed.isEmpty { continue }
-            if trimmed.contains("_") {
-                if queryTokens.contains(trimmed) {
-                    count += 1   // 批142:整键在词集=命中
-                } else {
-                    let fragments = Set(trimmed.components(separatedBy: "_"))
-                    if fragments.isSubset(of: queryTokens) { count += 1 }
-                }
-            } else if queryTokens.contains(trimmed) {
-                count += 1
-            }
+            if labelTermMatches(queryTokens, trimmed) { count += 1 }
         }
         return count
+    }
+
+    /// 批143仪器:牌里实际命中的词(判定与 labelTokensMatchCount 同出
+    /// labelTermMatches,个数恒等于它)。标签通道明细诊断行用——通道行的
+    /// 「标签=N」只有总数,看不出命中的是哪几种牌
+    static func labelTokensMatchedTerms(_ queryTokens: Set<String>, _ labelTitle: String) -> [String] {
+        var out: [String] = []
+        for term in labelTitle.lowercased().components(separatedBy: CharacterSet(charactersIn: ", ")) {
+            let trimmed = term.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty { continue }
+            if labelTermMatches(queryTokens, trimmed) { out.append(trimmed) }
+        }
+        return out
+    }
+
+    /// 牌里单个词的命中判定(上面两个函数共用,规则只此一处):
+    /// · 简单词(无下划线):词集里有它才命中;
+    /// · 复合词:整键在词集(批142),或全部片段都在词集(批126)
+    private static func labelTermMatches(_ queryTokens: Set<String>, _ trimmed: String) -> Bool {
+        if trimmed.contains("_") {
+            if queryTokens.contains(trimmed) { return true }
+            return Set(trimmed.components(separatedBy: "_")).isSubset(of: queryTokens)
+        }
+        return queryTokens.contains(trimmed)
     }
 
     /// 性别词对照(第五十批引入,第五十五批重标定):SigLIP 绝对分数区分

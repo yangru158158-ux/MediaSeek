@@ -133,22 +133,31 @@ def expanded(tokens):
     return out
 
 
+def label_term_matches(query_tokens, term):
+    """牌里单个词的命中判定(Swift labelTermMatches 同构,规则只此一处):
+    简单词在词集才命中;复合词整键在词集(批142)或全部片段都在词集(批126)。"""
+    if "_" in term:
+        if term in query_tokens:
+            return True
+        return set(term.split("_")) <= query_tokens
+    return term in query_tokens
+
+
 def label_tokens_match_count(query_tokens, label_title):
     """批142:QueryUnderstanding.labelTokensMatchCount 逐语义复刻(标签牌匹配)。
-    牌里的词按「, 」拆开逐个判;复合词(含下划线)整键在词集或全部片段都在
-    词集才算命中;简单词在词集才算命中。返回匹配词数。"""
+    牌里的词按「, 」拆开逐个判;返回匹配词数。"""
     count = 0
     for term in re.split(r"[, ]", label_title.lower()):
-        if not term:
-            continue
-        if "_" in term:
-            if term in query_tokens:
-                count += 1          # 批142:整键在词集=命中
-            elif set(term.split("_")) <= query_tokens:
-                count += 1          # 批126:片段全中
-        elif term in query_tokens:
+        if term and label_term_matches(query_tokens, term):
             count += 1
     return count
+
+
+def label_tokens_matched_terms(query_tokens, label_title):
+    """批143仪器:QueryUnderstanding.labelTokensMatchedTerms 同构——返回牌里
+    实际命中的词(与计数函数共用判定,个数恒等于它)。"""
+    return [term for term in re.split(r"[, ]", label_title.lower())
+            if term and label_term_matches(query_tokens, term)]
 
 
 # 第七十二批:繁→简字表解析(定义必须先于 label_tokens 的首次调用)
@@ -187,8 +196,10 @@ def label_tokens(query):
                 dict_tokens.add(k)
     # 批131(批130验收 medium 同步):查询端下划线复合词拆分
     # —Swift 批130 加了(play_card→{play_card,play,card}),镜像同步
+    # 批143(用户定「两个都精确」):本身就是词表里的键不拆片段——整键已能命中
+    # 自己的牌,拆出的片段只会顺带命中同名的其它牌;词表外的下划线串照旧拆
     for t in raw:
-        if "_" in t:
+        if "_" in t and t not in ZH:
             for frag in t.split("_"):
                 if frag:
                     tokens.add(frag)
@@ -317,11 +328,39 @@ expect(dict(DICTIONARY).get("驾驶证") == "driver license card",
        "驾驶证词典对补齐(批83 已 document→card,镜像滞后三批实锤)")
 print(f"证件桥: 表 {len(COUNTERPARTS)} 键 / 别名 {len(OCR_ALIASES)} 组 对拍一致")
 
-# ---- 批134:查询端下划线拆分护栏(批130验收余账;与 Swift 断言同集) ----
-# 批131 同步了拆分逻辑但没断言它——误删时镜像照跑全绿,双侧共守才闭环
+# ---- 批143:查询端下划线处理护栏(与 Swift 断言同集;批134 那条改写) ----
+# 批130 加了拆分逻辑但两侧测试都没断言它;批143(用户定「两个都精确」):
+# 词表内的键打进来自身要能命中自己的牌(整键),但不再拆片段——拆出的片段会
+# 顺带命中同名的其它牌(3 (2) 装机:balloon_hotair 标签=56 对 热气球 标签=7)
 pc = label_tokens("play_card")
-expect("play_card" in pc and "play" in pc and "card" in pc,
-       "play_card 拆分三形并存(整词+片段,与照片标签端 id_card 拆分对齐)")
+expect("play_card" in pc and "play" not in pc and "card" not in pc,
+       "play_card(词表内的键)整键进词集、不拆片段")
+expect(label_tokens_match_count(pc, "play_card") == 1 and label_tokens_match_count(pc, "card") == 0,
+       "play_card 命中自己的牌,不命中 card 牌")
+idc = label_tokens("id_card")
+expect("id" in idc and "card" in idc, "词表外的下划线串照旧拆片段(id_card→id+card)")
+# 全量复合键:打进来都命中自己的牌;片段不由拆分注入(同义表引入的除外)
+own_miss = [en for en in ZH if "_" in en and label_tokens_match_count(label_tokens(en), en) == 0]
+expect(not own_miss, f"复合键打进来都命中自己的牌(整键): {own_miss[:3]}")
+split_leak = []
+for en in ZH:
+    if "_" not in en:
+        continue
+    toks = label_tokens(en)
+    via_syn = expanded({en})
+    for frag in en.split("_"):
+        if frag and frag in toks and frag not in via_syn:
+            split_leak.append(f"{en}->{frag}")
+expect(not split_leak, f"复合键的片段不由拆分注入(同义表引入的除外): {split_leak[:3]}")
+term_mismatch = []
+for en, cn in ZH.items():
+    for toks in (label_tokens(en), label_tokens(cn)):
+        if len(label_tokens_matched_terms(toks, en)) != label_tokens_match_count(toks, en):
+            term_mismatch.append(en)
+expect(not term_mismatch, f"命中词函数与计数函数对全量标签×两个方向恒一致: {term_mismatch[:3]}")
+bh = label_tokens("balloon_hotair")
+expect(label_tokens_matched_terms(bh, "outdoor, balloon_hotair, balloon") == ["balloon_hotair"],
+       "balloon_hotair 只命中自己的牌,同牌上的 balloon 不算(3 (2) 装机同款)")
 
 # ---- 批142:标签通道匹配级穷举 + 单元面(与 Swift 断言同集) ----
 # 第四十七批的两条穷举只断言「词集里有这个词」;牌能不能匹配上是另一段逻辑
