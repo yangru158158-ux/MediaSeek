@@ -407,6 +407,46 @@ enum QueryUnderstandingTest {
         expect(lostInPhrase.isEmpty,
                "两两组合穷举(\(pairsChecked) 对):多词查询不丢任一词单独捐出的同形片段(丢失: \(lostInPhrase.prefix(3)))")
 
+        // —— 批145:概念词截图抑制(用户定「做」) ——
+        // 3 (3) 装机:搜 无人机 视觉 46 个里 40 个是文档截图(SigLIP 给截图打
+        // 0.16~0.19,刚过第二档线);文档/微信 的截图是真命中,不能一刀切
+        let droneTokens = QueryUnderstanding.labelTokens("无人机")
+        expect(QueryUnderstanding.conceptScreenshotSuppressible(droneTokens, query: "无人机"),
+               "无人机:Vision 认得出(drone 牌)→ 截图抑制适用")
+        expect(QueryUnderstanding.isScreenshotPlate("document,screenshot,people")
+               && QueryUnderstanding.isScreenshotPlate("Document, Screenshot")
+               && !QueryUnderstanding.isScreenshotPlate("document,text")
+               && !QueryUnderstanding.isScreenshotPlate("screenshot,people"),
+               "截图牌=同时有 document 与 screenshot(大小写不敏感),缺一不算")
+        expect(QueryUnderstanding.shouldSuppressScreenshotHit(droneTokens, plate: "document,screenshot,people",
+                                                              score: 0.171, strongLine: 0.261),
+               "无人机:截图上没认出无人机 → 弱档命中剔除")
+        expect(!QueryUnderstanding.shouldSuppressScreenshotHit(droneTokens, plate: "document,screenshot,drone",
+                                                               score: 0.165, strongLine: 0.261)
+               && !QueryUnderstanding.shouldSuppressScreenshotHit(droneTokens, plate: "document,screenshot",
+                                                                 score: 0.280, strongLine: 0.261)
+               && !QueryUnderstanding.shouldSuppressScreenshotHit(droneTokens, plate: nil,
+                                                                 score: 0.165, strongLine: 0.261)
+               && !QueryUnderstanding.shouldSuppressScreenshotHit(droneTokens, plate: "people,adult,plant",
+                                                                 score: 0.165, strongLine: 0.261),
+               "不剔除的四种:截图上认出了概念 / 过了一档强线 / 无牌 / 不是截图")
+        var wronglyApplicable: [String] = []
+        for q in ["微信", "聊天", "文档", "文字", "网页", "截图", "电脑", "手机", "屏幕", "人", "老人", "孩子",
+                  "身份证", "护照", "驾驶证", "驾照", "证件", "信用卡", "名片", "发票", "漫画", "地图", "海报"] {
+            if QueryUnderstanding.conceptScreenshotSuppressible(QueryUnderstanding.labelTokens(q), query: q) {
+                wronglyApplicable.append(q)
+            }
+        }
+        expect(wronglyApplicable.isEmpty,
+               "截图抑制不适用的词(无标签/截图族/设备族/人像族/平面物族/卡与证件):(误适用: \(wronglyApplicable))")
+        var wronglyExcluded: [String] = []
+        for q in ["无人机", "热气球", "气球", "小猫", "小狗", "汽车", "蛋糕", "海滩", "热狗"] {
+            if !QueryUnderstanding.conceptScreenshotSuppressible(QueryUnderstanding.labelTokens(q), query: q) {
+                wronglyExcluded.append(q)
+            }
+        }
+        expect(wronglyExcluded.isEmpty, "截图抑制适用的实物/场景词:(漏适用: \(wronglyExcluded))")
+
         // —— 全量标签词典回归(第四十七批):词典里每一个词都必须能工作 ——
         // 不是逐词救火:全部标签词(≈1566)做两个方向的穷尽断言——
         //   ①英文标签直搜不被任何逻辑剔除(含 12 个泛化词,守卫后本尊保留)
@@ -512,13 +552,14 @@ enum QueryUnderstandingTest {
         expect(!birthdayCake.contains("cake_regular"),
                "嵌套只留最长:「生日蛋糕」里的「蛋糕」不单独捐,不带入 cake_regular")
 
-        // 断言数口径:全文 expect 调用 129 项(另含 1 行函数定义,批94 增 5 批98 增 3
+        // 断言数口径:全文 expect 调用 135 项(另含 1 行函数定义,批94 增 5 批98 增 3
         // 批134 增 1 批142 增 15:匹配级穷举 1 + 整键/守卫/桥接/同名多键单元面 14;
         // 批142 二修增 4:短语里的多键名 2 + 盖不满/嵌套守卫 2;
         // 批143 净增 6:批134 护栏那条改写为 3 条(词表内的键不拆片段),另增
         // 全量复合键 3 条(自身命中/片段不注入/命中词与计数一致)+ balloon_hotair 1 条;
         // 批143二修增 6(词条同解):同解单元面 5 条 + 全量词条同解穷举 1 条;
-        // 批143三修增 2(验收 medium×2):多词不丢同形片段 1 + 两两组合穷举 1)
-        print("PASS: 查询理解 129 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词的词集穷尽与匹配级穷尽)")
+        // 批143三修增 2(验收 medium×2):多词不丢同形片段 1 + 两两组合穷举 1;
+        // 批145 增 6(概念词截图抑制):适用性 1 + 截图牌判定 1 + 剔除判定 2 + 正反词表 2)
+        print("PASS: 查询理解 135 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词的词集穷尽与匹配级穷尽)")
     }
 }

@@ -387,6 +387,79 @@ enum QueryUnderstanding {
         return queryTokens.contains(trimmed)
     }
 
+    // MARK: - 概念词截图抑制(批145,用户定「做」)
+    // 背景(3 (3) 装机 diag,2026-11-26):SigLIP 把大量文档截图打到 0.16~0.19,
+    // 刚过第二档线(0.18×gate=0.157)——搜 无人机 视觉 46 个里 40 个是截图、
+    // 无人机表演 31 里 18、热气球 3 里 2、气球 7 里 2。而 文档(276 里 122)、
+    // 微信(214 里 205)的截图就是真命中,不能一刀切。
+    // 判据:Vision 认得出这个概念(词表里有它的标签)、又把这张图认成了截图
+    // (牌里同时有 document 与 screenshot)、却没在上面认出这个概念——那
+    // SigLIP 的弱档命中不算数。只管弱档命中(过一档强线的照留)。
+    // 不适用的五类(截图是它们的真命中或强混淆项):①词集里没有词表标签
+    // (微信/聊天);②概念本身属截图族(文档/文字/网页);③设备族(电脑/手机/
+    // 屏幕——截图与实拍屏幕互相混淆);④人像族;⑤平面物族(发票/漫画/地图——
+    // 电子票据、动漫截图往往是真命中)。另:卡与证件类词豁免
+    // (身份证/护照/信用卡/名片——卡和证件的截图很可能是真命中)。
+
+    /// 截图族标签:概念是这些时,截图就是它要找的东西
+    static let screenshotFamily: Set<String> = [
+        "document", "screenshot", "text", "printed_page", "page", "handwriting",
+    ]
+    /// 设备族标签:实拍屏幕与截图在牌上互相混淆
+    static let deviceFamily: Set<String> = [
+        "computer", "laptop", "computer_monitor", "monitor", "screen", "television", "tablet",
+        "cell_phone", "mobile_phone", "smartphone", "phone",
+    ]
+    /// 人像族标签:截图里的人与照片里的人在牌上分不开
+    static let personFamily: Set<String> = [
+        "person", "people", "adult", "human", "man", "woman", "child", "boy", "girl",
+        "face", "portrait", "crowd", "baby",
+    ]
+    /// 平面物族标签:票据/图表/地图/书报/海报/画作这类东西,截图与扫描件往往
+    /// 就是真命中(电子发票、动漫截图、App 里的地图)——本机扫词典,这 25 个
+    /// 键都在词表里(2026-11-26)
+    static let flatFamily: Set<String> = [
+        "book", "envelope", "invoice", "receipt", "chart", "spreadsheet", "map", "menu", "poster",
+        "ticket", "label", "letter", "newspaper", "magazine", "notebook", "sign", "billboard",
+        "painting", "cartoon", "comic", "art", "drawing", "sketch", "whiteboard", "calendar",
+    ]
+
+    /// 牌里同时有 document 与 screenshot = Vision 把这张图认成了截图
+    /// (按单个字符切分,逗号后有没有空格都认得——与牌匹配函数同一种切法)
+    static func isScreenshotPlate(_ plate: String) -> Bool {
+        let words = Set(plate.lowercased().components(separatedBy: CharacterSet(charactersIn: ", ")))
+        return words.contains("document") && words.contains("screenshot")
+    }
+
+    /// 截图抑制对这个查询是否适用。tokens = labelTokens(概念),query = 概念原串
+    static func conceptScreenshotSuppressible(_ tokens: Set<String>, query: String) -> Bool {
+        let conceptLabels = tokens.intersection(Set(LabelZh.zh.keys))
+        guard !conceptLabels.isEmpty else { return false }            // ① Vision 认不出这个概念
+        // 卡与证件类豁免:标签名带 card/passport;或原串里的词属证件豁免表/
+        // 证件别名表/英文证件桥;或词典英译含 card/license/licence/passport
+        if conceptLabels.contains(where: { $0.contains("card") || $0 == "passport" }) { return false }
+        for raw in query.components(separatedBy: .whitespacesAndNewlines) where !raw.isEmpty {
+            let t = simplified(raw)
+            if floorExemptWords.contains(t) || ocrAliases[t] != nil { return false }
+            if chineseCounterpart(for: t) != nil { return false }
+            if let en = english(for: t) {
+                let e = en.lowercased()
+                if e.contains("card") || e.contains("license") || e.contains("licence")
+                    || e.contains("passport") { return false }
+            }
+        }
+        let excluded = screenshotFamily.union(deviceFamily).union(personFamily).union(flatFamily)
+        return conceptLabels.isDisjoint(with: excluded)                // ②③④⑤
+    }
+
+    /// 单个视觉命中要不要因「截图上没认出概念」而剔除。只在弱档(分数低于
+    /// strongLine)生效;无牌的命中不动(Vision 什么都没说,保留)
+    static func shouldSuppressScreenshotHit(_ tokens: Set<String>, plate: String?,
+                                            score: Float, strongLine: Float) -> Bool {
+        guard score < strongLine, let plate, isScreenshotPlate(plate) else { return false }
+        return labelTokensMatchCount(tokens, plate) == 0
+    }
+
     /// 性别词对照(第五十批引入,第五十五批重标定):SigLIP 绝对分数区分
     /// 男女弱(0.08 地板男女同放行),相对差才可靠。对比串=文献标准形式
     /// 「a photo of a woman/man」,真实照片实测边距:女 +0.030~+0.049 /

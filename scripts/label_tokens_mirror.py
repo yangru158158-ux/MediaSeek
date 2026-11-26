@@ -431,6 +431,79 @@ expect(not _lost_in_phrase,
        f"两两组合穷举({_pairs_checked} 对):多词查询不丢任一词单独捐出的同形片段(丢失: {_lost_in_phrase[:3]})")
 print(f"两两组合穷举: {_pairs_checked} 对,丢失 {len(_lost_in_phrase)}")
 
+# ---- 批145:概念词截图抑制(与 Swift 断言同集;四张族表从 Swift 源码解析) ----
+# 3 (3) 装机:搜 无人机 视觉 46 个里 40 个是文档截图(SigLIP 给截图打 0.16~0.19,
+# 刚过第二档线);文档/微信 的截图是真命中,不能一刀切
+def _family(marker):
+    blk = QU.split(marker, 1)[1].split("]", 1)[0]
+    return set(re.findall(r'"([a-z_]+)"', blk))
+
+SCREENSHOT_FAMILY = _family("static let screenshotFamily: Set<String> = [")
+DEVICE_FAMILY = _family("static let deviceFamily: Set<String> = [")
+PERSON_FAMILY = _family("static let personFamily: Set<String> = [")
+FLAT_FAMILY = _family("static let flatFamily: Set<String> = [")
+EXEMPT_WORDS = _family("static let floorExemptWords: Set<String> = [")
+VOCAB_KEYS = set(ZH)
+
+
+def is_screenshot_plate(plate):
+    """牌里同时有 document 与 screenshot = Vision 把这张图认成了截图
+    (按逗号和空格逐字符切,与 Swift 同构)"""
+    words = set(plate.lower().replace(",", " ").split())
+    return "document" in words and "screenshot" in words
+
+
+def concept_screenshot_suppressible(tokens, query):
+    """截图抑制对这个查询是否适用(Swift 同构):词集里得有词表标签;卡/证件类
+    豁免;概念不属截图族/设备族/人像族/平面物族"""
+    concept = tokens & VOCAB_KEYS
+    if not concept:
+        return False
+    if any("card" in k or k == "passport" for k in concept):
+        return False
+    for raw in re.split(r"\s+", query):
+        if not raw:
+            continue
+        t = to_simplified(raw)
+        if t in EXEMPT_WORDS or t in OCR_ALIASES or COUNTERPARTS.get(t.lower().strip()):
+            return False
+        en = english_for(t)
+        if en and any(s in en.lower() for s in ("card", "license", "licence", "passport")):
+            return False
+    return not (concept & (SCREENSHOT_FAMILY | DEVICE_FAMILY | PERSON_FAMILY | FLAT_FAMILY))
+
+
+def should_suppress_screenshot_hit(tokens, plate, score, strong_line):
+    """单个视觉命中要不要因「截图上没认出概念」而剔除(Swift 同构):只在弱档
+    (分数低于 strong_line)生效;无牌的命中不动"""
+    if plate is None or not score < strong_line or not is_screenshot_plate(plate):
+        return False
+    return label_tokens_match_count(tokens, plate) == 0
+
+
+drone = label_tokens("无人机")
+expect(concept_screenshot_suppressible(drone, "无人机"),
+       "无人机:Vision 认得出(drone 牌)→ 截图抑制适用")
+expect(is_screenshot_plate("document,screenshot,people") and is_screenshot_plate("Document, Screenshot")
+       and not is_screenshot_plate("document,text") and not is_screenshot_plate("screenshot,people"),
+       "截图牌=同时有 document 与 screenshot(大小写不敏感),缺一不算")
+expect(should_suppress_screenshot_hit(drone, "document,screenshot,people", 0.171, 0.261),
+       "无人机:截图上没认出无人机 → 弱档命中剔除")
+expect(not should_suppress_screenshot_hit(drone, "document,screenshot,drone", 0.165, 0.261)
+       and not should_suppress_screenshot_hit(drone, "document,screenshot", 0.280, 0.261)
+       and not should_suppress_screenshot_hit(drone, None, 0.165, 0.261)
+       and not should_suppress_screenshot_hit(drone, "people,adult,plant", 0.165, 0.261),
+       "不剔除的四种:截图上认出了概念 / 过了一档强线 / 无牌 / 不是截图")
+_wrongly_applicable = [q for q in ["微信", "聊天", "文档", "文字", "网页", "截图", "电脑", "手机", "屏幕",
+                                   "人", "老人", "孩子", "身份证", "护照", "驾驶证", "驾照", "证件", "信用卡",
+                                   "名片", "发票", "漫画", "地图", "海报"]
+                       if concept_screenshot_suppressible(label_tokens(q), q)]
+expect(not _wrongly_applicable,
+       f"截图抑制不适用的词(无标签/截图族/设备族/人像族/平面物族/卡与证件):(误适用: {_wrongly_applicable})")
+_wrongly_excluded = [q for q in ["无人机", "热气球", "气球", "小猫", "小狗", "汽车", "蛋糕", "海滩", "热狗"]
+                     if not concept_screenshot_suppressible(label_tokens(q), q)]
+expect(not _wrongly_excluded, f"截图抑制适用的实物/场景词:(漏适用: {_wrongly_excluded})")
+
 # ---- 批142:标签通道匹配级穷举 + 单元面(与 Swift 断言同集) ----
 # 第四十七批的两条穷举只断言「词集里有这个词」;牌能不能匹配上是另一段逻辑
 # (复合词自批126 起要求全部片段在词集)。Swift 侧探针实测:208 个复合键里

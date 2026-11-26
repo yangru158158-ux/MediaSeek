@@ -1083,14 +1083,13 @@ final class SearchEngine {
             // 批108:增记「尾线后」计数——命中=尾线切割前(诊断阶梯),尾线后=
             // 切割后幸存(≈界面语义通道基数,259 装机曾把命中数误当界面数,
             // 两口径并列后不再靠推算)
-            let survivors = best > 0 && tailFactor > 0
+            var survivors = best > 0 && tailFactor > 0
                 ? hits.filter { $0.score >= best * tailFactor } : hits
             IndexingCoordinator.DiagLog.shared.event(
                 String(format: "语义[%@] 路径=%@ 命中=%d best=%.3f min=%.3f 尾线后=%d",
                        query,
                        embedPath,
                        hits.count, best, hits.map(\.score).min() ?? 0, survivors.count))
-            chVisual = survivors.count
             // 批143仪器:视觉通道明细——实际送进 SigLIP 的查询串、各档地板与
             // 命中数、幸存命中的牌词分布(每个牌词各挂在多少个命中上,前 12 个)
             // 与头部 8 个命中(P=照片 V=视频帧;各带分数与前 3 个牌词)。
@@ -1102,19 +1101,36 @@ final class SearchEngine {
             // 30 个×5 词约 1.5KB/次,三四百次搜索就把之前的日志全挤掉;
             // 分布一行约 400 字节,且比逐条清单更直接回答「是不是都是截图」
             if !survivors.isEmpty, among == nil, isectWords == nil {
+                // 批145(用户定「做」):概念词截图抑制——Vision 认得出这个概念、把
+                // 这张图认成了截图、却没在上面认出这个概念 → 弱档 SigLIP 命中不
+                // 算数(判据与四类不适用、卡/证件豁免见
+                // QueryUnderstanding.conceptScreenshotSuppressible)。3 (3) 装机:搜
+                // 无人机 视觉 46 个里 40 个是文档截图,热气球 3 个里 2 个。牌表
+                // 与下面的视觉明细共用一次读取;性别深潜靠对比边距把关,不叠加
+                let suppressScreenshots = !genderDive
+                    && QueryUnderstanding.conceptScreenshotSuppressible(tokens, query: concept)
                 var plates: [String: String] = [:]
                 // 批143三修(验收 low):只在结果里确有该类命中时才读对应的牌表
                 // ——两张都是无 LIMIT 的全表读,纯诊断不该在搜索路径上白读
                 let hasVideo = survivors.contains { $0.kind == .videoFrame }
                 if survivors.contains(where: { $0.kind != .videoFrame }),
                    let rows = try? store.allPhotoLabels() {
-                    for r in rows {
-                        if plates[r.refKey] == nil { plates[r.refKey] = r.title }
-                    }
+                    for r in rows where plates[r.refKey] == nil { plates[r.refKey] = r.title }
                 }
                 if hasVideo, let rows = try? store.allVideoFrameLabels() {
-                    for r in rows {
-                        if plates[r.refKey] == nil { plates[r.refKey] = r.title }
+                    for r in rows where plates[r.refKey] == nil { plates[r.refKey] = r.title }
+                }
+                if suppressScreenshots {
+                    let strongLine: Float = (semanticOnly ? 0.25 : 0.30) * gate
+                    let before = survivors.count
+                    survivors = survivors.filter {
+                        !QueryUnderstanding.shouldSuppressScreenshotHit(
+                            tokens, plate: plates[$0.refKey], score: $0.score, strongLine: strongLine)
+                    }
+                    if survivors.count != before {
+                        IndexingCoordinator.DiagLog.shared.event(
+                            String(format: "截图抑制[%@] 尾线后=%d 剔除截图=%d 余=%d",
+                                   query, before, before - survivors.count, survivors.count))
                     }
                 }
                 var wordCounts: [String: Int] = [:]
@@ -1140,6 +1156,8 @@ final class SearchEngine {
                     + "尾线后=\(survivors.count) 牌词分布=" + Self.countsLine(wordCounts, 12)
                     + " 无牌=\(noPlate) 头部=" + head.joined(separator: " | "))
             }
+            // 视觉通道基数按截图抑制之后的幸存集计(批145)
+            chVisual = survivors.count
             channels.append((1.0, survivors))
         }
 
