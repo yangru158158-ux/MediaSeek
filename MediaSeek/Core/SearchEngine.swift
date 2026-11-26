@@ -1091,12 +1091,16 @@ final class SearchEngine {
             // 分布一行约 400 字节,且比逐条清单更直接回答「是不是都是截图」
             if !survivors.isEmpty, among == nil, isectWords == nil {
                 var plates: [String: String] = [:]
-                if let rows = try? store.allPhotoLabels() {
+                // 批143三修(验收 low):只在结果里确有该类命中时才读对应的牌表
+                // ——两张都是无 LIMIT 的全表读,纯诊断不该在搜索路径上白读
+                let hasVideo = survivors.contains { $0.kind == .videoFrame }
+                if survivors.contains(where: { $0.kind != .videoFrame }),
+                   let rows = try? store.allPhotoLabels() {
                     for r in rows {
                         if plates[r.refKey] == nil { plates[r.refKey] = r.title }
                     }
                 }
-                if let rows = try? store.allVideoFrameLabels() {
+                if hasVideo, let rows = try? store.allVideoFrameLabels() {
                     for r in rows {
                         if plates[r.refKey] == nil { plates[r.refKey] = r.title }
                     }

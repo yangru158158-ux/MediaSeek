@@ -231,22 +231,35 @@ enum QueryUnderstanding {
         }
         var tokens = raw
         var dictTokens = Set<String>()
-        if let en = english(for: query) {
-            let words = en.lowercased().split(separator: " ").map { String($0) }
-            // 批143二修(验收 low):词典译法是带空格的短语(冰淇淋→ice cream),
-            // 而它的下划线形式恰好是同一个词条的键(ice_cream)且也在捐出的词
-            // 里——短语的各个词不再单独进词集,词条由键代表。否则 冰淇淋 会
-            // 顺带命中全部 ice 牌、客厅→room、游乐园→park,与打 ice_cream 的
-            // 结果不一致。同义表捐进来的片段(sky→blue_sky 里的 sky)不在这
-            // 一步,不受影响
-            let vocabCompounds = Set(words.filter { $0.contains("_") && LabelZh.zh[$0] != nil })
-            for s in words {
-                if !vocabCompounds.isEmpty, !s.contains("_"),
-                   vocabCompounds.contains(where: { $0.components(separatedBy: "_").contains(s) }) {
+        // 词典英译:逐原子、逐区间捐词(覆盖判定与 english(for:) 同一套)。
+        // 批143二修(验收 low):区间的中文名下有复合词条键(ice_cream),且这个
+        // 区间的译法是多个词、每个词都是该键的片段(ice cream)→ 这几个词不
+        // 单独进词集,词条由键代表(键由下方同名多键补全进词集)。否则 冰淇淋
+        // 会顺带命中全部 ice 牌、客厅→room、游乐园→park。
+        // 批143三修(验收 medium×2):只看【同一个区间】——首版按整条查询的
+        // 译词集合判,别的原子捐出的同形词被一并丢掉(「猫咪 成年猫」丢 cat、
+        // 「跑车 警车」丢 car,穷举 255 对词有 86 个两词查询丢牌),且丢弃与否
+        // 取决于单值反查表这次先捐出哪个键(「热狗 狗狗」随启动变)。判据改用
+        // 区间中文名下的键全集 englishKeysFromZh(内容确定,不随遍历顺序变)。
+        // 同义表捐进来的片段(sky→blue_sky 里的 sky)不在这步,不受影响
+        for term in query.components(separatedBy: .whitespacesAndNewlines) where !term.isEmpty {
+            guard case .complete(let spans) = termCoverage(term) else { continue }
+            for m in spans {
+                let s = term.index(term.startIndex, offsetBy: m.start)
+                let e = term.index(term.startIndex, offsetBy: m.end)
+                let compoundKeys = (LabelZh.englishKeysFromZh[String(term[s..<e])] ?? [])
+                    .filter { $0.contains("_") }
+                let words = m.en.lowercased().split(separator: " ").map { String($0) }
+                if words.count >= 2, !compoundKeys.isEmpty,
+                   compoundKeys.contains(where: {
+                       Set(words).isSubset(of: Set($0.components(separatedBy: "_")))
+                   }) {
                     continue
                 }
-                tokens.insert(s)
-                dictTokens.insert(s)
+                for w in words {
+                    tokens.insert(w)
+                    dictTokens.insert(w)
+                }
             }
         }
         // 批142:同名多键补全——一个中文名对应多个英文标签键时(广告牌→

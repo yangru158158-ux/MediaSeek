@@ -378,6 +378,34 @@ enum QueryUnderstandingTest {
         }
         expect(asymmetric.isEmpty,
                "全量 \(LabelZh.zh.count) 个词条同解:打英文键与搜中文名词集相同(不一致: \(asymmetric.prefix(3)))")
+        // 批143三修(验收 medium×2):「短语撞词条键不拆词」只对同一个词条生效——
+        // 首版按整条查询的译词集合判,别的词捐出的同形片段被一并丢掉,且丢不丢
+        // 取决于单值反查表这次先捐出哪个键。上面那条穷举只比单词,抓不到这类
+        expect(QueryUnderstanding.labelTokens("猫咪 成年猫").contains("cat")
+               && QueryUnderstanding.labelTokens("跑车 警车").contains("car")
+               && QueryUnderstanding.labelTokens("热狗 狗狗").contains("dog"),
+               "多词查询不丢别的词捐出的同形片段(猫咪 成年猫 / 跑车 警车 / 热狗 狗狗)")
+        var allWords = Set(LabelZh.zh.values)
+        allWords.formUnion(QueryUnderstanding.dictionary.map { $0.0 })
+        var tokensByWord: [String: Set<String>] = [:]
+        for w in allWords { tokensByWord[w] = QueryUnderstanding.labelTokens(w) }
+        var lostInPhrase: [String] = []
+        var pairsChecked = 0
+        for (n, tn) in tokensByWord {
+            let compoundFrags = Set(tn.flatMap { $0.contains("_") ? $0.components(separatedBy: "_") : [] })
+            guard !compoundFrags.isEmpty else { continue }
+            for (w, tw) in tokensByWord where w != n && !w.contains(n) && !n.contains(w) {
+                let shared = tw.intersection(compoundFrags)
+                guard !shared.isEmpty else { continue }
+                pairsChecked += 1
+                let both = QueryUnderstanding.labelTokens(n + " " + w)
+                if !shared.isSubset(of: both) {
+                    lostInPhrase.append("\(n)+\(w) 丢 \(shared.subtracting(both))")
+                }
+            }
+        }
+        expect(lostInPhrase.isEmpty,
+               "两两组合穷举(\(pairsChecked) 对):多词查询不丢任一词单独捐出的同形片段(丢失: \(lostInPhrase.prefix(3)))")
 
         // —— 全量标签词典回归(第四十七批):词典里每一个词都必须能工作 ——
         // 不是逐词救火:全部标签词(≈1566)做两个方向的穷尽断言——
@@ -484,12 +512,13 @@ enum QueryUnderstandingTest {
         expect(!birthdayCake.contains("cake_regular"),
                "嵌套只留最长:「生日蛋糕」里的「蛋糕」不单独捐,不带入 cake_regular")
 
-        // 断言数口径:全文 expect 调用 127 项(另含 1 行函数定义,批94 增 5 批98 增 3
+        // 断言数口径:全文 expect 调用 129 项(另含 1 行函数定义,批94 增 5 批98 增 3
         // 批134 增 1 批142 增 15:匹配级穷举 1 + 整键/守卫/桥接/同名多键单元面 14;
         // 批142 二修增 4:短语里的多键名 2 + 盖不满/嵌套守卫 2;
         // 批143 净增 6:批134 护栏那条改写为 3 条(词表内的键不拆片段),另增
         // 全量复合键 3 条(自身命中/片段不注入/命中词与计数一致)+ balloon_hotair 1 条;
-        // 批143二修增 6(词条同解):同解单元面 5 条 + 全量词条同解穷举 1 条)
-        print("PASS: 查询理解 127 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词的词集穷尽与匹配级穷尽)")
+        // 批143二修增 6(词条同解):同解单元面 5 条 + 全量词条同解穷举 1 条;
+        // 批143三修增 2(验收 medium×2):多词不丢同形片段 1 + 两两组合穷举 1)
+        print("PASS: 查询理解 129 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词的词集穷尽与匹配级穷尽)")
     }
 }

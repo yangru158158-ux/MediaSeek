@@ -186,19 +186,26 @@ def label_tokens(query):
                 return label_tokens(name)
     tokens = set(raw)
     dict_tokens = set()
-    en = english_for(query)
-    if en:
-        words = [t for t in en.lower().split(" ") if t]
-        # 批143二修(验收 low):词典译法是带空格的短语(冰淇淋→ice cream),而
-        # 它的下划线形式恰好是同一个词条的键(ice_cream)且也在捐出的词里——
-        # 短语的各个词不再单独进词集,词条由键代表(否则 冰淇淋 顺带命中全部
-        # ice 牌、客厅→room、游乐园→park)。Swift 同构
-        vocab_compounds = {w for w in words if "_" in w and w in ZH}
-        for t in words:
-            if vocab_compounds and "_" not in t and any(t in c.split("_") for c in vocab_compounds):
+    # 批143二修/三修:词典英译逐原子、逐区间捐词(覆盖判定与 english_for 同一套)。
+    # 区间的中文名下有复合词条键(ice_cream),且这个区间的译法是多个词、每个词
+    # 都是该键的片段(ice cream)→ 这几个词不单独进词集,词条由键代表。只看同一
+    # 个区间、判据用键全集表(EN_KEYS_FROM_ZH,内容确定)——首版按整条查询的译词
+    # 集合判,多词查询里别的词捐出的同形词被一并丢掉,且随单值反查表先捐出哪个
+    # 键而变(验收 medium×2)。Swift 同构
+    for term in re.split(r"\s+", query):
+        if not term:
+            continue
+        kind, _, spans = term_coverage(term)
+        if kind != "complete":
+            continue
+        for m in spans:
+            name = term[m[0]:m[1]]
+            compound_keys = [k for k in EN_KEYS_FROM_ZH.get(name, []) if "_" in k]
+            words = [t for t in m[2].lower().split(" ") if t]
+            if len(words) >= 2 and compound_keys and any(set(words) <= set(k.split("_")) for k in compound_keys):
                 continue
-            tokens.add(t)
-            dict_tokens.add(t)
+            tokens.update(words)
+            dict_tokens.update(words)
     # 批142:同名多键补全——Swift labelTokens 沿 english(for:) 实际捐出的碎片
     # 区间,把区间对应中文名下的全部键补进词集并按直译词对待(同享泛化剔除
     # 免疫);镜像同步。位置与 Swift 同:词典英译之后、下划线拆分之前。
@@ -398,6 +405,31 @@ asymmetric = [en for en, cn in ZH.items() if label_tokens(en) != label_tokens(cn
 expect(not asymmetric,
        f"全量 {len(ZH)} 个词条同解:打英文键与搜中文名词集相同(不一致: {asymmetric[:3]})")
 print(f"词条同解穷举: {len(ZH) - len(asymmetric)}/{len(ZH)}")
+# 批143三修(验收 medium×2):「短语撞词条键不拆词」只对同一个词条生效
+expect("cat" in label_tokens("猫咪 成年猫") and "car" in label_tokens("跑车 警车")
+       and "dog" in label_tokens("热狗 狗狗"),
+       "多词查询不丢别的词捐出的同形片段(猫咪 成年猫 / 跑车 警车 / 热狗 狗狗)")
+_all_words = set(ZH.values()) | {zh for zh, _ in DICTIONARY}
+_tokens_by_word = {w: label_tokens(w) for w in _all_words}
+_lost_in_phrase = []
+_pairs_checked = 0
+for n, tn in _tokens_by_word.items():
+    frags = {f for t in tn if "_" in t for f in t.split("_")}
+    if not frags:
+        continue
+    for w, tw in _tokens_by_word.items():
+        if w == n or w in n or n in w:
+            continue
+        shared = tw & frags
+        if not shared:
+            continue
+        _pairs_checked += 1
+        both = label_tokens(n + " " + w)
+        if not shared <= both:
+            _lost_in_phrase.append(f"{n}+{w} 丢 {sorted(shared - both)}")
+expect(not _lost_in_phrase,
+       f"两两组合穷举({_pairs_checked} 对):多词查询不丢任一词单独捐出的同形片段(丢失: {_lost_in_phrase[:3]})")
+print(f"两两组合穷举: {_pairs_checked} 对,丢失 {len(_lost_in_phrase)}")
 
 # ---- 批142:标签通道匹配级穷举 + 单元面(与 Swift 断言同集) ----
 # 第四十七批的两条穷举只断言「词集里有这个词」;牌能不能匹配上是另一段逻辑
