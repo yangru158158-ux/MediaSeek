@@ -1797,11 +1797,14 @@ final class SearchEngine {
         for term in variantTerms {
             let rows: [(String, String)]
             if let among = within {
-                // 批131修(验收 low):结果内分支 text 恒空导致排序 no-op——
-                // searchOCR(among:) 返回 [String] 无文本,改用非 among 版
-                // + among 过滤,保留文本供排序
-                rows = ((try? store.searchOCR(query: term)) ?? [])
-                    .filter { among.contains($0.refKey) }
+                // 结果内分支:直接在结果集里查,带原文(排序要用)。
+                // 批131修(验收 low):此前 text 恒空导致排序 no-op。
+                // 批148(批131验收 medium 的余账):批131 的改法是「全库检索
+                // (LIMIT 4000)再按结果集过滤」——常见词的全库命中超过 4000 行
+                // 时后面的行看不到,其中可能正是结果集里的 → 结果内会漏。
+                // 改用 searchOCRText(query:among:):与全表扫描同序,命中不超过
+                // 4000 行时两种做法的结果完全一致,差的只是超限那一截
+                rows = ((try? store.searchOCRText(query: term, among: Array(among))) ?? [])
                     .map { ($0.refKey, $0.text) }
             } else {
                 // 批131修(验收 low):去掉 per-variant prefix(topK) 截断——

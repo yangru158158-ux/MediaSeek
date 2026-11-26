@@ -864,7 +864,7 @@ final class VectorStore {
 
     /// 批147:给定 ref 里,文字行中【没有】语音段的(整行不存在的也算)——
     /// 转写自愈用。处理过的视频(含确认无语音的)行尾必有「〔语音〕」段;
-    /// 已记账却没有 = 文本被视频重新索引覆盖丢了。IN 列表分片绑定同 searchOCR(among:)。
+    /// 已记账却没有 = 文本被视频重新索引覆盖丢了。IN 列表分片绑定同 searchOCRText(query:among:)。
     /// 是否真有语音段由 splitSpeech 判定(批147二修:OCR 读进来的行中「[语音]」字样不算)
     func refsWithoutSpeech(_ refs: [String]) throws -> Set<String> { try serialized {
         guard let db, !refs.isEmpty else { return [] }
@@ -888,28 +888,43 @@ final class VectorStore {
         return Set(refs).subtracting(withSpeech)
     } }
 
-    /// 文字检索(限定范围):只在给定 ref 集合里做子串匹配(结果内搜索用)
-    func searchOCR(query: String, among: [String]) throws -> [String] { try serialized {
+    /// OCR 文字精确检索(限定范围,带原文):只在给定 ref 集合里做子串匹配,
+    /// 返回 refKey 与原文(结果内搜索的排序与标题要用原文)。
+    /// 批148(批131验收 medium 的余账):结果内分支上一版是「全库检索
+    /// (LIMIT 4000)再按结果集过滤」——常见词的全库命中超过 4000 行时,排在
+    /// 后面的行永远看不到,其中可能正是结果集里的。这里直接在结果集里查,
+    /// 没有全局上限;按 rowid 排序返回,与全表扫描同序——命中不超过 4000 行
+    /// 时,两种做法的结果与顺序完全一致(差的那部分只在超限时才露出来)。
+    /// IN 列表分片绑定,避免变量数上限。
+    func searchOCRText(query: String, among: [String]) throws -> [(refKey: String, text: String)] { try serialized {
         guard let db, !query.isEmpty, !among.isEmpty else { return [] }
         let escaped = query
             .replacingOccurrences(of: "%", with: "\\%")
             .replacingOccurrences(of: "_", with: "\\_")
-        var out = Set<String>()
-        // IN 列表分片绑定,避免变量数上限
+        var rows: [(refKey: String, text: String, row: Int64)] = []
+        var seen = Set<String>()
         for chunkStart in stride(from: 0, to: among.count, by: 400) {
             let part = Array(among[chunkStart..<min(chunkStart + 400, among.count)])
             let marks = Array(repeating: "?", count: part.count).joined(separator: ",")
-            let stmt = try prepare("SELECT ref_key FROM ocr_text WHERE text LIKE ? ESCAPE '\\' AND ref_key IN (\(marks))")
+            let stmt = try prepare("SELECT ref_key, text, rowid FROM ocr_text WHERE text LIKE ? ESCAPE '\\' AND ref_key IN (\(marks))")
             defer { sqlite3_finalize(stmt) }
             sqlite3_bind_text(stmt, 1, "%\(escaped)%", -1, Self.transient)
             for (i, id) in part.enumerated() {
                 sqlite3_bind_text(stmt, Int32(i + 2), id, -1, Self.transient)
             }
             while sqlite3_step(stmt) == SQLITE_ROW {
-                out.insert(String(cString: sqlite3_column_text(stmt, 0)))
+                guard let k = sqlite3_column_text(stmt, 0), let t = sqlite3_column_text(stmt, 1) else { continue }
+                let key = String(cString: k)
+                // 同一 ref 在集合里出现多次(跨分片)只收一次
+                if seen.insert(key).inserted {
+                    rows.append((key, String(cString: t), sqlite3_column_int64(stmt, 2)))
+                }
             }
         }
-        return Array(out)
+        let ordered = rows.sorted { $0.row < $1.row }
+        var out: [(refKey: String, text: String)] = []
+        for r in ordered { out.append((refKey: r.refKey, text: r.text)) }
+        return out
     } }
 
     /// 重命名导入文件记录,并同步其可搜索的文件名
