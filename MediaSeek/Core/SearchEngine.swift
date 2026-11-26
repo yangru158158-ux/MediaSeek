@@ -641,8 +641,8 @@ final class SearchEngine {
                 }
             }
             IndexingCoordinator.DiagLog.shared.event(
-                "标签明细[\(query)] 照片\(photoSeen.count): " + Self.termCountsLine(photoTerms)
-                + " | 视频\(frameSeen.count): " + Self.termCountsLine(frameTerms))
+                "标签明细[\(query)] 照片\(photoSeen.count): " + Self.countsLine(photoTerms, 20)
+                + " | 视频\(frameSeen.count): " + Self.countsLine(frameTerms, 20))
         }
 
         // 视觉通道:SigLIP2 原生多语言(分词实验已证),中文原文直接查;
@@ -1080,12 +1080,15 @@ final class SearchEngine {
                        hits.count, best, hits.map(\.score).min() ?? 0, survivors.count))
             chVisual = survivors.count
             // 批143仪器:视觉通道明细——实际送进 SigLIP 的查询串、各档地板与
-            // 命中数、每个幸存命中(最多 30 个,按分降序)的分数与标签牌
-            // (P=照片 V=视频帧;牌取该照片/视频的第一行牌,最多列 5 个词)。
+            // 命中数、幸存命中的牌词分布(每个牌词各挂在多少个命中上,前 12 个)
+            // 与头部 8 个命中(P=照片 V=视频帧;各带分数与前 3 个牌词)。
             // 背景:3 (2) 装机 搜 无人机 视觉=42 全是 App 截图/终端/文章,
             // 标签=0 文字=1——第二档(0.18×gate=0.157)放进来的 0.157~0.171
             // 与真证件照(0.158~0.193)分数带重叠,光看语义行的 best/min 定
-            // 不了修法,得知道这些命中挂着什么牌。只在全局、非交集路径记
+            // 不了修法,得知道这些命中挂着什么牌。只在全局、非交集路径记。
+            // 记分布不逐条列(验收 low):diag.log 超 500KB 是整份删除,逐条列
+            // 30 个×5 词约 1.5KB/次,三四百次搜索就把之前的日志全挤掉;
+            // 分布一行约 400 字节,且比逐条清单更直接回答「是不是都是截图」
             if !survivors.isEmpty, among == nil, isectWords == nil {
                 var plates: [String: String] = [:]
                 if let rows = try? store.allPhotoLabels() {
@@ -1098,16 +1101,28 @@ final class SearchEngine {
                         if plates[r.refKey] == nil { plates[r.refKey] = r.title }
                     }
                 }
-                var detail: [String] = []
-                for h in survivors.prefix(30) {
-                    let kindLetter = h.kind == .videoFrame ? "V" : "P"
-                    let plateWords = (plates[h.refKey] ?? "无牌").components(separatedBy: ", ")
-                    detail.append(kindLetter + String(format: "%.3f:", h.score)
-                                  + plateWords.prefix(5).joined(separator: ","))
+                var wordCounts: [String: Int] = [:]
+                var noPlate = 0
+                var head: [String] = []
+                for h in survivors {
+                    if let plate = plates[h.refKey] {
+                        for w in Set(plate.components(separatedBy: ", ")) where !w.isEmpty {
+                            wordCounts[w, default: 0] += 1
+                        }
+                    } else {
+                        noPlate += 1
+                    }
+                    if head.count < 8 {
+                        let kindLetter = h.kind == .videoFrame ? "V" : "P"
+                        let words = (plates[h.refKey] ?? "无牌").components(separatedBy: ", ")
+                        head.append(kindLetter + String(format: "%.3f:", h.score)
+                                    + words.prefix(3).joined(separator: ","))
+                    }
                 }
                 IndexingCoordinator.DiagLog.shared.event(
                     "视觉明细[\(query)] 串=\(sigQueryText) " + tierDiag
-                    + "分:牌=" + detail.joined(separator: " | "))
+                    + "尾线后=\(survivors.count) 牌词分布=" + Self.countsLine(wordCounts, 12)
+                    + " 无牌=\(noPlate) 头部=" + head.joined(separator: " | "))
             }
             channels.append((1.0, survivors))
         }
@@ -1989,11 +2004,12 @@ final class SearchEngine {
         }
     }
 
-    /// 批143仪器:牌词计数排成「词=数」一行(按数降序、同数按词序),空则「-」
-    private static func termCountsLine(_ counts: [String: Int]) -> String {
+    /// 批143仪器:牌词计数排成「词=数」一行(按数降序、同数按词序,最多 limit 个),
+    /// 空则「-」
+    private static func countsLine(_ counts: [String: Int], _ limit: Int) -> String {
         if counts.isEmpty { return "-" }
         let ordered = counts.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key < $1.key }
-        return ordered.map { "\($0.key)=\($0.value)" }.joined(separator: " ")
+        return ordered.prefix(limit).map { "\($0.key)=\($0.value)" }.joined(separator: " ")
     }
 
     /// 通道内按 refKey 去重(视频多帧/文件多块),供 RRF 按名次计分

@@ -1,5 +1,5 @@
 @echo off
-rem Local logic assertions (Windows): 121 query-understanding checks + Python mirror
+rem Local logic assertions (Windows): 127 query-understanding checks + Python mirror
 rem + 2.0 image-slot migration state machine (scripts\sim_image_slot_test.py).
 rem Runs in seconds before pushing - no macOS CI queue (created 2026-10-23 after
 rem repeated capacity rejections on macOS runners during US peak hours).
@@ -21,7 +21,7 @@ set "PATH=%TC%\usr\bin;%RT%\usr\bin;%PATH%"
 set "SDKROOT=%PLAT%\Windows.platform\Developer\SDKs\Windows.sdk"
 cd /d "%~dp0.."
 
-echo == Query understanding 121 assertions (local swiftc) ==
+echo == Query understanding 127 assertions (local swiftc) ==
 swiftc -O -o "%TEMP%\mediaseek_qtest.exe" scripts\query_understanding_test.swift MediaSeek\Core\QueryUnderstanding.swift MediaSeek\Core\LabelZh.swift MediaSeek\Core\LabelZhExtra.swift
 if errorlevel 1 echo [FAIL] compile error & exit /b 1
 "%TEMP%\mediaseek_qtest.exe"

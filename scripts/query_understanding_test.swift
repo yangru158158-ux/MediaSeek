@@ -321,15 +321,18 @@ enum QueryUnderstandingTest {
         expect(idcTokens.contains("id") && idcTokens.contains("card"),
                "词表外的下划线串照旧拆片段(id_card→id+card)")
         // 批143:全量复合键——①打进来都命中自己的牌;②片段不由拆分注入
-        // (同义表引入的除外,如 blue_sky→sky);③命中词函数与计数函数恒一致
+        // (两类豁免:同义表引入的,如 blue_sky→sky;同名兄弟键,如 cake_regular
+        // 与 cake 都叫「蛋糕」——批142 有意补进词集的同名多键);③命中词函数
+        // 与计数函数恒一致
         var splitLeak: [String] = [], ownMiss: [String] = [], termMismatch: [String] = []
         for (en, cn) in LabelZh.zh {
             let typedTokens = QueryUnderstanding.labelTokens(en)
             if en.contains("_") {
                 if QueryUnderstanding.labelTokensMatchCount(typedTokens, en) == 0 { ownMiss.append(en) }
-                let viaSynonyms = QueryUnderstanding.expandedTokens([en])
+                var exemptFragments = QueryUnderstanding.expandedTokens([en])
+                exemptFragments.formUnion(LabelZh.englishKeysFromZh[cn] ?? [])
                 for frag in en.components(separatedBy: "_") where !frag.isEmpty {
-                    if typedTokens.contains(frag) && !viaSynonyms.contains(frag) {
+                    if typedTokens.contains(frag) && !exemptFragments.contains(frag) {
                         splitLeak.append("\(en)→\(frag)")
                     }
                 }
@@ -349,6 +352,32 @@ enum QueryUnderstandingTest {
         let bhTokens = QueryUnderstanding.labelTokens("balloon_hotair")
         expect(QueryUnderstanding.labelTokensMatchedTerms(bhTokens, "outdoor, balloon_hotair, balloon") == ["balloon_hotair"],
                "balloon_hotair 只命中自己的牌,同牌上的 balloon 不算(3 (2) 装机同款)")
+        // 批143二修(验收 low):词条同解——整个查询是词表里的键时按它的中文名
+        // 处理。首版只修了「不拆片段」,208 个复合键里仍有 14 个、简单键里 48 个
+        // 两侧不同解(中文名一侧多命中);本机探针改后 1566 个词条词集与命中牌
+        // 全部相同
+        expect(QueryUnderstanding.labelTokens("balloon_hotair") == QueryUnderstanding.labelTokens("热气球"),
+               "词条同解:balloon_hotair 与 热气球 词集相同")
+        let iceCream = QueryUnderstanding.labelTokens("冰淇淋")
+        expect(iceCream.contains("ice_cream") && !iceCream.contains("ice") && !iceCream.contains("cream")
+               && iceCream == QueryUnderstanding.labelTokens("ice_cream"),
+               "词典短语撞词条键时不拆词:冰淇淋/ice_cream 只认 ice_cream(此前带出全部 ice 牌)")
+        expect(!QueryUnderstanding.labelTokens("客厅").contains("room")
+               && !QueryUnderstanding.labelTokens("游乐园").contains("park"),
+               "客厅 不带 room、游乐园 不带 park(词典译法 living room / amusement park 不拆)")
+        expect(QueryUnderstanding.labelTokens("hot_dog").contains("hotdog")
+               && QueryUnderstanding.labelTokens("billboard").contains("billboards"),
+               "打进来的是同名多键之一时与中文名同解:hot_dog 认 hotdog、billboard 认 billboards")
+        let dvdName = LabelZh.zh["dvd"] ?? "DVD"
+        expect(QueryUnderstanding.labelTokens("dvd") == QueryUnderstanding.labelTokens(dvdName)
+               && !QueryUnderstanding.labelTokens("machine beach").contains("machine"),
+               "名字只差大小写的键(dvd→DVD)不自己调自己;多词里手敲的英文词照旧剔泛化词")
+        var asymmetric: [String] = []
+        for (en, cn) in LabelZh.zh where QueryUnderstanding.labelTokens(en) != QueryUnderstanding.labelTokens(cn) {
+            asymmetric.append(en)
+        }
+        expect(asymmetric.isEmpty,
+               "全量 \(LabelZh.zh.count) 个词条同解:打英文键与搜中文名词集相同(不一致: \(asymmetric.prefix(3)))")
 
         // —— 全量标签词典回归(第四十七批):词典里每一个词都必须能工作 ——
         // 不是逐词救火:全部标签词(≈1566)做两个方向的穷尽断言——
@@ -455,11 +484,12 @@ enum QueryUnderstandingTest {
         expect(!birthdayCake.contains("cake_regular"),
                "嵌套只留最长:「生日蛋糕」里的「蛋糕」不单独捐,不带入 cake_regular")
 
-        // 断言数口径:全文 expect 调用 121 项(另含 1 行函数定义,批94 增 5 批98 增 3
+        // 断言数口径:全文 expect 调用 127 项(另含 1 行函数定义,批94 增 5 批98 增 3
         // 批134 增 1 批142 增 15:匹配级穷举 1 + 整键/守卫/桥接/同名多键单元面 14;
         // 批142 二修增 4:短语里的多键名 2 + 盖不满/嵌套守卫 2;
         // 批143 净增 6:批134 护栏那条改写为 3 条(词表内的键不拆片段),另增
-        // 全量复合键 3 条(自身命中/片段不注入/命中词与计数一致)+ balloon_hotair 1 条)
-        print("PASS: 查询理解 121 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词的词集穷尽与匹配级穷尽)")
+        // 全量复合键 3 条(自身命中/片段不注入/命中词与计数一致)+ balloon_hotair 1 条;
+        // 批143二修增 6(词条同解):同解单元面 5 条 + 全量词条同解穷举 1 条)
+        print("PASS: 查询理解 127 项确定性回归断言全部通过(含全量标签词典 \(LabelZh.zh.count) 词的词集穷尽与匹配级穷尽)")
     }
 }

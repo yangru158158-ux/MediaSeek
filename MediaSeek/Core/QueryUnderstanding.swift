@@ -212,11 +212,39 @@ enum QueryUnderstanding {
         let raw = Set(query.lowercased()
             .components(separatedBy: .whitespacesAndNewlines)
             .filter { !$0.isEmpty })
+        // 批143二修(验收 low):整个查询就是一个词表里的键 → 按它的中文名
+        // 处理,词条=概念:打 billboard 与搜「广告牌」、打 hot_dog 与搜「热狗」
+        // 同解(首版只修了「不拆片段」,208 个复合键里仍有 14 个、简单键里
+        // 48 个两侧不同解)。同名多键、词典译法、同义扩展自动跟上,不必逐类
+        // 单写规则。只管单词查询——多词里手敲的英文词照旧走第四十五/四十八
+        // 批的泛化词守卫(machine beach 不因这条并入 machine)。
+        // 递归只走一层:中文名归一(繁→简+小写)后的任一原子若又是词表键
+        // (键 dvd 的名是 DVD,小写回去还是 dvd),说明中文名路径与键路径是
+        // 同一条,不转发——否则自己调自己,栈溢出(本机探针实锤)
+        if raw.count == 1, let key = raw.first, let name = LabelZh.zh[key] {
+            let nameAtoms = Set(simplified(name).lowercased()
+                .components(separatedBy: .whitespacesAndNewlines)
+                .filter { !$0.isEmpty })
+            if !nameAtoms.contains(where: { LabelZh.zh[$0] != nil }) {
+                return labelTokens(name)
+            }
+        }
         var tokens = raw
         var dictTokens = Set<String>()
         if let en = english(for: query) {
-            for t in en.lowercased().split(separator: " ") {
-                let s = String(t)
+            let words = en.lowercased().split(separator: " ").map { String($0) }
+            // 批143二修(验收 low):词典译法是带空格的短语(冰淇淋→ice cream),
+            // 而它的下划线形式恰好是同一个词条的键(ice_cream)且也在捐出的词
+            // 里——短语的各个词不再单独进词集,词条由键代表。否则 冰淇淋 会
+            // 顺带命中全部 ice 牌、客厅→room、游乐园→park,与打 ice_cream 的
+            // 结果不一致。同义表捐进来的片段(sky→blue_sky 里的 sky)不在这
+            // 一步,不受影响
+            let vocabCompounds = Set(words.filter { $0.contains("_") && LabelZh.zh[$0] != nil })
+            for s in words {
+                if !vocabCompounds.isEmpty, !s.contains("_"),
+                   vocabCompounds.contains(where: { $0.components(separatedBy: "_").contains(s) }) {
+                    continue
+                }
                 tokens.insert(s)
                 dictTokens.insert(s)
             }
@@ -257,9 +285,10 @@ enum QueryUnderstanding {
         // 片段同时是另一个简单词牌(balloon_hotair→全部 balloon 牌、
         // hot_dog→全部 dog 牌)。3 (2) 装机实测:搜 balloon_hotair 标签=56,
         // 搜 热气球 标签=7,多出的是「气球 balloon」牌;而中文侧没有对应
-        // 片段(不给中文复合名注入片段:成年猫→adult 会带出全部人像),两边
-        // 不对称。现在同为精确。词表外的下划线串(用户自造写法,如 id_card)
-        // 照旧拆:下划线当词分隔,片段各自去碰牌
+        // 片段(不给中文复合名注入片段:成年猫→adult 会带出全部人像)。词条
+        // 两侧同解见函数开头(整个查询是词表键 → 按中文名处理)。词表外的
+        // 下划线串(用户自造写法,如 id_card)照旧拆:下划线当词分隔,片段
+        // 各自去碰牌
         for t in raw where t.contains("_") {
             if LabelZh.zh[t] != nil { continue }
             for frag in t.components(separatedBy: "_") where !frag.isEmpty {
@@ -275,7 +304,7 @@ enum QueryUnderstanding {
         } else {
             // 第五十六批:短词(2字)短路保护只护「种子词」(原词+词典直译)——
             // 同义扩展不得注入泛化词。「女人」(2字)走本分支,woman 的同义扩展
-            // 注入 person/people,标签通道对全库人像标签命中 4,279 张灌进语义
+            // 注入 person/people,标签通道对全库人像标签命中 4,279 张灌入语义
             // 结果(207 用户实测,搜得还特别慢:4千张逐张取图)。剔除只针对
             // 扩展注入的泛化词,种子里的保留:「朋友」直译 friend people 的
             // people 是种子,不受影响(48 批设计);「机器」直译 machine 同理

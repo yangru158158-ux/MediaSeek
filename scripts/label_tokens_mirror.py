@@ -173,14 +173,32 @@ def label_tokens(query):
     # 镜像对繁体查询恢复保真,Swift 侧归一行为漂移时此处能拦
     query = to_simplified(query)
     raw = {w for w in re.split(r"\s+", query.lower()) if w}
+    # 批143二修(验收 low):整个查询就是一个词表里的键 → 按它的中文名处理
+    # (词条=概念:打 billboard 与搜「广告牌」同解)。只管单词查询;中文名归一后
+    # 的任一原子又是词表键时不转发(键 dvd 的名是 DVD,小写回去还是 dvd——
+    # 转发就是自己调自己)。Swift 同构
+    if len(raw) == 1:
+        key = next(iter(raw))
+        name = ZH.get(key)
+        if name is not None:
+            atoms = {w for w in re.split(r"\s+", to_simplified(name).lower()) if w}
+            if not any(a in ZH for a in atoms):
+                return label_tokens(name)
     tokens = set(raw)
     dict_tokens = set()
     en = english_for(query)
     if en:
-        for t in en.lower().split(" "):
-            if t:
-                tokens.add(t)
-                dict_tokens.add(t)
+        words = [t for t in en.lower().split(" ") if t]
+        # 批143二修(验收 low):词典译法是带空格的短语(冰淇淋→ice cream),而
+        # 它的下划线形式恰好是同一个词条的键(ice_cream)且也在捐出的词里——
+        # 短语的各个词不再单独进词集,词条由键代表(否则 冰淇淋 顺带命中全部
+        # ice 牌、客厅→room、游乐园→park)。Swift 同构
+        vocab_compounds = {w for w in words if "_" in w and w in ZH}
+        for t in words:
+            if vocab_compounds and "_" not in t and any(t in c.split("_") for c in vocab_compounds):
+                continue
+            tokens.add(t)
+            dict_tokens.add(t)
     # 批142:同名多键补全——Swift labelTokens 沿 english(for:) 实际捐出的碎片
     # 区间,把区间对应中文名下的全部键补进词集并按直译词对待(同享泛化剔除
     # 免疫);镜像同步。位置与 Swift 同:词典英译之后、下划线拆分之前。
@@ -339,17 +357,18 @@ expect(label_tokens_match_count(pc, "play_card") == 1 and label_tokens_match_cou
        "play_card 命中自己的牌,不命中 card 牌")
 idc = label_tokens("id_card")
 expect("id" in idc and "card" in idc, "词表外的下划线串照旧拆片段(id_card→id+card)")
-# 全量复合键:打进来都命中自己的牌;片段不由拆分注入(同义表引入的除外)
+# 全量复合键:打进来都命中自己的牌;片段不由拆分注入(豁免:同义表引入的,
+# 与同名兄弟键——cake_regular 与 cake 都叫「蛋糕」,批142 有意补进词集)
 own_miss = [en for en in ZH if "_" in en and label_tokens_match_count(label_tokens(en), en) == 0]
 expect(not own_miss, f"复合键打进来都命中自己的牌(整键): {own_miss[:3]}")
 split_leak = []
-for en in ZH:
+for en, cn in ZH.items():
     if "_" not in en:
         continue
     toks = label_tokens(en)
-    via_syn = expanded({en})
+    exempt = expanded({en}) | set(EN_KEYS_FROM_ZH.get(cn, []))
     for frag in en.split("_"):
-        if frag and frag in toks and frag not in via_syn:
+        if frag and frag in toks and frag not in exempt:
             split_leak.append(f"{en}->{frag}")
 expect(not split_leak, f"复合键的片段不由拆分注入(同义表引入的除外): {split_leak[:3]}")
 term_mismatch = []
@@ -361,6 +380,24 @@ expect(not term_mismatch, f"命中词函数与计数函数对全量标签×两�
 bh = label_tokens("balloon_hotair")
 expect(label_tokens_matched_terms(bh, "outdoor, balloon_hotair, balloon") == ["balloon_hotair"],
        "balloon_hotair 只命中自己的牌,同牌上的 balloon 不算(3 (2) 装机同款)")
+# 批143二修(验收 low):词条同解——整个查询是词表里的键时按它的中文名处理
+expect(label_tokens("balloon_hotair") == label_tokens("热气球"),
+       "词条同解:balloon_hotair 与 热气球 词集相同")
+ice_cream = label_tokens("冰淇淋")
+expect("ice_cream" in ice_cream and "ice" not in ice_cream and "cream" not in ice_cream
+       and ice_cream == label_tokens("ice_cream"),
+       "词典短语撞词条键时不拆词:冰淇淋/ice_cream 只认 ice_cream(此前带出全部 ice 牌)")
+expect("room" not in label_tokens("客厅") and "park" not in label_tokens("游乐园"),
+       "客厅 不带 room、游乐园 不带 park(词典译法 living room / amusement park 不拆)")
+expect("hotdog" in label_tokens("hot_dog") and "billboards" in label_tokens("billboard"),
+       "打进来的是同名多键之一时与中文名同解:hot_dog 认 hotdog、billboard 认 billboards")
+dvd_name = ZH.get("dvd", "DVD")
+expect(label_tokens("dvd") == label_tokens(dvd_name) and "machine" not in label_tokens("machine beach"),
+       "名字只差大小写的键(dvd→DVD)不自己调自己;多词里手敲的英文词照旧剔泛化词")
+asymmetric = [en for en, cn in ZH.items() if label_tokens(en) != label_tokens(cn)]
+expect(not asymmetric,
+       f"全量 {len(ZH)} 个词条同解:打英文键与搜中文名词集相同(不一致: {asymmetric[:3]})")
+print(f"词条同解穷举: {len(ZH) - len(asymmetric)}/{len(ZH)}")
 
 # ---- 批142:标签通道匹配级穷举 + 单元面(与 Swift 断言同集) ----
 # 第四十七批的两条穷举只断言「词集里有这个词」;牌能不能匹配上是另一段逻辑
