@@ -326,12 +326,17 @@ struct SettingsView: View {
             // 语音转写诊断(第三十七批):听写未启用时识别器全交白卷却记账
             // "已完成",靠这组数暴露真伪
             let diag = app.store.speechDiagnostics()
-            let doneN = (UserDefaults.standard.stringArray(forKey: "speechDone") ?? []).count
-            // 批147:已记账却没有语音段的(文本被视频重新索引覆盖丢了,下轮同步自动补转写)
-            let lostN = (try? app.store.refsWithoutSpeech(
-                Array(Set(UserDefaults.standard.stringArray(forKey: "speechDone") ?? []))))?.count ?? 0
+            let doneIds = Set(UserDefaults.standard.stringArray(forKey: "speechDone") ?? [])
+            let doneN = doneIds.count
+            // 批147二修(3 (7) 装机:已记账 349、已存文本 351,数字对不上):拆开列——
+            // 清单里的视频「有文本 / 文本已丢」各多少;清单外还有多少行带语音段
+            // (只认行首或另起一行的标记,OCR 从截图上读进来的「[语音]」字样不算)。
+            // 文本已丢的 = 视频重新索引时被覆盖,下轮同步自动补转写
+            let withSpeech = (try? app.store.refsWithSpeech()) ?? []
+            let lostN = doneIds.subtracting(withSpeech).count
+            let extraN = withSpeech.subtracting(doneIds).count
             VStack(alignment: .leading, spacing: 2) {
-                Text("转写状态:已记账 \(doneN) 部 · 已存文本 \(diag.stored) 部")
+                Text("转写状态:已记账 \(doneN) 部 · 其中有文本 \(doneN - lostN) 部 · 文本已丢 \(lostN) 部")
                     .font(.caption).foregroundStyle(
                         (UserDefaults.standard.bool(forKey: "speechEnabled") && diag.stored == 0 && doneN > 0)
                             ? .red : .secondary)
@@ -340,8 +345,12 @@ struct SettingsView: View {
                         .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                 }
                 if lostN > 0 {
-                    Text("其中 \(lostN) 部的转写文本已丢(视频重新索引时被覆盖)——点「同步新增内容」会自动补转写,可中断续跑")
+                    Text("文本已丢的 \(lostN) 部是视频重新索引时被覆盖的——点「同步新增内容」会自动补转写,可中断续跑")
                         .font(.caption2).foregroundStyle(.orange)
+                }
+                if extraN > 0 {
+                    Text("另有 \(extraN) 行带语音段但不在转写清单里(多为截图上的「[语音]」字样被识别成标记,或已删除视频留下的旧文本)——不影响搜索")
+                        .font(.caption2).foregroundStyle(.secondary)
                 }
                 if UserDefaults.standard.bool(forKey: "speechEnabled"), diag.stored == 0, doneN > 0 {
                     Text("已记账但零文本——多为听写未启用导致识别器空转。去 系统设置→通用→键盘→启用听写(勾普通话),然后点下方「重新转写」")

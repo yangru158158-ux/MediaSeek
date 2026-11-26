@@ -723,16 +723,14 @@ final class VectorStore {
     /// (appendSpeechText),这里取行尾那一段原样接回去
     func saveOCR(refKey: String, text: String) throws { try serialized {
         var merged = text
-        if !text.contains(Self.speechMarker) {
-            let rd = try prepare("SELECT text FROM ocr_text WHERE ref_key = ?")
-            defer { sqlite3_finalize(rd) }
-            sqlite3_bind_text(rd, 1, refKey, -1, Self.transient)
-            if sqlite3_step(rd) == SQLITE_ROW, let c = sqlite3_column_text(rd, 0),
-               let kept = Self.splitSpeech(String(cString: c))?.speech, !kept.isEmpty {
-                // splitSpeech 从标记前的换行处起切;这里统一成「正文\n语音段」
-                let speech = kept.hasPrefix("\n") ? String(kept.dropFirst()) : kept
-                merged = text.isEmpty ? speech : text + "\n" + speech
-            }
+        let rd = try prepare("SELECT text FROM ocr_text WHERE ref_key = ?")
+        defer { sqlite3_finalize(rd) }
+        sqlite3_bind_text(rd, 1, refKey, -1, Self.transient)
+        if sqlite3_step(rd) == SQLITE_ROW, let c = sqlite3_column_text(rd, 0),
+           let kept = Self.splitSpeech(String(cString: c))?.speech, !kept.isEmpty {
+            // splitSpeech 从标记前的换行处起切;这里统一成「正文\n语音段」
+            let speech = kept.hasPrefix("\n") ? String(kept.dropFirst()) : kept
+            merged = text.isEmpty ? speech : text + "\n" + speech
         }
         let stmt = try prepare("INSERT OR REPLACE INTO ocr_text(ref_key, text) VALUES(?,?)")
         defer { sqlite3_finalize(stmt) }
@@ -744,11 +742,16 @@ final class VectorStore {
     /// 语音转写段的标记(转写阶段追加进行尾;无语音的视频写同款标记的占位)
     static let speechMarker = "〔语音〕"
 
-    /// 把一行文字拆成「OCR 正文」与「行尾的语音转写段」;没有语音段返回 nil。
-    /// 取第一处标记:行首(该行原本无文字时 appendSpeechText 直接写语音)或
-    /// 另起一行处。saveOCR 保留语音段、clearSpeechTexts 剥语音段共用这一处判定
+    /// 「这一行有没有语音段」的唯一判定:把一行文字拆成「OCR 正文」与「语音
+    /// 转写段」,没有语音段返回 nil。只认**行首**或**另起一行处**的标记——
+    /// 转写永远写在行首(该行原本无文字)或另起一行追加在行尾;OCR 从画面上
+    /// 读进来的「[语音]」字样落在句子中间,不算(3 (7) 装机:已记账 349、已存
+    /// 文本 351,多出的 2 行就是这种)。
+    /// saveOCR 保留、clearSpeechTexts 剥离、refsWithoutSpeech 自愈、
+    /// speechDiagnostics 计数、refsWithSpeech 设置页明细,五处共用
     static func splitSpeech(_ text: String) -> (ocr: String, speech: String)? {
-        guard let r = text.range(of: "\n" + speechMarker) ?? text.range(of: speechMarker) else { return nil }
+        if text.hasPrefix(speechMarker) { return ("", text) }
+        guard let r = text.range(of: "\n" + speechMarker) else { return nil }
         return (String(text[..<r.lowerBound]), String(text[r.lowerBound...]))
     }
 
@@ -806,24 +809,40 @@ final class VectorStore {
     } }
 
     /// 语音转写诊断(第三十七批):已入库的语音文本行数与样例——
-    /// 听写未启用时识别器全交白卷,"转写完成"却零字节,靠这组数暴露
+    /// 听写未启用时识别器全交白卷,"转写完成"却零字节,靠这组数暴露。
+    /// 批147二修:SQL 只粗筛(任何位置含标记),是否真有语音段由 splitSpeech 判定
     func speechDiagnostics() -> (stored: Int, sample: String) { try serialized {
         guard let db else { return (0, "") }
         // 与 faceStats 同款 try?(第三十七批验收发现:裸 try 使闭包 throwing,
         // rethrows 的 serialized 传染到未标 throws 的本函数=编译错)
-        guard let c = try? prepare("SELECT COUNT(*) FROM ocr_text WHERE text LIKE '%〔语音〕%'")
+        guard let stmt = try? prepare("SELECT text FROM ocr_text WHERE text LIKE '%〔语音〕%'")
             else { return (0, "") }
-        defer { sqlite3_finalize(c) }
-        guard sqlite3_step(c) == SQLITE_ROW else { return (0, "") }
-        let n = Int(sqlite3_column_int64(c, 0))
+        defer { sqlite3_finalize(stmt) }
+        var n = 0
         var sample = ""
-        if n > 0, let s2 = try? prepare("SELECT text FROM ocr_text WHERE text LIKE '%〔语音〕%' LIMIT 1") {
-            defer { sqlite3_finalize(s2) }
-            if sqlite3_step(s2) == SQLITE_ROW, let t = sqlite3_column_text(s2, 0) {
-                sample = String(String(cString: t).prefix(60))
-            }
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let t = sqlite3_column_text(stmt, 0),
+                  Self.splitSpeech(String(cString: t)) != nil else { continue }
+            n += 1
+            if sample.isEmpty { sample = String(String(cString: t).prefix(60)) }
         }
         return (n, sample)
+    } }
+
+    /// 批147二修:文字行里确有语音段的全部 ref——设置页把「已记账 / 其中有
+    /// 文本 / 清单外」拆开列,数字才对得上
+    func refsWithSpeech() throws -> Set<String> { try serialized {
+        guard let db else { return [] }
+        let stmt = try prepare("SELECT ref_key, text FROM ocr_text WHERE text LIKE '%〔语音〕%'")
+        defer { sqlite3_finalize(stmt) }
+        var out = Set<String>()
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let k = sqlite3_column_text(stmt, 0), let t = sqlite3_column_text(stmt, 1),
+               Self.splitSpeech(String(cString: t)) != nil {
+                out.insert(String(cString: k))
+            }
+        }
+        return out
     } }
 
     /// OCR 文字精确检索(子串匹配,支持中文/数字/编号)
@@ -845,21 +864,25 @@ final class VectorStore {
 
     /// 批147:给定 ref 里,文字行中【没有】语音段的(整行不存在的也算)——
     /// 转写自愈用。处理过的视频(含确认无语音的)行尾必有「〔语音〕」段;
-    /// 已记账却没有 = 文本被视频重新索引覆盖丢了。IN 列表分片绑定同 searchOCR(among:)
+    /// 已记账却没有 = 文本被视频重新索引覆盖丢了。IN 列表分片绑定同 searchOCR(among:)。
+    /// 是否真有语音段由 splitSpeech 判定(批147二修:OCR 读进来的行中「[语音]」字样不算)
     func refsWithoutSpeech(_ refs: [String]) throws -> Set<String> { try serialized {
         guard let db, !refs.isEmpty else { return [] }
         var withSpeech = Set<String>()
         for chunkStart in stride(from: 0, to: refs.count, by: 400) {
             let part = Array(refs[chunkStart..<min(chunkStart + 400, refs.count)])
             let marks = Array(repeating: "?", count: part.count).joined(separator: ",")
-            let stmt = try prepare("SELECT ref_key FROM ocr_text WHERE text LIKE ? AND ref_key IN (\(marks))")
+            let stmt = try prepare("SELECT ref_key, text FROM ocr_text WHERE text LIKE ? AND ref_key IN (\(marks))")
             defer { sqlite3_finalize(stmt) }
             sqlite3_bind_text(stmt, 1, "%\(Self.speechMarker)%", -1, Self.transient)
             for (i, id) in part.enumerated() {
                 sqlite3_bind_text(stmt, Int32(i + 2), id, -1, Self.transient)
             }
             while sqlite3_step(stmt) == SQLITE_ROW {
-                withSpeech.insert(String(cString: sqlite3_column_text(stmt, 0)))
+                if let k = sqlite3_column_text(stmt, 0), let t = sqlite3_column_text(stmt, 1),
+                   Self.splitSpeech(String(cString: t)) != nil {
+                    withSpeech.insert(String(cString: k))
+                }
             }
         }
         return Set(refs).subtracting(withSpeech)
