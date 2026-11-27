@@ -71,6 +71,9 @@ struct SettingsView: View {
                 ProgressView()
             case .ready:
                 Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+            case .standby:
+                // 批158:文本塔已就绪、图像塔按需加载——不是故障,不用橙色感叹号
+                Image(systemName: "clock.arrow.circlepath").foregroundStyle(.secondary)
             default:
                 Image(systemName: "exclamationmark.circle").foregroundStyle(.orange)
             }
@@ -90,6 +93,13 @@ struct SettingsView: View {
                 return String(format: "已就绪 · 加载 %.1f 秒", s)
             }
             return "已就绪"
+        case .standby:
+            // 批158:文本塔已就绪(搜索可用);2GB 的图像塔等索引真有图要嵌时再加载。
+            // 秒数记的是文本塔这一轮的加载时间
+            if let s = app.models.loadSeconds[slot] {
+                return String(format: "搜索已就绪 · 加载 %.1f 秒;图像部分有新照片要建索引时才加载", s)
+            }
+            return "搜索已就绪;图像部分有新照片要建索引时才加载"
         case .failed(let m): return "失败:\(m)"
         }
     }

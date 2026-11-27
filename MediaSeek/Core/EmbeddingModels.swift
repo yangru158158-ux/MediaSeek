@@ -89,6 +89,13 @@ final class HFTokenizer {
     }
 }
 
+/// 加载分词器并记它自己的耗时(批158:与打开模型并行跑,时间从同一起点各记各的)
+private func loadTokenizerTimed(_ model: String, folder: URL, since t0: Date) async throws -> HFTokenizer {
+    let tokenizer = try await HFTokenizer(folder: folder)
+    ModelLoadTiming.log(model, "分词器", from: t0)
+    return tokenizer
+}
+
 // MARK: - EmbeddingGemma 文本嵌入器
 
 /// EmbeddingGemma(或未来的 EmbeddingGemma 2,接口一致)。
@@ -99,13 +106,13 @@ final class GemmaTextEmbedder {
     private let tokenizer: HFTokenizer
 
     init(modelURL: URL, tokenizerFolder: URL) async throws {
-        // 批157:打开模型与分词器分开计时
+        // 批157:打开模型与分词器分开计时。批158:两者并行——分词器固定要 2.4 秒上下
+        // (3 (18) 装机实测四次:2417 / 2417 / 2435 / 2379ms),不必排在打开模型之后
         let t0 = Date()
+        async let tokenizerTask = loadTokenizerTimed("EmbeddingGemma", folder: tokenizerFolder, since: t0)
         self.model = try MLModel(contentsOf: modelURL, configuration: ModelLoadTiming.configuration())
         ModelLoadTiming.log("EmbeddingGemma", "打开模型", from: t0)
-        let t1 = Date()
-        self.tokenizer = try await HFTokenizer(folder: tokenizerFolder)
-        ModelLoadTiming.log("EmbeddingGemma", "分词器", from: t1)
+        self.tokenizer = try await tokenizerTask
     }
 
     static func queryPrompt(_ text: String) -> String { "task: search result | query: \(text)" }
@@ -157,13 +164,13 @@ final class SigLIPEmbedder {
     /// 只开文本塔 + 分词器(搜索可用的最低条件);图像塔由 attachImageModel 随后挂上
     init(textModelURL: URL, tokenizerFolder: URL,
          imageSize: Int = 256, mean: Float = 0.5, std: Float = 0.5) async throws {
-        // 批157:打开模型与分词器分开计时
+        // 批157:打开模型与分词器分开计时。批158:两者并行(同 GemmaTextEmbedder)——
+        // 冷启动时搜索就绪的时刻由此从「打开模型 + 2.4 秒」变成只等打开模型
         let t0 = Date()
+        async let tokenizerTask = loadTokenizerTimed("SigLIP文本", folder: tokenizerFolder, since: t0)
         self.textModel = try MLModel(contentsOf: textModelURL, configuration: ModelLoadTiming.configuration())
         ModelLoadTiming.log("SigLIP文本", "打开模型", from: t0)
-        let t1 = Date()
-        self.tokenizer = try await HFTokenizer(folder: tokenizerFolder)
-        ModelLoadTiming.log("SigLIP文本", "分词器", from: t1)
+        self.tokenizer = try await tokenizerTask
         self.imageSize = imageSize
         self.mean = mean
         self.std = std

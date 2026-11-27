@@ -597,6 +597,14 @@ final class IndexingCoordinator: ObservableObject {
         try store.removeRefs(kinds: [.photo, .photoLabel, .userTag, .videoFrame, .videoFrameLabel, .face], notIn: libIDs)
 
         total += newPhotos.count + newVideos.count + faceBackfill.count
+        // 批158:图像塔按需加载——真有新照片 / 视频要嵌时才挂上(2GB,冷启动「打开模型」
+        // 13 秒;「处理 0」的那几轮同步就不必等它)。挂不上(没装 / 这次进程里挂失败)
+        // 下面快扫、视频、富集各段照旧按 imageTowerReady 跳过,下一轮同步再试
+        if !newPhotos.isEmpty || !newVideos.isEmpty {
+            stageNote = "正在加载图像模型"
+            await models.ensureImageTower()
+            stageNote = ""
+        }
         // 第七十批·两阶段索引:先全库快扫(640px 取图 + SigLIP 嵌入 + 颜色),
         // 单张 <0.1s、并发 4 路——1 万张约十来分钟,全部「语义可搜」;
         // OCR/标签/人脸由随后的富集(原全量管线)补齐,中途停止也不丢:
@@ -1473,6 +1481,15 @@ final class IndexingCoordinator: ObservableObject {
         //   · 图像模型没装(Base 已停用、so400m 未下载):图片/视频文件先不做。
         //     原先会在没有视觉向量的情况下把它们记成已索引,此后永不补
         // 批157:只认图像塔(文本塔先就绪时 siglip 已非空,但还不能嵌图)
+        // 批158:图像塔按需加载——有图片 / 视频文件要建视觉向量时才挂上:新导入还没索引的,
+        // 或换过图像模型待重建的(下面的记账维度与当前模型维度对不上)
+        let hasVisualTodo = imports.allFiles().contains(where: { !$0.indexed && Self.isVisualFile($0.name) })
+        let rebuildPending: Bool = {
+            guard let modelDim = UserDefaults.standard.object(forKey: "clipModelDim") as? Int else { return false }
+            let rebuiltDim = UserDefaults.standard.object(forKey: "fileClipRebuiltDim") as? Int
+            return (rebuiltDim ?? 0) != modelDim
+        }()
+        if hasVisualTodo || rebuildPending { await models.ensureImageTower() }
         let clipReady = models.imageTowerReady
         let modelDim = UserDefaults.standard.object(forKey: "clipModelDim") as? Int
         var rebuildVisual = false

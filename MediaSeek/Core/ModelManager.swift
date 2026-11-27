@@ -4,6 +4,10 @@ import ZIPFoundation
 
 enum ModelState: Equatable {
     case missing, loading, ready, failed(String)
+    /// 图像槽专用(批158):文本塔已就绪(搜索可用),2GB 的图像塔还没加载——索引真有图
+    /// 要嵌时才按需挂上(ModelManager.ensureImageTower)。对「模型可用」(bothReady)而言
+    /// 等同就绪:图像塔不挡同步开工,只挡嵌图
+    case standby
 }
 
 extension Notification.Name {
@@ -76,18 +80,26 @@ final class ModelManager: ObservableObject {
     private(set) var face: FaceEmbedder?
     /// 批157:每个槽位这一轮加载花了多少秒(设置页「已就绪」后面显示)
     @Published private(set) var loadSeconds: [ModelSlot: Double] = [:]
-    /// 批157:图像槽两步加载——第一步只开文本塔,图像塔的地址、meta 与这个槽位的起跑时刻
-    /// 留给第二步(attachImageTower)
-    private var pendingImageTower: (url: URL, meta: ModelMeta, started: Date)?
+    /// 批157/158:图像塔的地址与 meta。文本塔就绪后留在这里,图像槽进 standby;等索引
+    /// 按需来挂(ensureImageTower)或导入模型包后立刻挂(loadAll(loadImageTower: true))
+    private var pendingImageTower: (url: URL, meta: ModelMeta)?
     /// 批157:SigLIP 文本塔已就绪。单独发一个 @Published,是因为文本塔就绪时图像槽的状态
-    /// 还是 .loading(要等图像塔),不发信号的话搜索页的「模型加载中」横幅不会及时消失
+    /// 还不是就绪(批158 起 .loading → .standby,图像塔等索引按需来挂),不发信号的话
+    /// 搜索页的「模型加载中」横幅不会及时消失
     @Published private(set) var siglipTextReady = false
 
-    var bothReady: Bool { textState == .ready && imageState == .ready }
-    var anyReady: Bool { textState == .ready || imageState == .ready }
+    /// 两个模型是否都可用:图像槽的 standby 也算(文本塔已就绪,图像塔按需加载)——
+    /// 「首次使用」引导与同步开工都看它
+    var bothReady: Bool {
+        textState == .ready && (imageState == .ready || imageState == .standby)
+    }
+    var anyReady: Bool {
+        textState == .ready || imageState == .ready || imageState == .standby
+    }
     /// 搜索可用的最低条件:SigLIP 文本塔就绪(照片搜索的查询向量只走它)。批157 起图像塔
     /// 可以晚于它——2GB 的图像模型只给新照片 / 视频帧建索引时用,不该拖住搜索。
-    /// 不把 Gemma 算进来:它只管文件名 / 文件内容的语义检索,照片搜索用不到
+    /// 不把 Gemma 算进来:**搜索里**它只管文件名 / 文件内容的语义检索,照片搜索用不到
+    /// (索引侧不同:照片标签的向量也靠它,所以同步开工仍然等它,见 waitReady)
     var searchReady: Bool { siglipTextReady }
     /// 图像塔是否已挂上(要嵌图的索引路径只认这里;别拿 siglip != nil 当图像模型就绪——
     /// 批157 起文本塔先就绪,图像塔随后才挂上)
@@ -128,6 +140,9 @@ final class ModelManager: ObservableObject {
         // 批157:模型加载耗时的日志出口(ModelLoadTiming 自己不引用 DiagLog——那个文件
         // 要能被人脸测试等流水线单独编译);要在任何模型加载之前装好
         ModelLoadTiming.setSink { IndexingCoordinator.DiagLog.shared.event($0) }
+        // 批158:启动环境记一行(机型 / 内存 / 可用存储 / 低电量模式 / 温度)——加载慢时
+        // 先看是不是这些因素(降频 / 过热 / 存储紧张)
+        ModelLoadTiming.logEnvironment()
         migrateImageSlot()
     }
 
@@ -240,28 +255,35 @@ final class ModelManager: ObservableObject {
 
     // MARK: - 加载
 
-    func loadAll() async {
+    /// loadImageTower:导入模型包后传 true——换的就是图像模型,不等按需,立刻挂上
+    /// (维度记账与换模型广播都发生在挂上时)。冷启动走默认:图像塔留给索引按需加载
+    func loadAll(loadImageTower: Bool = false) async {
         // 并行加载(第二十四批):iOS 把后台进程杀掉后重开=冷启动,模型必须
         // 从盘重载(进程级无解);此前三槽串行,总等待=三者之和,且排队槽位
         // 显示「未安装」吓人。改并行:总等待≈最慢一个,排队槽位由设置页
         // 按 loadPassRunning 显示「加载中(排队)」
-        // 批157(用户:冷启动要等几分钟):分两步——第一步只开两个文本塔,搜索此刻即可用;
-        // 第二步(与第一步错开,不抢 IO 和 CPU)才开 2GB 的图像塔与人脸模型——它们只有
-        // 给新内容建索引时才用
+        // 批157(用户:冷启动要等几分钟):分两步——第一步只开文本塔,搜索此刻即可用;
+        // 第二步才开 2GB 的图像塔与人脸模型——它们只有给新内容建索引时才用
+        // 批158(3 (18) 装机日志,2026-11-27):图像塔冷启动「打开模型」13.4 秒,可它只有
+        // 相册有新照片 / 视频、或有图片 / 视频文件要嵌图时才用得上——当天日志里 7 次同步
+        // 有 4 次「处理 0」。所以不再在启动时开它:图像槽停在 standby,索引发现真有图要嵌
+        // 时自己调 ensureImageTower。人脸模型跟着文本塔走,不再等 Gemma(实测打开要
+        // 7~16 秒,原先排它后面白等 7 秒)
         loadPassRunning = true
         defer { loadPassRunning = false }
         await withTaskGroup(of: Void.self) { group in
             if textState != .ready { group.addTask { await self.loadSlot(.text) } }
-            // 图像槽第一步:准备文件 + 开文本塔(siglip 从此非空,imageState 仍是 loading)
-            if imageState != .ready { group.addTask { await self.loadSlot(.image) } }
+            if imageState != .ready, imageState != .standby {
+                group.addTask {
+                    // 图像槽:准备文件 + 开文本塔 → 搜索可用,图像塔留 standby
+                    await self.loadSlot(.image)
+                    await self.loadSlot(.face)   // 人脸模型可选,缺时静默降级
+                }
+            } else {
+                group.addTask { await self.loadSlot(.face) }
+            }
         }
-        if searchReady {
-            ModelLoadTiming.log("SigLIP文本", "搜索可用(文本塔就绪)", from: ModelLoadTiming.processStart)
-        }
-        await withTaskGroup(of: Void.self) { group in
-            if pendingImageTower != nil { group.addTask { await self.attachImageTower() } }
-            group.addTask { await self.loadSlot(.face) }   // 人脸模型可选,缺时静默降级
-        }
+        if loadImageTower, pendingImageTower != nil { await attachImageTower() }
     }
 
     /// 槽位就绪:改状态、记这一轮的秒数(设置页显示)、写一行耗时
@@ -271,12 +293,17 @@ final class ModelManager: ObservableObject {
         ModelLoadTiming.log(slot.rawValue, "就绪", from: t0)
     }
 
-    /// 图像槽第二步:把图像塔挂到已就绪的 SigLIP 文本塔上(2GB 的模型只在这里打开)。
-    /// MLModel 的初始化是同步调用,放到后台线程里做,不占主线程
+    /// 图像塔第二步:把图像塔挂到已就绪的 SigLIP 文本塔上(2GB 的模型只在这里打开)。
+    /// 批158 起只有两处会调:导入模型包后(loadAll(loadImageTower: true))与索引按需
+    /// (ensureImageTower)。MLModel 的初始化是同步调用,放到后台线程里做,不占主线程
     private func attachImageTower() async {
         guard let embedder = siglip, let pending = pendingImageTower else { return }
         pendingImageTower = nil
+        // 置 loading:ensureImageTower 的并发调用方据此等它挂完
+        setState(.loading, for: .image)
         let url = pending.url
+        // 只算「挂图像塔」这一步的时长——不含在 standby 里等了多久
+        let started = Date()
         let attached = await Task.detached(priority: .userInitiated) { () -> Result<Void, Error> in
             do {
                 try embedder.attachImageModel(url)
@@ -291,8 +318,8 @@ final class ModelManager: ObservableObject {
             setState(.failed(error.localizedDescription), for: .image)
         case .success:
             let meta = pending.meta
-            markReady(.image, since: pending.started)
-            if textState == .ready { detailText = "" }
+            markReady(.image, since: started)
+            if bothReady { detailText = "" }
             // 记录当前图像模型维度;IndexingCoordinator 同步前与库内向量维度
             // 比对,不一致即清空旧 clip 向量全量重建(so400m 等在线升级换模型)
             let prevDim = UserDefaults.standard.object(forKey: "clipModelDim") as? Int
@@ -305,6 +332,22 @@ final class ModelManager: ObservableObject {
                 NotificationCenter.default.post(name: .clipModelChanged, object: nil)
             }
         }
+    }
+
+    /// 按需挂上图像塔:索引发现真有图要嵌时才调(相册有新照片 / 视频,或有图片 / 视频文件)。
+    /// 已挂上立即返回 true;别处正在挂就等它;没得挂(图像模型没装,或这次进程里挂过一次
+    /// 失败了)返回 false——调用方照「图像塔未就绪」跳过这一轮,下一轮同步再来
+    func ensureImageTower() async -> Bool {
+        if pendingImageTower != nil {
+            ModelLoadTiming.log("SigLIP图像", "按需加载 开始", from: Date())
+            await attachImageTower()
+        }
+        let start = Date()
+        // 上限 3 分钟:真卡住时不让同步永远等在这里(3 (18) 实测冷启动 13 秒)
+        while imageState == .loading, !Task.isCancelled, Date().timeIntervalSince(start) < 180 {
+            try? await Task.sleep(nanoseconds: 200_000_000)
+        }
+        return imageTowerReady
     }
 
     private func loadSlot(_ slot: ModelSlot) async {
@@ -381,7 +424,13 @@ final class ModelManager: ObservableObject {
                     guard let tokURL else { throw MSError("缺少 tokenizer.json") }
                     gemma = try await GemmaTextEmbedder(modelURL: modelURL, tokenizerFolder: tokURL.deletingLastPathComponent())
                     markReady(.text, since: t0)
-                    if textState == .ready && imageState == .ready { detailText = "" }
+                    if bothReady { detailText = "" }
+                    // 批158:首次推理约 1 秒(3 (18) 装机实测 1066ms),原先落在启动后第一次
+                    // 用到文件语义通道的搜索上。挪到加载期做掉;不等它跑完——只是预热,
+                    // 不该拖住加载轮次
+                    if let embedder = gemma {
+                        _ = Task.detached(priority: .utility) { _ = try? embedder.embedQuery("预热") }
+                    }
                 case "clip":
                     // 2.0 守卫(「不用 Base」的最终防线):迁移没删掉/塞进了旧包时,
                     // 宁可图像模型停在未安装,也不拿 Base 配 so400m 的门槛系数与
@@ -396,9 +445,9 @@ final class ModelManager: ObservableObject {
                     let imgURL = dir.appendingPathComponent("SiglipImage.mlmodelc")
                     let txtURL = dir.appendingPathComponent("SiglipText.mlmodelc")
                     guard let tokURL else { throw MSError("缺少 tokenizer.json") }
-                    // 批157:两步加载——这里只开文本塔,搜索从此可用;2GB 的图像塔留到
-                    // loadAll 第二步(attachImageTower)再开,imageState 到那时才就绪。
-                    // 维度记账与换模型广播也挪到那时(要等图像塔真的挂上)
+                    // 批157:两步加载——这里只开文本塔,搜索从此可用;2GB 的图像塔留到之后
+                    // 再开,imageState 到那时才就绪。维度记账与换模型广播也挪到那时
+                    // (要等图像塔真的挂上)
                     let embedder = try await SigLIPEmbedder(
                         textModelURL: txtURL,
                         tokenizerFolder: tokURL.deletingLastPathComponent(),
@@ -406,7 +455,14 @@ final class ModelManager: ObservableObject {
                         mean: meta.image_mean ?? 0.5, std: meta.image_std ?? 0.5)
                     siglip = embedder
                     siglipTextReady = true
-                    pendingImageTower = (imgURL, meta, t0)
+                    pendingImageTower = (imgURL, meta)
+                    // 批158:图像塔不在这里开——图像槽停在 standby(搜索此刻已可用),图像塔等
+                    // 索引真有图要嵌时经 ensureImageTower 再挂。设置页这一行的秒数先记文本塔的
+                    setState(.standby, for: .image)
+                    loadSeconds[.image] = Date().timeIntervalSince(t0)
+                    // 「搜索可用」记在文本塔真正就绪的此刻。批157 把这行写在加载轮次之后,
+                    // 日志里显示 18.5 秒,实际 10.8 秒就能搜了——时间对不上
+                    ModelLoadTiming.log("SigLIP文本", "搜索可用(文本塔就绪)", from: t0)
                 case "face":
                     let modelURL = dir.appendingPathComponent("Face.mlmodelc")
                     face = try FaceEmbedder(modelURL: modelURL,
@@ -526,13 +582,16 @@ final class ModelManager: ObservableObject {
 
         textState = .loading
         imageState = .loading
-        await loadAll()
+        // 批158:导入模型包后不等按需,图像塔立刻挂上(维度记账与换模型广播都在挂上时发生)
+        await loadAll(loadImageTower: true)
     }
 
-    /// 等待两个模型就绪(用于自动同步前),超时返回是否有任一就绪
+    /// 等同步开工的条件(用于自动同步前),超时返回是否有任一就绪。
+    /// 批158:图像塔不在等待之列(按需加载,各段索引自己调 ensureImageTower)——等的是
+    /// Gemma(照片标签向量、文件名向量都靠它)与本轮加载结束(人脸模型跟着文本塔走)
     func waitReady(timeout: TimeInterval = 120) async -> Bool {
         let start = Date()
-        while !bothReady {
+        while !bothReady || loadPassRunning {
             if Task.isCancelled { return false }
             if case .failed = textState, case .failed = imageState { return false }
             // 2.0:图像模型可能确实没装(Base 停用后尚未下载 so400m;1.0 有 Base

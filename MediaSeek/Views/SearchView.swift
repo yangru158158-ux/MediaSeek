@@ -14,6 +14,8 @@ struct SearchView: View {
     @State private var results: [DisplayHit] = []
     @State private var searching = false
     @State private var searchedOnce = false
+    /// 批158:这一轮搜索是在模型加载期间跑的(只有标签 / 文字结果)——模型就绪后补搜一次
+    @State private var searchedWhileLoading = false
     @State private var elapsedMs = 0
     /// 批96:AND 零命中词忽略提示(引擎 note 字段;nil=无)
     @State private var andNote: String?
@@ -79,6 +81,11 @@ struct SearchView: View {
             // 不受影响);原先只挂结果列表,头部空白不在覆盖范围
             .contentShape(Rectangle())
             .onTapGesture { hideKeyboard() }
+            // 批158:加载期间搜过的词,文本塔就绪时自动补搜一次——横幅说的「画面匹配稍后
+            // 自动接上」靠这里兑现(批157 只改了横幅文案,没人补搜,得自己再搜一遍才出画面结果)
+            .onReceive(app.models.$siglipTextReady) { _ in
+                rerunAfterModelReady()
+            }
             .navigationTitle("智搜")
             // 键盘工具条(第三十三批,用户实测点导航栏空白不收——导航栏是
             // 系统地盘 App 拦不到点按):键盘弹起时键盘顶上常驻收起按钮,
@@ -891,6 +898,8 @@ struct SearchView: View {
         let refining = refineMode
         searching = true
         searchedOnce = true
+        // 批158:模型没就绪时跑的搜索只有标签 / 文字结果,记一笔等补搜(模型已就绪则清掉旧账)
+        searchedWhileLoading = !app.models.searchReady
         andNote = nil   // 批96:新一轮搜索清旧提示
         // 本轮开始前的可见集(含颜色/维度镜头)——「所见即所搜」的收窄来源
         let lensHits = visibleResults
@@ -965,7 +974,20 @@ struct SearchView: View {
                     // lastRoundCount 不改写成命中数(第六十七批)——它是「范围」,
                     // 本轮搜索的基数已在轮始定格;下一轮开始时按新基数重锁
                 }
+                // 就绪信号到达时正有搜索在跑的话,由这里接手补搜(rerunAfterModelReady 里
+                // searching 为真会直接返回)
+                rerunAfterModelReady()
             }
         }
+    }
+
+    /// 加载期间搜过的词,模型就绪后补搜一次。不补的情形:结果内搜索(基数会变)、搜索框
+    /// 已被改写(用户在输别的词)、正有搜索在跑(由那次搜索的完成处再调)
+    private func rerunAfterModelReady() {
+        guard searchedWhileLoading, app.models.searchReady, !lastExecutedQuery.isEmpty,
+              !refineMode, !searching,
+              query.trimmingCharacters(in: .whitespaces) == lastExecutedQuery else { return }
+        searchedWhileLoading = false
+        runSearch()
     }
 }

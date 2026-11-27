@@ -9,6 +9,7 @@ on:
     branches: [main]
     paths:
       - "MediaSeek/Core/FaceKit.swift"
+      - "MediaSeek/Core/ModelLoadTiming.swift"
       - "scripts/face_e2e_align.swift"
       - "scripts/face_e2e_score.py"
       - ".github/workflows/face_e2e.yml"

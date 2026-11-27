@@ -7,6 +7,7 @@ on:
   pull_request:
     paths:
       - "MediaSeek/Core/FaceKit.swift"
+      - "MediaSeek/Core/ModelLoadTiming.swift"
       - "scripts/face_align_test.swift"
       - "MediaSeek/Core/FaceRecoveryPolicy.swift"
       - "scripts/face_recovery_policy_test.swift"
@@ -16,6 +17,7 @@ on:
     branches: [main]
     paths:
       - "MediaSeek/Core/FaceKit.swift"
+      - "MediaSeek/Core/ModelLoadTiming.swift"
       - "scripts/face_align_test.swift"
       - "MediaSeek/Core/FaceRecoveryPolicy.swift"
       - "scripts/face_recovery_policy_test.swift"

@@ -6,12 +6,27 @@ import Foundation
 /// 还是第一次推理(神经引擎首跑要把编译好的程序装进引擎)。每个模型每一步的毫秒数与
 /// 「距进程启动多久」写进 diag.log,装机冷启动一次就能定位。
 ///
-/// **这个文件必须能单独编译**:FaceKit.swift / EmbeddingModels.swift 会被人脸测试等
-/// 流水线单独拿去 swiftc,所以这里不直接引用 DiagLog(它住在 IndexingCoordinator.swift 里)
-/// ——日志出口由 ModelManager 启动时装上,没装时静默丢弃。
+/// **这个文件必须能单独编译**:FaceKit.swift 会被人脸测试流水线单独拿去 swiftc,并把它
+/// 一并编进去,所以这里不直接引用 DiagLog(它住在 IndexingCoordinator.swift 里)——日志
+/// 出口由 ModelManager 启动时装上,没装时静默丢弃。只用 CoreML + Foundation 的东西
 enum ModelLoadTiming {
-    /// 进程启动的近似时刻:第一次用到时记(App 启动后第一次加载模型就是这里)
-    static let processStart = Date()
+    /// 进程真正的启动时刻(内核记的本进程启动时间):「距进程启动」从这里算,才看得出
+    /// 加载模型之前(系统装载 App + 界面初始化)花了多久。批157 是「第一次用到本类型的
+    /// 时刻」,那之前的时间不在账上。取不到时退回同样的近似
+    static let processStart: Date = processStartTime() ?? Date()
+
+    /// 问内核本进程的启动时间(sysctl kern.proc.pid,对本进程可查)。全 0 或离谱的值
+    /// 当取不到
+    private static func processStartTime() -> Date? {
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()]
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        guard sysctl(&mib, UInt32(mib.count), &info, &size, nil, 0) == 0, size > 0 else { return nil }
+        let tv = info.kp_proc.p_starttime
+        guard tv.tv_sec > 1_577_836_800 else { return nil }   // 早于 2020 年 = 没拿到
+        return Date(timeIntervalSince1970: Double(tv.tv_sec) + Double(tv.tv_usec) / 1_000_000)
+    }
+
     /// 可变状态都装在带锁的类里(不用可变静态变量,同 IndexingCoordinator 的
     /// FirstErrorBox / Counter 写法)
     private static let firstInferenceLedger = NameLedger()
@@ -20,6 +35,36 @@ enum ModelLoadTiming {
     /// 日志出口(ModelManager.init 里装上:写 diag.log)
     static func setSink(_ sink: @escaping (String) -> Void) {
         sinkBox.set(sink)
+    }
+
+    /// 批158:启动环境一行(写进 diag.log)——加载慢时先看是不是这些因素:机型 / 内存 /
+    /// 可用存储 / 低电量模式 / 温度。3 (18) 装机实测两次启动差 3 倍(33 秒 vs 10 秒),
+    /// 而用户说的「几分钟」两次都没出现,下次得带着环境读耗时
+    static func logEnvironment() {
+        let pi = ProcessInfo.processInfo
+        var systemInfo = utsname()
+        uname(&systemInfo)
+        let machine = Mirror(reflecting: systemInfo.machine).children.reduce("") { acc, el in
+            guard let v = el.value as? Int8, v != 0 else { return acc }
+            return acc + String(UnicodeScalar(UInt8(bitPattern: v)))
+        }
+        let thermal: String
+        switch pi.thermalState {
+        case .nominal: thermal = "正常"
+        case .fair: thermal = "偏高"
+        case .serious: thermal = "严重"
+        case .critical: thermal = "危急"
+        @unknown default: thermal = "未知"
+        }
+        var free = "未知"
+        if let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first,
+           let bytes = try? dir.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+               .volumeAvailableCapacityForImportantUsage {
+            free = String(format: "%.1fGB", Double(bytes) / 1_073_741_824)
+        }
+        let lowPower = pi.isLowPowerModeEnabled ? "开" : "关"
+        sinkBox.emit("启动环境 机型=\(machine) 内存=\(pi.physicalMemory / 1_048_576)MB 可用存储=\(free) "
+            + "低电量模式=\(lowPower) 温度=\(thermal) 系统=\(pi.operatingSystemVersionString)")
     }
 
     /// 记一步耗时:diag.log 里一行 `模型加载[名字] 步骤 Nms(距进程启动 X.Xs)`
