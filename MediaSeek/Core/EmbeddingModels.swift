@@ -234,7 +234,7 @@ final class SigLIPEmbedder {
         let model = imageModelBox
         imageLock.unlock()
         guard let model else { throw MSError("图像模型尚未加载完成") }
-        let pixels = try ImagePreprocess.normalizedNCHW(cgImage: cgImage, size: imageSize, mean: mean, std: std)
+        let pixels = try ImagePreprocess.normalizedNCHW(cgImage: cg, size: imageSize, mean: mean, std: std)
         let arr = try MLMultiArray(shape: [1, 3, NSNumber(value: imageSize), NSNumber(value: imageSize)],
                                    dataType: .float32)
         let p = arr.dataPointer.assumingMemoryBound(to: Float.self)
