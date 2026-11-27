@@ -98,6 +98,9 @@ struct LibraryView: View {
     private var setupSection: some View {
         let authorized = app.photoLib.isAuthorized
         let modelsReady = app.models.bothReady
+        // 模型装了但还在加载(冷启动头十几秒、导入模型包后):②写「加载中」,别指路去下载
+        let modelsLoading = !modelsReady
+            && (app.models.textState == .loading || app.models.imageState == .loading)
         let indexed = app.indexing.indexedPhotoCount > 0
         if !(authorized && modelsReady && indexed) {
             Section("首次使用(按顺序三步)") {
@@ -112,14 +115,19 @@ struct LibraryView: View {
                 setupRow(no: "②", title: "下载模型",
                          detail: modelsReady
                             ? "模型已就绪"
-                            : "到「设置」页 → 模型在线更新:两个包都装(基础模型包=文本+人脸,图像模型=so400m),装完再开索引",
+                            : (modelsLoading
+                                ? "模型加载中,稍候即可索引"
+                                : "到「设置」页 → 模型在线更新:两个包都装(基础模型包=文本+人脸,图像模型=so400m),装完再开索引"),
                          done: modelsReady, blockedBy: authorized ? nil : "①授权照片库",
                          actionTitle: nil, action: nil)
                 // ③ 索引
                 setupRow(no: "③", title: "开始索引",
                          detail: indexed ? "已有索引,后续增量自动" : "快扫先行(可搜),富集后台补齐",
                          done: indexed,
-                         blockedBy: authorized ? (modelsReady ? nil : "②下载模型") : "①授权照片库",
+                         // 已有索引就不再写「先完成上一步」:那行会跟绿勾同时出现(批160,
+                         // 3 (19) 用户截图:③打勾又写「先完成上一步:②下载模型」)
+                         blockedBy: indexed ? nil
+                             : (authorized ? (modelsReady ? nil : "②下载模型") : "①授权照片库"),
                          actionTitle: "开始索引") {
                     app.indexing.runIncremental()
                 }

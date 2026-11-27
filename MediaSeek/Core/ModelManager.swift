@@ -90,10 +90,18 @@ final class ModelManager: ObservableObject {
     /// 搜索页的「模型加载中」横幅不会及时消失
     @Published private(set) var siglipTextReady = false
 
-    /// 两个模型是否都可用:图像槽的 standby 也算(文本塔已就绪,图像塔按需加载)——
-    /// 「首次使用」引导与同步开工都看它
+    /// 两个模型是否都可用:「资料库」页的「首次使用」卡与同步开工都看它。
+    /// 可用 = 文本模型就绪 + 图像模型的文本塔就绪(siglipTextReady);图像塔按需加载
+    /// 不影响它——standby 算,索引正在挂图像塔的那十几秒(imageState 短暂回到 .loading)也算。
+    /// 批158 漏了「正在挂」这一段:按需加载期间它变回 false,「首次使用」卡在索引中途
+    /// 重新冒出来,说「②下载模型」没完成(3 (19)/(20) 用户截图)。
+    /// 没装 / 加载失败(imageState 为 .missing / .failed)仍算不可用
     var bothReady: Bool {
-        textState == .ready && (imageState == .ready || imageState == .standby)
+        guard textState == .ready, siglipTextReady else { return false }
+        switch imageState {
+        case .ready, .standby, .loading: return true
+        case .missing, .failed: return false
+        }
     }
     var anyReady: Bool {
         textState == .ready || imageState == .ready || imageState == .standby
