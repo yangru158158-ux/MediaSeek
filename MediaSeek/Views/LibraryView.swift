@@ -102,7 +102,11 @@ struct LibraryView: View {
         let modelsLoading = !modelsReady
             && (app.models.textState == .loading || app.models.imageState == .loading)
         let indexed = app.indexing.indexedPhotoCount > 0
-        if !(authorized && modelsReady && indexed) {
+        // 批161:相册已授权、已有索引、模型只是还在加载(冷启动头十几秒)——三步其实都完成过,
+        // 这张「首次使用」卡不该闪出来(按代码推演:3 (21) 里这段时间 modelsReady 为 false,
+        // 卡仍会出现;用户启动后常直接进「资料库」看索引)。只有真有一步没完成(没授权 /
+        // 没装模型或加载失败 / 还没有索引)才显示
+        if !(authorized && indexed && (modelsReady || modelsLoading)) {
             Section("首次使用(按顺序三步)") {
                 // ① 授权
                 setupRow(no: "①", title: "授权照片库",
@@ -125,9 +129,10 @@ struct LibraryView: View {
                          detail: indexed ? "已有索引,后续增量自动" : "快扫先行(可搜),富集后台补齐",
                          done: indexed,
                          // 已有索引就不再写「先完成上一步」:那行会跟绿勾同时出现(批160,
-                         // 3 (19) 用户截图:③打勾又写「先完成上一步:②下载模型」)
+                         // 3 (19) 用户截图:③打勾又写「先完成上一步:②下载模型」);
+                         // 模型在加载时也不写(点了「开始索引」会自己等模型)
                          blockedBy: indexed ? nil
-                             : (authorized ? (modelsReady ? nil : "②下载模型") : "①授权照片库"),
+                             : (authorized ? ((modelsReady || modelsLoading) ? nil : "②下载模型") : "①授权照片库"),
                          actionTitle: "开始索引") {
                     app.indexing.runIncremental()
                 }
