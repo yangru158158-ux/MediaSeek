@@ -59,10 +59,13 @@ final class SearchEngine {
         self.imports = imports
     }
 
-    // MARK: - 相对分(批153:设置页实验开关,默认关)
+    // MARK: - 相对分(批153 起是设置页的实验开关;批156 起默认打开,用户:「默认值开着就好」)
 
-    /// 实验开关:设置页「视觉相对分(实验)」。UserDefaults 里没有这个键时为关
-    static var relativeScoreEnabled: Bool { UserDefaults.standard.bool(forKey: "relativeScoreEnabled") }
+    /// 开关:设置页「视觉相对分」。UserDefaults 里没有这个键时为开(批156)。依据=3 (14)~(16)
+    /// 装机,用户确认「多出来结果是对的」「搜鱼已经过滤掉了不相关视频」
+    static var relativeScoreEnabled: Bool {
+        UserDefaults.standard.object(forKey: "relativeScoreEnabled") as? Bool ?? true
+    }
     /// 相对分线 z = (查询分 − 该照片对 66 个参照分的均值) / 标准差:
     /// 批152 装机数据上汇总精度 86% / 召回 20.1% 的点(现行绝对分线 83% / 4.7%)
     private static let relativeZ: Float = 2.90
@@ -96,11 +99,19 @@ final class SearchEngine {
         return rows
     }
 
-    /// 设置页打开开关时预热参照词向量(66 次文本塔推理),免得第一次搜索卡一下
+    /// 预热参照词向量(66 次文本塔推理):设置页打开开关时、以及 App 启动时(批156 起默认开)
+    /// 各调一次,免得每次冷启动后的第一次搜索现算。冷启动时模型可能还没加载完,
+    /// 等它就绪再算,最多等 120 秒
     func warmRelativeReferences() {
         Task.detached(priority: .utility) {
-            guard let siglip = await MainActor.run(body: { self.models.siglip }) else { return }
-            _ = try? self.relativeReferenceVectors(siglip)
+            let deadline = Date().addingTimeInterval(120)
+            while Date() < deadline {
+                if let siglip = await MainActor.run(body: { self.models.siglip }) {
+                    _ = try? self.relativeReferenceVectors(siglip)
+                    return
+                }
+                try? await Task.sleep(nanoseconds: 500_000_000)
+            }
         }
     }
 
@@ -1137,7 +1148,7 @@ final class SearchEngine {
                        query,
                        embedPath,
                        hits.count, best, hits.map(\.score).min() ?? 0, survivors.count))
-            // 批153(用户「做」;设置页实验开关,默认关):相对分命中——绝对分阶梯与尾线之后,
+            // 批153(用户「做」;批156 起默认打开):相对分命中——绝对分阶梯与尾线之后,
             // 再按「这个词在该照片自己的 66 词分数里有多突出」(z,见
             // VectorStore.searchRelative)补一批照片:不在幸存集里的并进来,随后照旧过下面的
             // 截图抑制(批152 数据:相对分对库里没有的词也更灵敏——无人机 44→69,其中 63 张

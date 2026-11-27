@@ -40,6 +40,9 @@ final class AppModel: ObservableObject {
         models = m
         indexing = IndexingCoordinator(store: s, models: m, photo: photoLib, imports: imports)
         search = SearchEngine(store: s, models: m, photo: photoLib, imports: imports)
+        // 批156:相对分默认打开——启动时就预热参照词向量(后台等模型就绪再算),
+        // 免得每次冷启动后的第一次搜索现算 66 个参照词
+        if SearchEngine.relativeScoreEnabled { search.warmRelativeReferences() }
 
         // 子服务都是 ObservableObject,但视图只观察 AppModel;
         // 把它们的状态变化统一转发,否则授权/模型/索引进度界面不会刷新
