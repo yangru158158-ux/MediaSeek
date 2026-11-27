@@ -66,6 +66,12 @@ final class SearchEngine {
     /// 相对分线 z = (查询分 − 该照片对 66 个参照分的均值) / 标准差:
     /// 批152 装机数据上汇总精度 86% / 召回 20.1% 的点(现行绝对分线 83% / 4.7%)
     private static let relativeZ: Float = 2.90
+    /// 只凭分数进场的视频帧要过的相对分线(批155):批154 的 v3 装机数据(1062 帧 / 357 个视频)
+    /// ——现行视频线(绝对分 ≥ 0.15×gate)放进 496 个「词×视频」,其中有一个视频被 32 个词
+    /// 放进、8 个视频被 10 个以上的词放进(万金油帧);加这道闸后单个视频最多被 2 个词放进,
+    /// 放进 156 个。搜 鱼:保住水族馆那个视频(z 2.45),挡掉 3 个无关的(z ≤ 1.04);照片线
+    /// 2.9 会把它也挡掉,故取低一档。主题类词在视频上的牌精度:z≥2.4 为 49%,现行线 45%
+    private static let relativeFrameZ: Float = 2.4
     /// 参照词向量的缓存;owner = 生成它的 SigLIPEmbedder 实例(换模型即失效重算)
     private let relRefLock = NSLock()
     private var relRefCache: (owner: ObjectIdentifier, rows: [Float])?
@@ -1136,31 +1142,48 @@ final class SearchEngine {
             // VectorStore.searchRelative)补一批照片:不在幸存集里的并进来,随后照旧过下面的
             // 截图抑制(批152 数据:相对分对库里没有的词也更灵敏——无人机 44→69,其中 63 张
             // 是截图牌;截图抑制正是它的闸)。不吃尾线(相对分命中的绝对分天然低于头部,套
-            // 尾线等于全砍);只管全局单词径的照片,交集/性别深潜/结果内/视频帧不参与
+            // 尾线等于全砍);只管全局单词径,交集/性别深潜/结果内不参与。
+            // 批155(批154 的 v3 装机数据,视频帧 1062 行):只凭分数进场的视频帧(帧标签与
+            // 查询词没有交集)再过一道相对分 z ≥ relativeFrameZ,过了的排在相对分照片命中
+            // 后面(批154:它们是比相对分命中更弱的证据)。开关关着时这里整段不走
             if Self.relativeScoreEnabled, !q.isEmpty, among == nil, isectWords == nil, !genderDive,
-               imageKinds.contains(.photo),
+               imageKinds.contains(.photo) || imageKinds.contains(.videoFrame),
                let refs = try? relativeReferenceVectors(siglip) {
-                let kept = Set(survivors.map(\.refKey))
-                // 返回的相对分命中已按 z 从高到低排:接在绝对分命中后面(下游按名次融合,
-                // 通道内的顺序就是相关性顺序),不重新按绝对分排
-                let rel = ((try? store.searchRelative(
-                    space: siglip.space, kinds: [.photo], query: q, refs: refs,
-                    limit: topK, minAbs: 0.08 * gate, minZ: Self.relativeZ)) ?? [])
-                    .filter { !kept.contains($0.hit.refKey) }
-                if !rel.isEmpty {
-                    // 批154(3 (14) 装机:搜 鱼,相对分捞到 38 张水族馆照片,排在前面的是 3 个
-                    // 与鱼无关的视频):只凭分数进场的视频帧——帧标签与查询词没有交集,分数够
-                    // 视频线 0.15×gate(0.1305)、够不着照片二档线 0.157——是比相对分命中更弱的
-                    // 证据,排到相对分命中后面;有标签实据的视频帧照旧在前。开关关时不改
+                var weakFrames: [SearchHit] = []
+                if imageKinds.contains(.videoFrame) {
+                    // 只凭分数进场:帧标签与查询词没有交集,分数够视频线 0.15×gate(0.1305)、
+                    // 够不着照片二档线 0.157。3 (14) 装机搜 鱼:4 个这样的视频,湖边自拍 ×2
+                    // (z 0.87 / 0.68)、手写笔记(z 1.04)与鱼无关,水下那个(z 2.45)相关
                     let isWeakFrame: (SearchHit) -> Bool = {
                         $0.kind == .videoFrame && !videoLabelRefs.contains($0.refKey)
                     }
-                    let weakFrames = survivors.filter(isWeakFrame)
-                    survivors.removeAll(where: isWeakFrame)
-                    survivors.append(contentsOf: rel.map { $0.hit })
-                    survivors.append(contentsOf: weakFrames)
+                    weakFrames = survivors.filter(isWeakFrame)
+                    if !weakFrames.isEmpty {
+                        // 同一个视频只要有一帧过线就算过(与校准分析同口径:每个视频取最高的一帧)
+                        let passed = Set(((try? store.searchRelative(
+                            space: siglip.space, kinds: [.videoFrame], query: q, refs: refs,
+                            limit: 1_000_000, minAbs: 0.08 * gate, minZ: Self.relativeFrameZ)) ?? [])
+                            .map { $0.hit.refKey })
+                        let before = weakFrames.count
+                        weakFrames = weakFrames.filter { passed.contains($0.refKey) }
+                        tierDiag += "视频过相对分 \(before)→\(weakFrames.count) "
+                        survivors.removeAll(where: isWeakFrame)
+                    }
                 }
-                tierDiag += "相对分+\(rel.count) "
+                if imageKinds.contains(.photo) {
+                    let kept = Set(survivors.map(\.refKey))
+                    // 返回的相对分命中已按 z 从高到低排:接在绝对分命中后面(下游按名次融合,
+                    // 通道内的顺序就是相关性顺序),不重新按绝对分排
+                    let rel = ((try? store.searchRelative(
+                        space: siglip.space, kinds: [.photo], query: q, refs: refs,
+                        limit: topK, minAbs: 0.08 * gate, minZ: Self.relativeZ)) ?? [])
+                        .filter { !kept.contains($0.hit.refKey) }
+                    if !rel.isEmpty {
+                        survivors.append(contentsOf: rel.map { $0.hit })
+                    }
+                    tierDiag += "相对分+\(rel.count) "
+                }
+                survivors.append(contentsOf: weakFrames)
             }
             // 批143仪器:视觉通道明细——实际送进 SigLIP 的查询串、各档地板与
             // 命中数、幸存命中的牌词分布(每个牌词各挂在多少个命中上,前 12 个)
