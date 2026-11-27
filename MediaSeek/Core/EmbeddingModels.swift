@@ -99,10 +99,13 @@ final class GemmaTextEmbedder {
     private let tokenizer: HFTokenizer
 
     init(modelURL: URL, tokenizerFolder: URL) async throws {
-        let config = MLModelConfiguration()
-        config.computeUnits = .cpuAndNeuralEngine
-        self.model = try MLModel(contentsOf: modelURL, configuration: config)
+        // 批157:打开模型与分词器分开计时
+        let t0 = Date()
+        self.model = try MLModel(contentsOf: modelURL, configuration: ModelLoadTiming.configuration())
+        ModelLoadTiming.log("EmbeddingGemma", "打开模型", from: t0)
+        let t1 = Date()
         self.tokenizer = try await HFTokenizer(folder: tokenizerFolder)
+        ModelLoadTiming.log("EmbeddingGemma", "分词器", from: t1)
     }
 
     static func queryPrompt(_ text: String) -> String { "task: search result | query: \(text)" }
@@ -121,7 +124,10 @@ final class GemmaTextEmbedder {
         let arr = try MLMultiArray(shape: [1, NSNumber(value: ids.count)], dataType: .int32)
         let p = arr.dataPointer.assumingMemoryBound(to: Int32.self)
         for (i, t) in ids.enumerated() { p[i] = Int32(t) }
-        return try model.runEmbedding(inputName: "input_ids", input: arr)
+        let t0 = Date()
+        let v = try model.runEmbedding(inputName: "input_ids", input: arr)
+        ModelLoadTiming.firstInference("EmbeddingGemma", from: t0)
+        return v
     }
 }
 
@@ -130,26 +136,50 @@ final class GemmaTextEmbedder {
 final class SigLIPEmbedder {
     let space = "clip"
     private let textModel: MLModel
-    private let imageModel: MLModel
     private let tokenizer: HFTokenizer
     private let imageSize: Int
     private let mean: Float
     private let std: Float
     private let needsAttentionMask: Bool
+    // 批157(用户:冷启动要等几分钟):图像塔与文本塔分开加载。查询向量只走文本塔
+    // (搜索只需要它);图像塔(so400m 包 2GB 的大头)只给新照片 / 视频帧 / 导入文件
+    // 建索引时用——原先两者在同一个 init 里一起打开,图像塔没加载完搜索也用不了
+    private let imageLock = NSLock()
+    private var imageModelBox: MLModel?
 
-    init(textModelURL: URL, imageModelURL: URL, tokenizerFolder: URL,
+    /// 图像塔是否已挂上;没挂上时 embedImage 抛错
+    var imageReady: Bool {
+        imageLock.lock()
+        defer { imageLock.unlock() }
+        return imageModelBox != nil
+    }
+
+    /// 只开文本塔 + 分词器(搜索可用的最低条件);图像塔由 attachImageModel 随后挂上
+    init(textModelURL: URL, tokenizerFolder: URL,
          imageSize: Int = 256, mean: Float = 0.5, std: Float = 0.5) async throws {
-        let config = MLModelConfiguration()
-        config.computeUnits = .cpuAndNeuralEngine
-        self.textModel = try MLModel(contentsOf: textModelURL, configuration: config)
-        self.imageModel = try MLModel(contentsOf: imageModelURL, configuration: config)
+        // 批157:打开模型与分词器分开计时
+        let t0 = Date()
+        self.textModel = try MLModel(contentsOf: textModelURL, configuration: ModelLoadTiming.configuration())
+        ModelLoadTiming.log("SigLIP文本", "打开模型", from: t0)
+        let t1 = Date()
         self.tokenizer = try await HFTokenizer(folder: tokenizerFolder)
+        ModelLoadTiming.log("SigLIP文本", "分词器", from: t1)
         self.imageSize = imageSize
         self.mean = mean
         self.std = std
         // 新版模型包文本塔要求定长 64 双输入;旧包无 attention_mask 输入则走旧路径
         self.needsAttentionMask = textModel.modelDescription
             .inputDescriptionsByName["attention_mask"] != nil
+    }
+
+    /// 挂上图像塔(可能很慢:2GB 的模型;调用方放到后台线程里调)
+    func attachImageModel(_ url: URL) throws {
+        let t0 = Date()
+        let model = try MLModel(contentsOf: url, configuration: ModelLoadTiming.configuration())
+        ModelLoadTiming.log("SigLIP图像", "打开模型", from: t0)
+        imageLock.lock()
+        imageModelBox = model
+        imageLock.unlock()
     }
 
     // 批92:查询向量缓存。ANE 浮点推理非确定(Apple 文档:float16 执行路径
@@ -169,7 +199,9 @@ final class SigLIPEmbedder {
             return v
         }
         queryCacheLock.unlock()
+        let t0 = Date()
         let v = try embedQueryCompute(text)
+        ModelLoadTiming.firstInference("SigLIP文本", from: t0)
         queryCacheLock.lock()
         if queryVecCache.count > 512 { queryVecCache.removeAll() }   // 会话级防膨胀
         queryVecCache[text] = v
@@ -198,14 +230,21 @@ final class SigLIPEmbedder {
     }
 
     func embedImage(_ cg: CGImage) throws -> [Float] {
-        let pixels = try ImagePreprocess.normalizedNCHW(cgImage: cg, size: imageSize, mean: mean, std: std)
+        imageLock.lock()
+        let model = imageModelBox
+        imageLock.unlock()
+        guard let model else { throw MSError("图像模型尚未加载完成") }
+        let pixels = try ImagePreprocess.normalizedNCHW(cgImage: cgImage, size: imageSize, mean: mean, std: std)
         let arr = try MLMultiArray(shape: [1, 3, NSNumber(value: imageSize), NSNumber(value: imageSize)],
                                    dataType: .float32)
         let p = arr.dataPointer.assumingMemoryBound(to: Float.self)
         pixels.withUnsafeBufferPointer { src in
             _ = memcpy(p, src.baseAddress, pixels.count * MemoryLayout<Float>.size)
         }
-        return try imageModel.runEmbedding(inputName: "pixel_values", input: arr)
+        let t0 = Date()
+        let v = try model.runEmbedding(inputName: "pixel_values", input: arr)
+        ModelLoadTiming.firstInference("SigLIP图像", from: t0)
+        return v
     }
 }
 

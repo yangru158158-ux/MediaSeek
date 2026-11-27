@@ -15,9 +15,10 @@ final class FaceEmbedder {
     private let outputName: String
 
     init(modelURL: URL, inputName: String, outputName: String) throws {
-        let config = MLModelConfiguration()
-        config.computeUnits = .cpuAndNeuralEngine
-        self.model = try MLModel(contentsOf: modelURL, configuration: config)
+        // 批157:加载耗时记账(与另两个模型同一本账)
+        let t0 = Date()
+        self.model = try MLModel(contentsOf: modelURL, configuration: ModelLoadTiming.configuration())
+        ModelLoadTiming.log("ArcFace", "打开模型", from: t0)
         self.inputName = inputName
         self.outputName = outputName
     }
@@ -50,7 +51,10 @@ final class FaceEmbedder {
         out.withUnsafeBufferPointer { src in
             _ = memcpy(ptr, src.baseAddress, out.count * MemoryLayout<Float>.size)
         }
-        return try model.runEmbedding(inputs: [inputName: arr], outputName: outputName)
+        let t0 = Date()
+        let v = try model.runEmbedding(inputs: [inputName: arr], outputName: outputName)
+        ModelLoadTiming.firstInference("ArcFace", from: t0)
+        return v
     }
 }
 

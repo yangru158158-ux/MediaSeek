@@ -61,7 +61,7 @@ struct SettingsView: View {
         HStack {
             VStack(alignment: .leading, spacing: 3) {
                 Text(slot.displayName).font(.subheadline)
-                Text(stateText(state))
+                Text(stateText(state, for: slot))
                     .font(.caption)
                     .foregroundStyle(state == .ready ? .green : .secondary)
             }
@@ -77,14 +77,19 @@ struct SettingsView: View {
         }
     }
 
-    private func stateText(_ state: ModelState) -> String {
+    private func stateText(_ state: ModelState, for slot: ModelSlot) -> String {
         switch state {
         case .missing:
             // 冷启动排队中 vs 真没装:loadAll 进行中的 missing 是「还没轮到」,
             // 显示「未安装」会让用户以为模型被删(2026-10-16 实测)
             return app.models.loadPassRunning ? "加载中(排队)…" : "未安装"
-        case .loading: return "加载中…(首次编译模型需要一些时间)"
-        case .ready: return "已就绪"
+        case .loading: return "加载中…"
+        case .ready:
+            // 批157:就绪后面带上这一轮加载用了几秒——冷启动慢时一眼看出是哪个模型
+            if let s = app.models.loadSeconds[slot] {
+                return String(format: "已就绪 · 加载 %.1f 秒", s)
+            }
+            return "已就绪"
         case .failed(let m): return "失败:\(m)"
         }
     }
@@ -99,6 +104,18 @@ struct SettingsView: View {
             if !app.models.detailText.isEmpty {
                 Text(app.models.detailText).font(.caption2).foregroundStyle(.secondary)
             }
+            // 批157 诊断用:模型在哪种芯片上推理。冷启动加载慢时拿来对比——换一种,
+            // 彻底退出 App 再打开,看上面每个模型后面的「加载 X 秒」和 diag.log 的
+            // 「模型加载[…]」行。数值按神经引擎标定,测完请切回
+            Picker("模型推理芯片", selection: Binding(
+                get: { UserDefaults.standard.string(forKey: "modelComputeUnits") ?? "ane" },
+                set: { UserDefaults.standard.set($0, forKey: "modelComputeUnits") })) {
+                Text("神经引擎(默认)").tag("ane")
+                Text("GPU").tag("gpu")
+                Text("仅 CPU").tag("cpu")
+            }
+            Text("诊断用,改后重启 App 生效;搜索门槛是按神经引擎测的,测完请切回默认")
+                .font(.caption2).foregroundStyle(.secondary)
         } header: {
             Text("端侧模型")
         } footer: {

@@ -603,7 +603,7 @@ final class IndexingCoordinator: ObservableObject {
         // 快扫不写 OCR 行,「缺 OCR 自愈」下一轮自动接力(中断可续)。
         // 取图 640px 而非 2048:解码像素量降约 10 倍,嵌入只需 320——快扫的
         // 唯一职责是让向量先落库,精度活全部留给富集阶段
-        if !newPhotos.isEmpty, let clip = models.siglip {
+        if !newPhotos.isEmpty, models.imageTowerReady, let clip = models.siglip {
             // 已有 clip 向量的照片跳过快扫:中断续跑时「缺 OCR 自愈」把这批
             // 放回 newPhotos,但向量早已落库可搜——整批重嵌是纯重复劳动
             // (upsert 幂等,白费 1 万张×0.1s;三验 low)
@@ -778,7 +778,8 @@ final class IndexingCoordinator: ObservableObject {
         // 并挂分段计时——每 50 张把「取图/OCR/嵌入/标签/人脸 毫秒均摊」
         // 刷进相位文案,装机实测提速有账可对
         let useLabels = chineseLabels
-        let clip = models.siglip
+        // 批157:SigLIP 文本塔先就绪、图像塔随后才挂上——要嵌图的地方只认 imageTowerReady
+        let clip = models.imageTowerReady ? models.siglip : nil
         let gemma = models.gemma
         let face = models.face
         let store = self.store
@@ -1250,7 +1251,7 @@ final class IndexingCoordinator: ObservableObject {
 
     private func embedVideo(_ asset: PHAsset, errors: FirstErrorBox) async {
         do {
-            guard let clip = models.siglip else { return }
+            guard models.imageTowerReady, let clip = models.siglip else { return }
             let gemma = models.gemma
             let store = self.store
             let photo = self.photo
@@ -1471,7 +1472,8 @@ final class IndexingCoordinator: ObservableObject {
         //     (在用 so400m 的设备升级后文件侧零重做)
         //   · 图像模型没装(Base 已停用、so400m 未下载):图片/视频文件先不做。
         //     原先会在没有视觉向量的情况下把它们记成已索引,此后永不补
-        let clipReady = models.siglip != nil
+        // 批157:只认图像塔(文本塔先就绪时 siglip 已非空,但还不能嵌图)
+        let clipReady = models.imageTowerReady
         let modelDim = UserDefaults.standard.object(forKey: "clipModelDim") as? Int
         var rebuildVisual = false
         if clipReady, let modelDim {
@@ -1513,7 +1515,8 @@ final class IndexingCoordinator: ObservableObject {
     func embedImported(_ record: ImportedFile) async {
         do {
             guard let gemma = models.gemma else { throw MSError("文本模型未就绪") }
-            let clip = models.siglip
+            // 批157:图像塔没挂上就不做视觉向量(文件名向量照做),下轮同步自会补
+            let clip = models.imageTowerReady ? models.siglip : nil
             let imports = self.imports
             let store = self.store
             let frameCount = videoFramesPerVideo

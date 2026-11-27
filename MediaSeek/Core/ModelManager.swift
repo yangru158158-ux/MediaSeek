@@ -74,9 +74,24 @@ final class ModelManager: ObservableObject {
     private(set) var gemma: GemmaTextEmbedder?
     private(set) var siglip: SigLIPEmbedder?
     private(set) var face: FaceEmbedder?
+    /// 批157:每个槽位这一轮加载花了多少秒(设置页「已就绪」后面显示)
+    @Published private(set) var loadSeconds: [ModelSlot: Double] = [:]
+    /// 批157:图像槽两步加载——第一步只开文本塔,图像塔的地址、meta 与这个槽位的起跑时刻
+    /// 留给第二步(attachImageTower)
+    private var pendingImageTower: (url: URL, meta: ModelMeta, started: Date)?
+    /// 批157:SigLIP 文本塔已就绪。单独发一个 @Published,是因为文本塔就绪时图像槽的状态
+    /// 还是 .loading(要等图像塔),不发信号的话搜索页的「模型加载中」横幅不会及时消失
+    @Published private(set) var siglipTextReady = false
 
     var bothReady: Bool { textState == .ready && imageState == .ready }
     var anyReady: Bool { textState == .ready || imageState == .ready }
+    /// 搜索可用的最低条件:SigLIP 文本塔就绪(照片搜索的查询向量只走它)。批157 起图像塔
+    /// 可以晚于它——2GB 的图像模型只给新照片 / 视频帧建索引时用,不该拖住搜索。
+    /// 不把 Gemma 算进来:它只管文件名 / 文件内容的语义检索,照片搜索用不到
+    var searchReady: Bool { siglipTextReady }
+    /// 图像塔是否已挂上(要嵌图的索引路径只认这里;别拿 siglip != nil 当图像模型就绪——
+    /// 批157 起文本塔先就绪,图像塔随后才挂上)
+    var imageTowerReady: Bool { imageState == .ready && siglip?.imageReady == true }
 
     /// SigLIP 分数门槛缩放系数(so400m 校准,2026-10-22 CI 双模型分布实测):
     /// so400m 命中带均值 = base × 0.87(0.0838 vs 0.0963),噪声带同向下移
@@ -227,19 +242,71 @@ final class ModelManager: ObservableObject {
         // 从盘重载(进程级无解);此前三槽串行,总等待=三者之和,且排队槽位
         // 显示「未安装」吓人。改并行:总等待≈最慢一个,排队槽位由设置页
         // 按 loadPassRunning 显示「加载中(排队)」
+        // 批157(用户:冷启动要等几分钟):分两步——第一步只开两个文本塔,搜索此刻即可用;
+        // 第二步(与第一步错开,不抢 IO 和 CPU)才开 2GB 的图像塔与人脸模型——它们只有
+        // 给新内容建索引时才用
         loadPassRunning = true
         defer { loadPassRunning = false }
         await withTaskGroup(of: Void.self) { group in
             if textState != .ready { group.addTask { await self.loadSlot(.text) } }
-            // 图像模型只有一个槽位(2.0:so400m;第四十六批曾按选中项在标准/
-            // so400m 两个槽位间二选一加载)
+            // 图像槽第一步:准备文件 + 开文本塔(siglip 从此非空,imageState 仍是 loading)
             if imageState != .ready { group.addTask { await self.loadSlot(.image) } }
+        }
+        if searchReady {
+            ModelLoadTiming.log("SigLIP文本", "搜索可用(文本塔就绪)", from: ModelLoadTiming.processStart)
+        }
+        await withTaskGroup(of: Void.self) { group in
+            if pendingImageTower != nil { group.addTask { await self.attachImageTower() } }
             group.addTask { await self.loadSlot(.face) }   // 人脸模型可选,缺时静默降级
+        }
+    }
+
+    /// 槽位就绪:改状态、记这一轮的秒数(设置页显示)、写一行耗时
+    private func markReady(_ slot: ModelSlot, since t0: Date) {
+        setState(.ready, for: slot)
+        loadSeconds[slot] = Date().timeIntervalSince(t0)
+        ModelLoadTiming.log(slot.rawValue, "就绪", from: t0)
+    }
+
+    /// 图像槽第二步:把图像塔挂到已就绪的 SigLIP 文本塔上(2GB 的模型只在这里打开)。
+    /// MLModel 的初始化是同步调用,放到后台线程里做,不占主线程
+    private func attachImageTower() async {
+        guard let embedder = siglip, let pending = pendingImageTower else { return }
+        pendingImageTower = nil
+        let url = pending.url
+        let attached = await Task.detached(priority: .userInitiated) { () -> Result<Void, Error> in
+            do {
+                try embedder.attachImageModel(url)
+                return .success(())
+            } catch {
+                return .failure(error)
+            }
+        }.value
+        switch attached {
+        case .failure(let error):
+            // 文本塔照常可用(搜索不受影响);要嵌图的索引路径按 imageTowerReady 跳过
+            setState(.failed(error.localizedDescription), for: .image)
+        case .success:
+            let meta = pending.meta
+            markReady(.image, since: pending.started)
+            if textState == .ready { detailText = "" }
+            // 记录当前图像模型维度;IndexingCoordinator 同步前与库内向量维度
+            // 比对,不一致即清空旧 clip 向量全量重建(so400m 等在线升级换模型)
+            let prevDim = UserDefaults.standard.object(forKey: "clipModelDim") as? Int
+            UserDefaults.standard.set(meta.dim, forKey: "clipModelDim")
+            // 维度变了=换了图像模型:广播触发自动同步清旧向量全量重嵌。
+            // 1.0 由 setImageModel 发(标准↔so400m 切换);2.0 切换逻辑已删,
+            // 导入新的图像模型包后在这里发。同模型重装维度不变,不广播
+            // (从未记录过维度=0 也算变化,与 1.0 setImageModel 的判定等价)
+            if (prevDim ?? 0) != meta.dim {
+                NotificationCenter.default.post(name: .clipModelChanged, object: nil)
+            }
         }
     }
 
     private func loadSlot(_ slot: ModelSlot) async {
         setState(.loading, for: slot)
+        let t0 = Date()      // 批157:这个槽位这一轮加载的起跑时刻
         let root = supportRoot
         let bundleDir = Bundle.main.url(forResource: "Models", withExtension: nil)?
             .appendingPathComponent(slot.rawValue)
@@ -294,6 +361,7 @@ final class ModelManager: ObservableObject {
                 return .failure(error)
             }
         }.value
+        ModelLoadTiming.log(slot.rawValue, "准备文件", from: t0)
 
         switch prepared {
         case .failure(let error):
@@ -309,7 +377,7 @@ final class ModelManager: ObservableObject {
                     let modelURL = dir.appendingPathComponent("GemmaText.mlmodelc")
                     guard let tokURL else { throw MSError("缺少 tokenizer.json") }
                     gemma = try await GemmaTextEmbedder(modelURL: modelURL, tokenizerFolder: tokURL.deletingLastPathComponent())
-                    setState(.ready, for: slot)
+                    markReady(.text, since: t0)
                     if textState == .ready && imageState == .ready { detailText = "" }
                 case "clip":
                     // 2.0 守卫(「不用 Base」的最终防线):迁移没删掉/塞进了旧包时,
@@ -317,6 +385,7 @@ final class ModelManager: ObservableObject {
                     // 中文原生查询跑搜索
                     guard meta.dim >= Self.minImageModelDim else {
                         siglip = nil
+                        siglipTextReady = false
                         setState(.missing, for: slot)
                         detailText = "标准图像模型(Base)已停用:请在 设置→模型在线更新 下载 so400m"
                         return
@@ -324,30 +393,23 @@ final class ModelManager: ObservableObject {
                     let imgURL = dir.appendingPathComponent("SiglipImage.mlmodelc")
                     let txtURL = dir.appendingPathComponent("SiglipText.mlmodelc")
                     guard let tokURL else { throw MSError("缺少 tokenizer.json") }
-                    siglip = try await SigLIPEmbedder(
-                        textModelURL: txtURL, imageModelURL: imgURL,
+                    // 批157:两步加载——这里只开文本塔,搜索从此可用;2GB 的图像塔留到
+                    // loadAll 第二步(attachImageTower)再开,imageState 到那时才就绪。
+                    // 维度记账与换模型广播也挪到那时(要等图像塔真的挂上)
+                    let embedder = try await SigLIPEmbedder(
+                        textModelURL: txtURL,
                         tokenizerFolder: tokURL.deletingLastPathComponent(),
                         imageSize: meta.image_size ?? 256,
                         mean: meta.image_mean ?? 0.5, std: meta.image_std ?? 0.5)
-                    setState(.ready, for: slot)
-                    if textState == .ready && imageState == .ready { detailText = "" }
-                    // 记录当前图像模型维度;IndexingCoordinator 同步前与库内向量维度
-                    // 比对,不一致即清空旧 clip 向量全量重建(so400m 等在线升级换模型)
-                    let prevDim = UserDefaults.standard.object(forKey: "clipModelDim") as? Int
-                    UserDefaults.standard.set(meta.dim, forKey: "clipModelDim")
-                    // 维度变了=换了图像模型:广播触发自动同步清旧向量全量重嵌。
-                    // 1.0 由 setImageModel 发(标准↔so400m 切换);2.0 切换逻辑已删,
-                    // 导入新的图像模型包后在这里发。同模型重装维度不变,不广播
-                    // (从未记录过维度=0 也算变化,与 1.0 setImageModel 的判定等价)
-                    if (prevDim ?? 0) != meta.dim {
-                        NotificationCenter.default.post(name: .clipModelChanged, object: nil)
-                    }
+                    siglip = embedder
+                    siglipTextReady = true
+                    pendingImageTower = (imgURL, meta, t0)
                 case "face":
                     let modelURL = dir.appendingPathComponent("Face.mlmodelc")
                     face = try FaceEmbedder(modelURL: modelURL,
                                             inputName: meta.input ?? "input.1",
                                             outputName: meta.output ?? "embedding")
-                    setState(.ready, for: slot)
+                    markReady(.face, since: t0)
                     // 记录人脸模型指纹;IndexingCoordinator 同步前与库内已嵌指纹比对,
                     // 不一致即清空旧向量重嵌(如 mbf→r50 在线升级,旧嵌入空间不通用)。
                     // 优先 meta.model_size(ONNX 字节数,导出脚本写入);
@@ -473,6 +535,8 @@ final class ModelManager: ObservableObject {
             // 2.0:图像模型可能确实没装(Base 停用后尚未下载 so400m;1.0 有 Base
             // 兜底,图像模型总在)。加载轮次已结束仍是「未安装」就不必干等满超时
             if !loadPassRunning, imageState == .missing { return textState == .ready }
+            // 批157:图像模型加载失败也干等不到——加载轮次已结束就直接放行(文本侧照常工作)
+            if !loadPassRunning, case .failed = imageState { return textState == .ready }
             if Date().timeIntervalSince(start) > timeout { return anyReady }
             try? await Task.sleep(nanoseconds: 500_000_000)
         }

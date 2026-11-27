@@ -65,7 +65,7 @@ struct SearchView: View {
             VStack(spacing: 0) {
                 searchField
                 scopePicker
-                if !app.models.anyReady {
+                if !app.models.searchReady {
                     modelBanner
                 }
                 statusLine
@@ -174,9 +174,20 @@ struct SearchView: View {
     }
 
     private var modelBanner: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "brain")
-            Text("模型未就绪,请到「设置」导入模型包")
+        // 批157:加载中与没装分开显示——冷启动时原先也显示「模型未就绪,请到设置导入
+        // 模型包」,用户以为模型出了问题;现在加载中明确说「标签和文字结果照常可搜」。
+        // 这条横幅只看两个文本塔(searchReady):图像塔只给新内容建索引用,不挡搜索
+        let loading = app.models.loadPassRunning
+            || app.models.textState == .loading || app.models.imageState == .loading
+        return HStack(spacing: 8) {
+            if loading {
+                ProgressView()
+            } else {
+                Image(systemName: "brain")
+            }
+            Text(loading
+                 ? "模型加载中…标签和文字结果照常可搜,画面匹配稍后自动接上"
+                 : "模型未就绪,请到「设置」导入模型包")
                 .font(.footnote)
         }
         .frame(maxWidth: .infinity)
