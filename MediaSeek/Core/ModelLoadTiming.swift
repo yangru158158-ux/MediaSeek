@@ -5,19 +5,29 @@ import Foundation
 /// 计算单元开关。此前模型加载耗时没有任何记录——不知道「几分钟」卡在打开模型、分词器,
 /// 还是第一次推理(神经引擎首跑要把编译好的程序装进引擎)。每个模型每一步的毫秒数与
 /// 「距进程启动多久」写进 diag.log,装机冷启动一次就能定位。
+///
+/// **这个文件必须能单独编译**:FaceKit.swift / EmbeddingModels.swift 会被人脸测试等
+/// 流水线单独拿去 swiftc,所以这里不直接引用 DiagLog(它住在 IndexingCoordinator.swift 里)
+/// ——日志出口由 ModelManager 启动时装上,没装时静默丢弃。
 enum ModelLoadTiming {
     /// 进程启动的近似时刻:第一次用到时记(App 启动后第一次加载模型就是这里)
     static let processStart = Date()
-    /// 已记过首次推理的模型:可变状态装在带锁的类里(不用可变静态变量,同 IndexingCoordinator
-    /// 的 FirstErrorBox / Counter 写法)
+    /// 可变状态都装在带锁的类里(不用可变静态变量,同 IndexingCoordinator 的
+    /// FirstErrorBox / Counter 写法)
     private static let firstInferenceLedger = NameLedger()
+    private static let sinkBox = SinkBox()
+
+    /// 日志出口(ModelManager.init 里装上:写 diag.log)
+    static func setSink(_ sink: @escaping (String) -> Void) {
+        sinkBox.set(sink)
+    }
 
     /// 记一步耗时:diag.log 里一行 `模型加载[名字] 步骤 Nms(距进程启动 X.Xs)`
     static func log(_ model: String, _ step: String, from start: Date) {
         let ms = Int(Date().timeIntervalSince(start) * 1000)
-        IndexingCoordinator.DiagLog.shared.event(
-            String(format: "模型加载[%@] %@ %dms(距进程启动 %.1fs)",
-                   model, step, ms, Date().timeIntervalSince(processStart)))
+        let line = String(format: "模型加载[%@] %@ %dms(距进程启动 %.1fs)",
+                          model, step, ms, Date().timeIntervalSince(processStart))
+        sinkBox.emit(line)
     }
 
     /// 第一次推理的耗时:每个模型只记一次
@@ -50,5 +60,24 @@ private final class NameLedger: @unchecked Sendable {
         if names.contains(name) { return false }
         names.insert(name)
         return true
+    }
+}
+
+/// 带锁的日志出口:没装出口时 emit 什么都不做
+private final class SinkBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var sink: ((String) -> Void)?
+
+    func set(_ s: @escaping (String) -> Void) {
+        lock.lock()
+        sink = s
+        lock.unlock()
+    }
+
+    func emit(_ line: String) {
+        lock.lock()
+        let s = sink
+        lock.unlock()
+        s?(line)
     }
 }

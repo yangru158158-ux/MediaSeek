@@ -125,6 +125,9 @@ final class ModelManager: ObservableObject {
     var preferNativeZhQuery: Bool { true }
 
     init() {
+        // 批157:模型加载耗时的日志出口(ModelLoadTiming 自己不引用 DiagLog——那个文件
+        // 要能被人脸测试等流水线单独编译);要在任何模型加载之前装好
+        ModelLoadTiming.setSink { IndexingCoordinator.DiagLog.shared.event($0) }
         migrateImageSlot()
     }
 

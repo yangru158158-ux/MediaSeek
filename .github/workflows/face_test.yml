@@ -31,8 +31,11 @@ jobs:
         uses: actions/checkout@v4
 
       - name: 编译并运行几何测试
+        # 批157:FaceKit.swift 引用 ModelLoadTiming(计算单元开关 + 加载耗时记账),单独编译
+        # FaceKit 时必须把它带上,否则「cannot find 'ModelLoadTiming' in scope」
         run: |
           swiftc -O MediaSeek/Core/FaceKit.swift MediaSeek/Core/FaceRecoveryPolicy.swift \
+            MediaSeek/Core/ModelLoadTiming.swift \
             scripts/face_align_test.swift \
             -o /tmp/facetest -framework CoreML -framework Vision
           /tmp/facetest

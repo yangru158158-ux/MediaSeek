@@ -53,8 +53,10 @@ jobs:
           unzip -o -j "$RUNNER_TEMP/buffalo_l.zip" w600k_r50.onnx -d "$RUNNER_TEMP/face"
 
       - name: 编译并运行对齐(Vision + FaceKit,与 App 同源码)
+        # 批157:同 face_test.yml——FaceKit.swift 依赖 ModelLoadTiming.swift,单独编译要带上
         run: |
           swiftc -O MediaSeek/Core/FaceKit.swift MediaSeek/Core/FaceRecoveryPolicy.swift \
+            MediaSeek/Core/ModelLoadTiming.swift \
             scripts/face_e2e_align.swift -o /tmp/face_e2e_align
           /tmp/face_e2e_align "$RUNNER_TEMP/aligned" "$RUNNER_TEMP"/*_[0-9].jpg "$RUNNER_TEMP"/*_[0-9].png
 
