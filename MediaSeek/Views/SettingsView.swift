@@ -58,22 +58,22 @@ struct SettingsView: View {
     @ViewBuilder
     private func modelRow(_ slot: ModelSlot) -> some View {
         let state = app.models.state(for: slot)
+        // 图像槽的 standby(文本塔已就绪、图像塔按需加载)按「已就绪」显示:搜索确实已就绪,
+        // 而且这是大多数时候的状态——批158 给它配灰字和时钟图标,用户看成「显示信息不对」
+        let settled = state == .ready || state == .standby
         HStack {
             VStack(alignment: .leading, spacing: 3) {
                 Text(slot.displayName).font(.subheadline)
                 Text(stateText(state, for: slot))
                     .font(.caption)
-                    .foregroundStyle(state == .ready ? .green : .secondary)
+                    .foregroundStyle(settled ? .green : .secondary)
             }
             Spacer()
             switch state {
             case .loading:
                 ProgressView()
-            case .ready:
+            case .ready, .standby:
                 Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-            case .standby:
-                // 批158:文本塔已就绪、图像塔按需加载——不是故障,不用橙色感叹号
-                Image(systemName: "clock.arrow.circlepath").foregroundStyle(.secondary)
             default:
                 Image(systemName: "exclamationmark.circle").foregroundStyle(.orange)
             }
@@ -86,20 +86,33 @@ struct SettingsView: View {
             // 冷启动排队中 vs 真没装:loadAll 进行中的 missing 是「还没轮到」,
             // 显示「未安装」会让用户以为模型被删(2026-10-16 实测)
             return app.models.loadPassRunning ? "加载中(排队)…" : "未安装"
-        case .loading: return "加载中…"
+        case .loading:
+            // 图像槽:文本塔已就绪时还在加载 = 索引按需加载图像部分,把原因说出来(批159)
+            if slot == .image, app.models.searchReady {
+                return "正在加载图像部分(有新照片或文件要建索引)…"
+            }
+            return "加载中…"
         case .ready:
             // 批157:就绪后面带上这一轮加载用了几秒——冷启动慢时一眼看出是哪个模型
+            // 图像槽两段分开显示:文本塔的秒数 + 图像塔按需加载的秒数(批159)
+            if slot == .image, let t = app.models.imageTowerSeconds {
+                var parts = ["已就绪"]
+                if let s = app.models.loadSeconds[slot] { parts.append(String(format: "加载 %.1f 秒", s)) }
+                parts.append("图像部分按需加载 " + String(format: "%.1f 秒", t))
+                return parts.joined(separator: " · ")
+            }
             if let s = app.models.loadSeconds[slot] {
                 return String(format: "已就绪 · 加载 %.1f 秒", s)
             }
             return "已就绪"
         case .standby:
-            // 批158:文本塔已就绪(搜索可用);2GB 的图像塔等索引真有图要嵌时再加载。
-            // 秒数记的是文本塔这一轮的加载时间
+            // 图像槽专用(批158):文本塔已就绪、2GB 的图像塔等索引真有图要嵌时再加载。
+            // 批159:用户反馈这一行「显示信息不对」——原先写「搜索已就绪」,现在按平时一样
+            // 写「已就绪」,按需加载只作补充说明
             if let s = app.models.loadSeconds[slot] {
-                return String(format: "搜索已就绪 · 加载 %.1f 秒;图像部分有新照片要建索引时才加载", s)
+                return String(format: "已就绪 · 加载 %.1f 秒 · 图像部分有新照片或文件要建索引时才加载", s)
             }
-            return "搜索已就绪;图像部分有新照片要建索引时才加载"
+            return "已就绪 · 图像部分有新照片或文件要建索引时才加载"
         case .failed(let m): return "失败:\(m)"
         }
     }

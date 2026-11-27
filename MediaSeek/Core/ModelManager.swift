@@ -80,6 +80,8 @@ final class ModelManager: ObservableObject {
     private(set) var face: FaceEmbedder?
     /// 批157:每个槽位这一轮加载花了多少秒(设置页「已就绪」后面显示)
     @Published private(set) var loadSeconds: [ModelSlot: Double] = [:]
+    /// 批159:图像塔按需加载那一段用了多少秒(图像槽的 loadSeconds 记的是文本塔的,两段分开显示)
+    @Published private(set) var imageTowerSeconds: Double?
     /// 批157/158:图像塔的地址与 meta。文本塔就绪后留在这里,图像槽进 standby;等索引
     /// 按需来挂(ensureImageTower)或导入模型包后立刻挂(loadAll(loadImageTower: true))
     private var pendingImageTower: (url: URL, meta: ModelMeta)?
@@ -318,7 +320,11 @@ final class ModelManager: ObservableObject {
             setState(.failed(error.localizedDescription), for: .image)
         case .success:
             let meta = pending.meta
-            markReady(.image, since: started)
+            // 不走 markReady:图像槽那一行的「加载 X 秒」留给文本塔的加载时间,图像塔这段
+            // 另记(批159:原先把它覆盖成 11.2 秒,同一行先显示 7.8 秒后显示 11.2 秒)
+            setState(.ready, for: .image)
+            imageTowerSeconds = Date().timeIntervalSince(started)
+            ModelLoadTiming.log("ImageEmbedder", "就绪", from: started)
             if bothReady { detailText = "" }
             // 记录当前图像模型维度;IndexingCoordinator 同步前与库内向量维度
             // 比对,不一致即清空旧 clip 向量全量重建(so400m 等在线升级换模型)
