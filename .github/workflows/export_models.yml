@@ -18,7 +18,7 @@ name: Export Models
 #      新用户合计下载 3.320GB → 2.613GB
 #   ② so400m 成唯一图像模型、必装:导出失败不再 continue-on-error(缺它新装
 #      用户装不了),失败即本次不发布任何包
-#   ③ 发布不再 delete+create,改覆盖上传(见发布步骤注释)
+#   ③ 发布不再 delete+create(批162 起改「临时名上传 → 核对 → 换名」,见发布步骤注释)
 #   ④ 指纹:完整包去掉 I 段(2.0 客户端 ModelManager.installedFingerprint 同规)
 on:
   workflow_dispatch:
@@ -163,18 +163,171 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -euo pipefail
           for f in models.zip face-only.zip models-so400m.zip; do
             [ -f "$f" ] || { echo "::error::缺少 $f,本次不发布(在线源保持原样)"; exit 1; }
           done
-          # 2.0:不再 delete + create。先删后建会让在线源在整段重发期间缺席,
-          # 且上传中途失败会留下残缺的一组(缺任何一个包新用户都装不了)。改为
-          # 覆盖上传:旧资产在被新文件替换前始终可下载;清单最后传,保证清单
-          # 指向的包都已就位
-          if gh release view models >/dev/null 2>&1; then
-            gh release upload models models.zip face-only.zip models-so400m.zip --clobber
-            gh release upload models manifest.json --clobber
-          else
-            gh release create models manifest.json models.zip face-only.zip models-so400m.zip \
+          # 批162(2026-11-28):先传临时名,核对无误后再换名。此前是 gh release upload
+          # --clobber 直接按正式名覆盖。gh 的 --clobber 是「先删同名旧资产、再上传」
+          # (源码 pkg/cmd/release/shared/upload.go 的 uploadWithDelete):2.1GB 的 so400m
+          # 传完之前线上没有它;传失败(重试 3 次仍败)时旧包已删、新包没上,线上一直
+          # 缺包到下一次重发成功为止,期间重装 / 换机装不了模型。(原注释写的是「旧资产
+          # 在被新文件替换前始终可下载」,与 gh 的实际行为相反,已更正。)
+          # 现在:
+          #   ① 线上有正式名缺失就停(上次换名中断;不自动处理,什么都不动)
+          #   ② 清上次失败留下的 *.staging / *.previous
+          #   ③ 四个文件全部按「正式名.staging」上传
+          #   ④ 逐个核对线上资产的字节数与 sha256 和本地一致
+          #   ⑤ 换名:三个包先换,清单最后换
+          #   ⑥ 收尾断言:四个正式名都在,没有临时名残留
+          # ③④ 任何失败都碰不到正式名资产。⑤ 每个文件:旧包改名 .previous → 临时包改成
+          # 正式名 → 确认正式名已是新包 → 才删 .previous。旧字节在新包就位之后才删,
+          # 正式名空缺只有一次接口调用的间隔。
+          # ⑤ 中途失败(接口偶发失败)时线上会留 *.staging / *.previous,内容都是完整的,
+          # 本步骤会打印线上现状:把缺的正式名用 .staging 包顶上(或把 .previous 包改
+          # 回去),再重跑(直接重跑会被 ① 拦下,不会把事情弄得更糟):
+          #   gh api -X PATCH -f name=<正式名> repos/<owner/repo>/releases/assets/<id>
+          # 改这段先跑 scripts/sim_publish_models.py(本机用假的 gh 注入各种失败,核对不变量)
+          TAG=models
+          REPO="$GITHUB_REPOSITORY"
+          API="repos/$REPO/releases/tags/$TAG"
+          STAGE=".staging"
+          OLD=".previous"
+          FILES="models.zip face-only.zip models-so400m.zip manifest.json"
+          PHASE=start
+          gh --version
+
+          # 线上资产表:每行「id 名字 字节数 sha256:…(接口没给则为空)」,按名字排序
+          list_assets() {
+            gh api "$API" | python -c 'import json, sys; [print("%d\t%s\t%d\t%s" % (a["id"], a["name"], a["size"], a.get("digest") or "")) for a in sorted(json.loads(sys.stdin.buffer.read().decode("utf-8"))["assets"], key=lambda a: a["name"])]'
+          }
+          col() { printf '%s\n' "$1" | awk -F'\t' -v c="$2" '{print $c}'; }
+          # 取某个名字的资产行。读表失败就中止(此后的步骤都还没动正式名)
+          row_of() {
+            local r
+            r="$(list_assets | awk -F'\t' -v n="$1" '$2 == n')" \
+              || { echo "::error::读线上资产表失败($1)——中止"; exit 1; }
+            printf '%s' "$r"
+          }
+          rename_asset() {  # $1=资产行  $2=它此刻的名字  $3=新名字
+            [ "$(col "$1" 2)" = "$2" ] || { echo "::error::要改名的是 $2,线上却是 $(col "$1" 2)——中止"; exit 1; }
+            gh api -X PATCH -f name="$3" "repos/$REPO/releases/assets/$(col "$1" 1)" >/dev/null \
+              || { echo "::error::改名失败 $2 → $3"; exit 1; }
+            echo "改名 $2 → $3"
+          }
+          delete_asset() {  # $1=资产行  $2=它此刻的名字(只允许临时名;正式名资产从不删,只改名)
+            [ "$(col "$1" 2)" = "$2" ] || { echo "::error::要删的是 $2,线上却是 $(col "$1" 2)——中止"; exit 1; }
+            case "$2" in
+              *.staging|*.previous) ;;
+              *) echo "::error::拒绝删除 $2(只删临时名资产)——中止"; exit 1 ;;
+            esac
+            gh api -X DELETE "repos/$REPO/releases/assets/$(col "$1" 1)" \
+              || { echo "::error::删除失败 $2"; exit 1; }
+            echo "删除 $2"
+          }
+          # 失败时打印线上现状;换名阶段失败时附恢复办法
+          on_exit() {
+            code=$?
+            if [ "$code" -ne 0 ]; then
+              echo "本步骤失败(退出码 $code)。线上现状:"
+              list_assets || true
+              if [ "$PHASE" = swap ]; then
+                echo "::error::换名阶段中断。*.staging / *.previous 的内容都是完整的:按上面的现状把缺的正式名改回去,再重跑"
+                echo "恢复命令: gh api -X PATCH -f name=<正式名> repos/$REPO/releases/assets/<id>"
+              fi
+            fi
+          }
+          trap on_exit EXIT
+
+          if ! gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            # 首次发布:线上还没有这个 Release,没有旧资产可保护
+            gh release create "$TAG" --repo "$REPO" $FILES \
               --title "模型包(在线更新源)" \
               --notes "CI 自动发布;App 内 设置→模型在线更新 读取 manifest.json。仅限本人设备使用。"
+            list_assets
+            exit 0
           fi
+          # ① 上次运行若在换名阶段中断,线上会有正式名缺失。缺的那个文件在 *.staging /
+          #    *.previous 里内容是完整的,但该把哪一个改回正式名要看当时换到哪一步,
+          #    所以不自动处理、什么都不动,手工改一条名字后再重跑
+          for n in $FILES; do
+            row="$(row_of "$n")"
+            [ -n "$row" ] || {
+              echo "::error::线上缺少正式名 $n(上次运行可能在换名阶段中断)。本次什么都不改。"
+              echo "手工恢复: gh api -X PATCH -f name=$n repos/$REPO/releases/assets/<下表中 $n$STAGE 或 $n$OLD 的 id>"
+              exit 1
+            }
+          done
+          # ② 清上次失败留下的临时名资产(四个正式名都在;它们不被清单引用)
+          for n in $FILES; do
+            for s in "$n$STAGE" "$n$OLD"; do
+              row="$(row_of "$s")"
+              [ -z "$row" ] || delete_asset "$row" "$s"
+            done
+          done
+          # ③ 全部按临时名上传(硬链接改名,不复制 2GB)。这一段任何失败都碰不到正式名资产
+          STAGED=""
+          for n in $FILES; do
+            ln -f "$n" "$n$STAGE"
+            STAGED="$STAGED $n$STAGE"
+          done
+          gh release upload "$TAG" --repo "$REPO" $STAGED
+          # ④ 核对:线上每个临时资产的字节数、sha256 都要和本地一致。另查体量:新包不得
+          #    小于线上同名包的一半——上面两条只保证「传上去的和本地一致」,防不了导出
+          #    本身残缺或拿错文件;一半这条线很宽松,只拦量级错误
+          for n in $FILES; do
+            s="$n$STAGE"
+            row="$(row_of "$s")"
+            [ -n "$row" ] || { echo "::error::线上找不到 $s——中止,正式名资产没动"; exit 1; }
+            local_size="$(wc -c < "$s" | tr -d '[:space:]')"
+            local_sha="sha256:$(shasum -a 256 "$s" | awk '{print $1}')"
+            if [ "$(col "$row" 3)" != "$local_size" ]; then
+              echo "::error::$s 字节数不一致:线上 $(col "$row" 3),本地 $local_size——中止,正式名资产没动"; exit 1
+            fi
+            if [ -z "$(col "$row" 4)" ]; then
+              echo "::warning::$s 接口没返回 sha256,只核对了字节数"
+            elif [ "$(col "$row" 4)" != "$local_sha" ]; then
+              echo "::error::$s sha256 不一致:线上 $(col "$row" 4),本地 $local_sha——中止,正式名资产没动"; exit 1
+            fi
+            case "$n" in
+              *.zip)
+                online_row="$(row_of "$n")"
+                if [ -n "$online_row" ] && [ "$local_size" -lt "$(( $(col "$online_row" 3) / 2 ))" ]; then
+                  echo "::error::$n 新包只有 $local_size 字节,不到线上同名包($(col "$online_row" 3) 字节)的一半——导出可能残缺或拿错了文件,中止,正式名资产没动"; exit 1
+                fi ;;
+            esac
+            echo "核对通过 $s $local_size 字节 $local_sha"
+          done
+          # ⑤ 换名:三个包先换,清单最后换(清单指向的包都已就位)
+          PHASE=swap
+          for n in $FILES; do
+            new_row="$(row_of "$n$STAGE")"
+            [ -n "$new_row" ] || { echo "::error::换名前线上找不到 $n$STAGE"; exit 1; }
+            old_row="$(row_of "$n")"
+            if [ -n "$old_row" ]; then rename_asset "$old_row" "$n" "$n$OLD"; fi
+            rename_asset "$new_row" "$n$STAGE" "$n"
+            now_row="$(row_of "$n")"
+            [ "$(col "$now_row" 1)" = "$(col "$new_row" 1)" ] \
+              || { echo "::error::换名后正式名 $n 指向的不是刚核对过的资产——中止(旧包仍在 $n$OLD)"; exit 1; }
+            if [ -n "$old_row" ]; then
+              prev_row="$(row_of "$n$OLD")"
+              if [ "$(col "$prev_row" 1)" = "$(col "$old_row" 1)" ]; then
+                delete_asset "$prev_row" "$n$OLD"
+              else
+                echo "::warning::找不到刚改名的旧包 $n$OLD(id 应为 $(col "$old_row" 1)),留着不删"
+              fi
+            fi
+          done
+          # ⑥ 收尾断言:四个正式名都在,没有临时名残留
+          PHASE=final
+          if ! names="$(list_assets | awk -F'\t' '{print $2}')"; then
+            echo "::error::四个文件已换名完成,但读线上资产表失败——请到 Release 页确认"; exit 1
+          fi
+          for n in $FILES; do
+            printf '%s\n' "$names" | grep -qx "$n" || { echo "::error::发布后线上缺少 $n"; exit 1; }
+          done
+          if printf '%s\n' "$names" | grep -Eq -e "${STAGE}\$" -e "${OLD}\$"; then
+            echo "::error::发布后线上还有临时名资产残留(四个正式名都在、可用;到 Release 页删掉残留即可)"; exit 1
+          fi
+          echo "发布完成,线上资产:"
+          list_assets

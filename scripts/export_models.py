@@ -20,7 +20,7 @@
 
 可选环境变量 / 参数:
   --gemma   google/embeddinggemma        # 若 EmbeddingGemma 2 已发布,改为其 HF 仓库名即可,接口一致
-  --siglip  google/siglip2-base-b16-256  # 中文查图建议换多语言版本(以 HF 实际仓库名为准)
+  --siglip  google/siglip2-so400m-patch14-384  # 产线型号(2.0 起唯一图像模型);也可用环境变量 SIGLIP_MODEL 指定
   --fp16    使用半精度权重(默认开启,体积减半、ANE 加速)
 """
 import argparse
@@ -35,7 +35,7 @@ import coremltools as ct
 from transformers import AutoModel, AutoTokenizer
 
 GEMMA_DEFAULT = os.environ.get("EMBEDDINGGEMMA_MODEL", "google/embeddinggemma-2")
-SIGLIP_DEFAULT = os.environ.get("SIGLIP_MODEL", "google/siglip2-base-patch16-256")
+SIGLIP_DEFAULT = os.environ.get("SIGLIP_MODEL", "google/siglip2-so400m-patch14-384")  # 批162:原默认 Base 已随 2.0 停用
 
 GEMMA_MAX_SEQ = 512   # EmbeddingGemma 上下文内截断
 SIGLIP_MAX_SEQ = 64   # SigLIP 文本塔训练序列长度

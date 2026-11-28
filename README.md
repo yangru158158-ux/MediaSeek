@@ -34,7 +34,7 @@ python scripts/export_models.py --outdir MediaSeek/Resources/Models --zip MediaS
 
 - 产物同时放两处用途:`Resources/Models/` 会随 App 打包;`MediaSeekModels.zip` 也可在 App 内「设置 → 导入模型包」导入(二者选一即可)。
 - **EmbeddingGemma 2**:脚本默认 `google/embeddinggemma`。若 EmbeddingGemma 2 已发布,`--gemma <HF仓库名>` 即可,导出接口与 App 侧完全一致,无需改 Swift 代码。
-- **中文查图质量**:默认 `google/siglip2-base-b16-256` 偏英文;建议用 `--siglip <多语言版本仓库>`(如 SigLIP2 的 multilingual 检查点,以 Hugging Face 实际名称为准)提升中文直接命中的效果。即便不换,中文查询也会通过 EmbeddingGemma 的照片标签通道命中常见物体(猫/狗/海边等)。
+- **图像模型**:脚本默认 `google/siglip2-so400m-patch14-384`(2.0 起唯一图像模型,与在线模型源一致);要换型号用 `--siglip <HF仓库名>` 或环境变量 `SIGLIP_MODEL`。中文查询也会通过 EmbeddingGemma 的照片标签通道命中常见物体(猫/狗/海边等)。
 
 ### 2. 生成 Xcode 工程(需 Mac + Xcode 16+)
 
